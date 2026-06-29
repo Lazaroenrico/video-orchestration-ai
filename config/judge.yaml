@@ -6,7 +6,7 @@ gateway:
   method: POST
   headers:
     Content-Type: application/json
-    Authorization: "Bearer ${JUDGE_GATEWAY_KEY:-}"
+    Authorization: "Bearer ${AI_GATEWAY_API_KEY:-${JUDGE_GATEWAY_KEY:-}}"
   timeout_seconds: 30
 
 # Template do corpo da requisição. Os placeholders {criteria_json} e {subject_json}

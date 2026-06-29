@@ -1,6 +1,6 @@
 # PROGRESS — handoff
 
-Estado em **2026-06-29**. Suíte: **87 passando, 1 skip** (o teste `--live` do Judge,
+Estado em **2026-06-29**. Suíte: **122 passando, 1 skip** (o teste `--live` do Judge,
 opt-in, pulado sem `JUDGE_GATEWAY_URL`) + 1 warning benigno do LangGraph (ver falha #5).
 Rodar: `rtk proxy python -m pytest`.
 
@@ -13,7 +13,7 @@ Rodar: `rtk proxy python -m pytest`.
 - [x] `nodes/stages.py` + `nodes/base.py` — os 10 stages como nodes
 - [x] `registry.py` — provider→adapter (mock + replicate)
 - [x] `graph/builder.py` — StateGraph (subgrafo per-item + fan-out via Send) (`test_builder.py`)
-- [x] `graph/checkpoint.py` — AsyncSqliteSaver (`test_checkpoint.py`)
+- [x] `graph/checkpoint.py` — SQLite async-compatible saver (`test_checkpoint.py`)
 - [x] `runner.py` + `cli.py` — run/status/resume/list + relatório (`test_graph_e2e.py`, `test_cli.py`)
 - [x] `adapters/judge.py` — gateway config-driven + cassette/replay + eval (`test_judge_eval.py`)
 - [x] **Fase de subagentes (Opus coordena, Sonnet executa):**
@@ -25,12 +25,59 @@ Rodar: `rtk proxy python -m pytest`.
       `LLMPort.generate_concepts` atualizado). Testes: `test_feedback_loop.py` (2), `test_concept_bias.py` (4).
 - [x] Docs — `CLAUDE.md`, `docs/DECISIONS.md`, este arquivo, `README.md`
 
-## Próximos passos (v2)
+## MVP — Vercel AI Gateway (D20) — em andamento
 
-1. **Adapters reais restantes**, um a um (B já fez o de vídeo Replicate; manter mocks p/ testes):
-   - LLM: Claude Opus 4.8 (conceitos/scripts) — implementar `LLMPort`.
-   - Creator: GPT Image 2 + Topaz + ElevenLabs — `CreatorPort`.
-   - Ligar o `replicate` de verdade: `video: replicate` em `providers.yaml` + `REPLICATE_API_TOKEN`.
+Decisão: usar o Vercel AI Gateway como ponto único para Claude e GPT Image 2.
+Suíte atual: **132 passed, 1 skipped**. Nenhum teste muda nestas tasks.
+Ordem de execução: Task 5 → 1 → 2 → 3 → 4 → 6.
+
+- [ ] **Task 1** `adapters/openai_image.py` — adicionar `build_openai_image_vercel_adapter`
+      (aponta para `https://ai-gateway.vercel.sh/openai/v1`, usa `AI_GATEWAY_API_KEY`)
+- [ ] **Task 2** `adapters/creator_real.py` — adicionar `build_real_creator_vercel_adapter`
+      (OpenAI via gateway + Topaz direto + ElevenLabs direto)
+- [ ] **Task 3** `registry.py` — registrar `"creator_real_vercel"`
+- [ ] **Task 4** `config/providers.yaml` — `llm: vercel_gateway_llm`, `creator: creator_real_vercel`,
+      `video: replicate`
+- [ ] **Task 5** `config/judge.yaml` — header Authorization aceitar `AI_GATEWAY_API_KEY`
+- [ ] **Task 6** `.env.example` — marcar `TOPAZ_API_KEY` e `ELEVENLABS_API_KEY` como live
+
+**Env vars para MVP:** `AI_GATEWAY_API_KEY`, `TOPAZ_API_KEY`, `ELEVENLABS_API_KEY`,
+`REPLICATE_API_TOKEN`. Tabela completa em **D20**.
+
+**Smoke test pós-implementação:**
+```bash
+# CI (sem chaves — deve passar 100%)
+rtk proxy python -m pytest
+
+# Instancia os adapters reais
+AI_GATEWAY_API_KEY=<chave> TOPAZ_API_KEY=<chave> ELEVENLABS_API_KEY=<chave> REPLICATE_API_TOKEN=<chave> \
+python -c "
+from orchestrator.config import load_pipeline, load_providers
+from orchestrator.registry import build_adapter_from_providers
+p = load_pipeline(); prov = load_providers()
+a = build_adapter_from_providers(prov, p)
+print(type(a._by_role['llm']).__name__)      # AnthropicLLMAdapter
+print(type(a._by_role['creator']).__name__)  # RealCreatorAdapter
+print(type(a._by_role['video']).__name__)    # ReplicateVideoAdapter
+"
+
+# Run ponta a ponta
+orchestrator run --batch 2 --offer "test product" --platform tiktok
+```
+
+## Próximos passos (v2, pós-MVP)
+
+1. **Adapters reais** — *ligações criadas* (ver D17/D18); falta só chave no ambiente + flip:
+   - [x] LLM via Vercel AI Gateway (`adapters/anthropic_llm.py`) — `llm: vercel_gateway_llm`
+         + `AI_GATEWAY_API_KEY` ou `VERCEL_OIDC_TOKEN`.
+   - [x] LLM direto Anthropic (`adapters/anthropic_llm.py`) — backward-compatible/legado;
+         não é o caminho live recomendado do projeto.
+   - [x] Creator: GPT Image 2 + Topaz + ElevenLabs (`adapters/creator_real.py`) — `creator: creator_real`
+         + `OPENAI_API_KEY`/`TOPAZ_API_KEY`/`ELEVENLABS_API_KEY`.
+   - [x] Vídeo Replicate (`adapters/replicate_video.py`, D14) — `video: replicate` + `REPLICATE_API_TOKEN`.
+   - **Pendente p/ rodar real:** (a) expor as chaves no ambiente; (b) contratos HTTP de
+     Topaz/ElevenLabs são assumidos (docstrings) — validar contra APIs reais com as chaves;
+     (c) Steps 8/9 seguem mock (sem API única). Ver MVP acima (D20).
 2. **Step 9 (distribuição) real** (cloud phones/proxies/scheduler) — hoje mock.
 3. **Topologia data-driven**: mover nodes/edges para o `pipeline.yaml` (hoje fixa no builder).
 4. **LangSmith**: setar `LANGSMITH_TRACING=true`/`LANGSMITH_API_KEY` p/ tracing; opcional
@@ -49,8 +96,9 @@ Rodar: `rtk proxy python -m pytest`.
 
 2. **`SqliteSaver does not support async methods` (NotImplementedError)**
    - Causa: grafo roda via `ainvoke`, mas o checkpointer era o `SqliteSaver` sync.
-   - Correção: usar `AsyncSqliteSaver` (+ `aiosqlite`) via context manager async; ajustar
-     os testes de checkpoint para a interface async (`aget_state`). (D9)
+   - Correção: usar `AsyncSqliteCompatSaver`, uma fachada async sobre `SqliteSaver`,
+     porque `aiosqlite.connect` trava neste ambiente; ajustar os testes de checkpoint
+     para a interface async (`aget_state`). (D9)
 
 3. **`KeyError: '\n  "model"'` ao montar a request do Judge**
    - Causa: `str.format` interpretava as chaves literais do template JSON como campos.

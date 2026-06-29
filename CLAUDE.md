@@ -280,3 +280,6 @@ Both are idempotent: re-runs replace the block bracketed by
 `<!-- ai-memory:start -->` / `<!-- ai-memory:end -->` markers without
 disturbing the rest of the file.
 <!-- ai-memory:end -->
+` markers without
+disturbing the rest of the file.
+<!-- ai-memory:end -->

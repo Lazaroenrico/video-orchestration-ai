@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 
 import click
+from dotenv import load_dotenv
 
 from orchestrator import runner
 from orchestrator.config import default_db_path, load_pipeline, load_providers
@@ -12,6 +13,7 @@ from orchestrator.config import default_db_path, load_pipeline, load_providers
 @click.group()
 def cli() -> None:
     """Orquestrador da pipeline de AI UGC (v1 — mock/dry-run)."""
+    load_dotenv(".env", override=False)
 
 
 @cli.command()

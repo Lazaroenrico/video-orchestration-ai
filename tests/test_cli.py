@@ -1,4 +1,6 @@
 """Smoke tests da CLI (run/status/resume/list)."""
+import os
+
 from click.testing import CliRunner
 
 from orchestrator.cli import cli
@@ -65,3 +67,45 @@ def test_cli_loop_requires_feedback_store(tmp_path):
         "loop", "--cycles", "2", "--db", db, "--config-dir", "config",
     ])
     assert res.exit_code != 0
+
+
+def test_cli_loads_dotenv_from_cwd(monkeypatch):
+    cr = CliRunner()
+    observed = {}
+
+    def fake_list_runs(_db):
+        observed["gateway"] = os.environ.get("AI_GATEWAY_API_KEY")
+        return []
+
+    monkeypatch.delenv("AI_GATEWAY_API_KEY", raising=False)
+    monkeypatch.setattr("orchestrator.cli.runner.list_runs", fake_list_runs)
+
+    with cr.isolated_filesystem():
+        with open(".env", "w", encoding="utf-8") as f:
+            f.write("AI_GATEWAY_API_KEY=from-dotenv\n")
+
+        res = cr.invoke(cli, ["list"])
+
+    assert res.exit_code == 0, res.output
+    assert observed["gateway"] == "from-dotenv"
+
+
+def test_cli_does_not_override_existing_env_with_dotenv(monkeypatch):
+    cr = CliRunner()
+    observed = {}
+
+    def fake_list_runs(_db):
+        observed["gateway"] = os.environ.get("AI_GATEWAY_API_KEY")
+        return []
+
+    monkeypatch.setenv("AI_GATEWAY_API_KEY", "already-exported")
+    monkeypatch.setattr("orchestrator.cli.runner.list_runs", fake_list_runs)
+
+    with cr.isolated_filesystem():
+        with open(".env", "w", encoding="utf-8") as f:
+            f.write("AI_GATEWAY_API_KEY=from-dotenv\n")
+
+        res = cr.invoke(cli, ["list"])
+
+    assert res.exit_code == 0, res.output
+    assert observed["gateway"] == "already-exported"

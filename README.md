@@ -30,6 +30,19 @@ orchestrator list                                                   # lista runs
 orchestrator loop --cycles 3 --feedback-store fb.json --config-dir config  # N ciclos encadeados (loop de feedback)
 ```
 
+## Ativar LLM via Vercel AI Gateway
+
+```bash
+cp .env.example .env
+# preencha AI_GATEWAY_API_KEY no .env
+```
+
+Em `config/providers.yaml`, troque `llm: mock` por `llm: vercel_gateway_llm`, depois rode:
+
+```bash
+orchestrator run --batch 3 --offer "serum X" --config-dir config
+```
+
 Passo a passo completo, com a saída esperada de cada comando e como lê-la:
 **[`docs/DEMO.md`](docs/DEMO.md)**.
 

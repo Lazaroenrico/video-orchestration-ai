@@ -1,16 +1,31 @@
-"""Resolução de adapters a partir dos configs (provider -> adapter).
+"""Resolução de adapters a partir dos configs (papel -> adapter).
 
-No v1 só existe o ``mock``. Para ligar um provedor real, registre aqui o adapter
-(implementando os Protocols de ``adapters/base.py``) e troque o nome em
-``config/providers.yaml`` — o grafo não muda.
+Cada **papel** da pipeline (llm, creator, video, qc, assembly, distribution) é
+mapeado em ``config/providers.yaml`` para o nome de um adapter registrado aqui.
+``build_adapter_from_providers`` monta um ``CompositeAdapter`` que roteia cada
+método para o adapter do papel correspondente — assim dá para misturar adapters
+reais e mock por papel (ex.: ``llm: anthropic`` + resto ``mock``) sem tocar o grafo.
+
+Papéis não especificados em ``providers.yaml`` caem em ``mock`` (dry-run, custo zero).
 """
 from __future__ import annotations
 
 import os
 from typing import Any, Callable
 
+from orchestrator.adapters.anthropic_llm import (
+    build_anthropic_llm_adapter,
+    build_vercel_gateway_llm_adapter,
+)
+from orchestrator.adapters.creator_real import (
+    build_real_creator_adapter,
+    build_real_creator_vercel_adapter,
+)
 from orchestrator.adapters.mock import MockAdapter
 from orchestrator.adapters.replicate_video import ReplicateVideoAdapter
+
+# Papéis que o grafo exerce (cada método de node mapeia para um destes).
+ROLES = ("llm", "creator", "video", "qc", "assembly", "distribution")
 
 
 def _build_replicate(pipeline: dict[str, Any]) -> ReplicateVideoAdapter:
@@ -27,11 +42,15 @@ _ADAPTERS: dict[str, Callable[[dict[str, Any]], Any]] = {
         tiers=pipeline["tiers"], latency=float(pipeline.get("latency", 0.0))
     ),
     "replicate": _build_replicate,
+    "anthropic": build_anthropic_llm_adapter,
+    "vercel_gateway_llm": build_vercel_gateway_llm_adapter,
+    "creator_real": build_real_creator_adapter,
+    "creator_real_vercel": build_real_creator_vercel_adapter,
 }
 
 
 def resolve_adapter(name: str, pipeline: dict[str, Any]) -> Any:
-    """Instancia o adapter pelo nome (ex.: 'mock')."""
+    """Instancia o adapter pelo nome (ex.: 'mock', 'anthropic')."""
     if name not in _ADAPTERS:
         raise KeyError(f"adapter desconhecido: {name!r} (registrados: {sorted(_ADAPTERS)})")
     return _ADAPTERS[name](pipeline)
@@ -42,9 +61,60 @@ def register_adapter(name: str, factory: Callable[[dict[str, Any]], Any]) -> Non
     _ADAPTERS[name] = factory
 
 
+class CompositeAdapter:
+    """Roteia cada método de port para o adapter do papel correspondente.
+
+    Os nodes chamam um único objeto adapter (via ``config['configurable']['adapter']``)
+    e esperam que ele implemente TODOS os ports. Este composite delega cada chamada
+    para a instância configurada para aquele papel em ``providers.yaml``.
+    """
+
+    def __init__(self, by_role: dict[str, Any]) -> None:
+        self._by_role = by_role
+
+    # --- llm (Steps 1 e 2) ---
+    async def generate_concepts(self, *args: Any, **kwargs: Any) -> Any:
+        return await self._by_role["llm"].generate_concepts(*args, **kwargs)
+
+    async def write_script(self, *args: Any, **kwargs: Any) -> Any:
+        return await self._by_role["llm"].write_script(*args, **kwargs)
+
+    # --- creator (Step 3) ---
+    async def build_creator(self, *args: Any, **kwargs: Any) -> Any:
+        return await self._by_role["creator"].build_creator(*args, **kwargs)
+
+    # --- video (Steps 4 e 5) ---
+    async def generate_clip(self, *args: Any, **kwargs: Any) -> Any:
+        return await self._by_role["video"].generate_clip(*args, **kwargs)
+
+    # --- qc (Step 7) ---
+    async def qc_check(self, *args: Any, **kwargs: Any) -> Any:
+        return await self._by_role["qc"].qc_check(*args, **kwargs)
+
+    # --- assembly (Step 8) ---
+    async def assemble(self, *args: Any, **kwargs: Any) -> Any:
+        return await self._by_role["assembly"].assemble(*args, **kwargs)
+
+    # --- distribution (Step 9) ---
+    async def distribute(self, *args: Any, **kwargs: Any) -> Any:
+        return await self._by_role["distribution"].distribute(*args, **kwargs)
+
+
 def build_adapter_from_providers(
     providers: dict[str, Any], pipeline: dict[str, Any]
-) -> Any:
-    """No v1 todos os papéis usam um único adapter; usa o mapeado em 'video'."""
-    name = providers.get("adapters", {}).get("video", "mock")
-    return resolve_adapter(name, pipeline)
+) -> CompositeAdapter:
+    """Monta o CompositeAdapter a partir do mapa papel->nome de ``providers.yaml``.
+
+    Papéis ausentes caem em ``mock``. Cada nome distinto é instanciado UMA vez
+    (compartilhado entre os papéis que o referenciam) — preserva o determinismo do
+    mock e evita construir adapters reais (e exigir suas chaves) sem necessidade.
+    """
+    names = providers.get("adapters", {})
+    cache: dict[str, Any] = {}
+    by_role: dict[str, Any] = {}
+    for role in ROLES:
+        name = names.get(role, "mock")
+        if name not in cache:
+            cache[name] = resolve_adapter(name, pipeline)
+        by_role[role] = cache[name]
+    return CompositeAdapter(by_role)

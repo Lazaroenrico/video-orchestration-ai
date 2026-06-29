@@ -11,7 +11,7 @@ from typing import Any, Optional
 
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, START, StateGraph
-from langgraph.types import Send
+from langgraph.types import Command, Send
 
 from orchestrator.graph.routing import route_after_qc, route_after_script
 from orchestrator.graph.state import BatchState, Item, new_item
@@ -34,30 +34,37 @@ def build_item_graph(pipeline: dict[str, Any]):
     """Subgrafo per-item com as conditional edges (tier routing + QC gate)."""
     tns = tier_names(pipeline)
     max_attempts = int(pipeline.get("qc", {}).get("max_attempts", 3))
+    qc_map: dict[str, str] = {t: t for t in tns}
+    qc_map.update({"assembly": "assembly", "drop": "drop"})
 
     sg = StateGraph(Item)
     sg.add_node("script", node_script)
     for t in tns:
         sg.add_node(t, make_gen_node(t))
     sg.add_node("product_demo", node_product_demo)
-    sg.add_node("qc", node_qc)
+
+    async def node_qc_and_route(state: dict[str, Any], config: RunnableConfig) -> Command:
+        update = await node_qc(state, config)
+        updated_item = as_item(state).model_copy(update=update)
+        destination = route_after_qc(updated_item, max_attempts, tns)
+        return Command(update=update, goto=destination)
+
+    sg.add_node("qc", node_qc_and_route, destinations=qc_map)
     sg.add_node("assembly", node_assembly)
     sg.add_node("distribution", node_distribution)
     sg.add_node("drop", node_drop)
 
     sg.add_edge(START, "script")
+
+    async def route_after_script_node(state: dict[str, Any]) -> str:
+        return route_after_script(as_item(state), tns)
+
     sg.add_conditional_edges(
-        "script", lambda s: route_after_script(as_item(s), tns), {t: t for t in tns}
+        "script", route_after_script_node, {t: t for t in tns}
     )
     for t in tns:
         sg.add_edge(t, "product_demo")
     sg.add_edge("product_demo", "qc")
-
-    qc_map: dict[str, str] = {t: t for t in tns}
-    qc_map.update({"assembly": "assembly", "drop": "drop"})
-    sg.add_conditional_edges(
-        "qc", lambda s: route_after_qc(as_item(s), max_attempts, tns), qc_map
-    )
     sg.add_edge("assembly", "distribution")
     sg.add_edge("distribution", END)
     sg.add_edge("drop", END)
@@ -86,10 +93,12 @@ def build_graph(pipeline: dict[str, Any], checkpointer: Optional[Any] = None):
     g.add_node("concepts", node_concepts)
 
     async def process_item(state: dict[str, Any], config: RunnableConfig) -> dict[str, Any]:
-        # 'state' é o payload do Send (um Item serializado).
         result = await item_app.ainvoke(state, _sub_config(config))
         item = as_item(result)
-        return {"results": [item], "total_cost_usd": item.cost_usd}
+        return {
+            "results": [item],
+            "total_cost_usd": item.cost_usd,
+        }
 
     g.add_node("process_item", process_item)
     g.add_node("feedback", node_feedback)
@@ -97,14 +106,13 @@ def build_graph(pipeline: dict[str, Any], checkpointer: Optional[Any] = None):
     g.add_edge(START, "roster")
     g.add_edge("roster", "concepts")
 
-    def fan_out(state: dict[str, Any]) -> list[Send]:
+    async def fan_out(state: dict[str, Any]) -> list[Send]:
         concepts = state.get("concepts", [])
         roster = state.get("roster") or [{}]
         sends: list[Send] = []
         for i, concept in enumerate(concepts):
             creator = roster[i % len(roster)]
             item = new_item(concept=concept, creator_ref=creator.get("id"))
-            # id determinístico (do conceito) -> QC/resultados reproduzíveis entre runs
             cid = concept.get("id")
             if cid:
                 item.id = str(cid)
