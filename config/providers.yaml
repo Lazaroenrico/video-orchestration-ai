@@ -1,0 +1,11 @@
+# Mapa provider -> adapter. Tudo "mock" no v1 (dry-run, custo zero).
+# Para ligar uma integração real depois, troque "mock" pelo nome do adapter real
+# registrado em src/orchestrator/registry.py — sem mexer no grafo.
+adapters:
+  llm: mock           # Claude Opus 4.8 — conceitos (Step 1), scripts (Step 2), QC textual (Step 7)
+  image: mock         # GPT Image 2 + Topaz — creator (Step 3)
+  voice: mock         # ElevenLabs — voz do creator (Step 3)
+  video: mock         # LTX / Kling / Seedance via Replicate/fal/AtlasCloud (Steps 4 e 5)
+  assembly: mock      # montagem/edição (Step 8)
+  distribution: mock  # portfolio de contas (Step 9)
+  judge: gateway      # LLM Judge via API Gateway (config em judge.yaml)

@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+build/
+dist/
+
+# Estado de runs (checkpoints sqlite)
+.orchestrator/
+
+# Testes / cobertura
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml

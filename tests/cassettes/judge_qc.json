@@ -1,0 +1,22 @@
+{
+  "clip-1": {
+    "status": 200,
+    "json": { "output": { "score": 0.93, "verdict": "pass" } }
+  },
+  "clip-2": {
+    "status": 200,
+    "json": { "output": { "score": 0.86, "verdict": "pass" } }
+  },
+  "clip-3": {
+    "status": 200,
+    "json": { "output": { "score": 0.41, "verdict": "fail" } }
+  },
+  "clip-4": {
+    "status": 200,
+    "json": { "output": { "score": 0.72, "verdict": "fail" } }
+  },
+  "clip-5": {
+    "status": 200,
+    "json": { "output": { "score": 0.95, "verdict": "pass" } }
+  }
+}

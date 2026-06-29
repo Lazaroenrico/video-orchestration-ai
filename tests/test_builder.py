@@ -1,0 +1,59 @@
+"""Testes da montagem e execução do grafo (mock, ponta a ponta no nível de unidade)."""
+import pytest
+
+from orchestrator.graph.builder import build_graph, build_item_graph
+from orchestrator.graph.state import Item
+
+
+def test_item_graph_has_expected_nodes(pipeline_cfg):
+    app = build_item_graph(pipeline_cfg)
+    nodes = set(app.get_graph().nodes)
+    for n in ("script", "ltx", "kling", "seedance", "product_demo", "qc", "assembly", "distribution", "drop"):
+        assert n in nodes
+
+
+def test_top_graph_has_expected_nodes(pipeline_cfg):
+    app = build_graph(pipeline_cfg)
+    nodes = set(app.get_graph().nodes)
+    for n in ("roster", "concepts", "process_item", "feedback"):
+        assert n in nodes
+
+
+async def test_item_subgraph_runs_one_item_to_distribution(adapter, pipeline_cfg):
+    app = build_item_graph(pipeline_cfg)
+    cfg = {"configurable": {"adapter": adapter, "pipeline": pipeline_cfg, "run": {"platform": "tiktok"}}}
+    item = Item(concept={"hook": "h", "hook_style": "problem", "offer": "x"}, creator_ref="creator-0")
+    out = await app.ainvoke(item.model_dump(), cfg)
+    result = Item.model_validate(out)
+    # terminou OU publicado OU descartado (nunca preso no meio)
+    assert result.distributed or result.dropped
+    assert result.script is not None
+    assert result.cost_usd > 0
+
+
+async def test_top_graph_fans_out_and_aggregates(run_config):
+    app = build_graph(run_config["configurable"]["pipeline"])
+    init = {"run_id": "t-builder", "config": {"offer": "serum", "batch_size": 6}}
+    out = await app.ainvoke(init, run_config)
+    results = out["results"]
+    assert len(results) == 6                       # fan-out de 6 conceitos
+    # cada item termina publicado ou descartado
+    assert all(r.distributed or r.dropped for r in results)
+    # custo total = soma dos itens, > 0
+    assert out["total_cost_usd"] == pytest.approx(sum(r.cost_usd for r in results))
+    assert out["total_cost_usd"] > 0
+    # feedback (Step 10) agregado
+    fb = out["feedback"]
+    assert fb["produced"] == 6
+    assert fb["approved"] + fb["dropped"] == 6
+
+
+async def test_qc_loop_is_exercised(run_config):
+    # Com fail_rate=0.34, ao menos um item deve ter regenerado (attempts >= 1).
+    app = build_graph(run_config["configurable"]["pipeline"])
+    init = {"run_id": "t-loop", "config": {"offer": "serum", "batch_size": 12}}
+    out = await app.ainvoke(init, run_config)
+    assert any(r.attempts >= 1 for r in out["results"])
+    # itens regenerados acumulam custo de mais de um tier (escalonamento)
+    regen = [r for r in out["results"] if r.attempts >= 1]
+    assert all(len(r.clips) >= 2 for r in regen)

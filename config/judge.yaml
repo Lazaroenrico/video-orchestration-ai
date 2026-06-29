@@ -1,0 +1,27 @@
+# LLM Judge — adapter config-driven via API Gateway. O contrato exato do gateway
+# é decidido depois; aqui tudo é parametrizável (url, headers, corpo, extração).
+# Placeholders ${VAR:-default} são resolvidos a partir do ambiente.
+gateway:
+  url: "${JUDGE_GATEWAY_URL:-https://gateway.example/v1/judge}"
+  method: POST
+  headers:
+    Content-Type: application/json
+    Authorization: "Bearer ${JUDGE_GATEWAY_KEY:-}"
+  timeout_seconds: 30
+
+# Template do corpo da requisição. Os placeholders {criteria_json} e {subject_json}
+# são substituídos por JSON (serializado) no momento da chamada.
+body_template: |
+  {
+    "model": "qc-judge",
+    "input": {
+      "criteria": {criteria_json},
+      "subject": {subject_json}
+    }
+  }
+
+# Extração da resposta (caminho pontilhado a.b.c sobre o JSON de resposta).
+response:
+  score_path: "output.score"        # número 0..1
+  verdict_path: "output.verdict"    # "pass" | "fail" (opcional; senão deriva do score)
+  pass_threshold: 0.8
