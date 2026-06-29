@@ -21,6 +21,8 @@ from typing import Any, Optional
 
 from anthropic import AsyncAnthropic
 
+from orchestrator import stream_bus
+
 _HOOK_STYLES = ["problem", "curiosity", "bold_claim", "emotional", "social_proof"]
 _FORMATS = ["talking_head", "demo", "reaction"]
 DEFAULT_VERCEL_GATEWAY_BASE_URL = "https://ai-gateway.vercel.sh"
@@ -119,13 +121,23 @@ class AnthropicLLMAdapter:
             f"Return exactly {n} items in the 'concepts' array."
         )
 
-        response = await self._client.messages.create(
+        api_kwargs: dict[str, Any] = dict(
             model=self.model,
             max_tokens=16000,
             thinking={"type": "adaptive"},
             output_config={"format": {"type": "json_schema", "schema": _CONCEPT_SCHEMA}},
             messages=[{"role": "user", "content": user_prompt}],
         )
+
+        if stream_bus.is_streaming():
+            stream_bus.emit_token({"type": "llm_start", "stage": "concepts"})
+            async with self._client.messages.stream(**api_kwargs) as s:
+                async for text in s.text_stream:
+                    stream_bus.emit_token({"type": "llm_token", "stage": "concepts", "token": text})
+                response = await s.get_final_message()
+            stream_bus.emit_token({"type": "llm_end", "stage": "concepts"})
+        else:
+            response = await self._client.messages.create(**api_kwargs)
 
         if response.stop_reason == "refusal":
             raise RuntimeError(
@@ -200,12 +212,23 @@ class AnthropicLLMAdapter:
             "Structure the script with clearly labeled sections: HOOK, BODY, CTA."
         )
 
-        response = await self._client.messages.create(
+        api_kwargs = dict(
             model=self.model,
             max_tokens=2000,
             thinking={"type": "adaptive"},
             messages=[{"role": "user", "content": user_prompt}],
         )
+        stage_label = f"script:{concept.get('id', '')}"
+
+        if stream_bus.is_streaming():
+            stream_bus.emit_token({"type": "llm_start", "stage": stage_label})
+            async with self._client.messages.stream(**api_kwargs) as s:
+                async for text in s.text_stream:
+                    stream_bus.emit_token({"type": "llm_token", "stage": stage_label, "token": text})
+                response = await s.get_final_message()
+            stream_bus.emit_token({"type": "llm_end", "stage": stage_label})
+        else:
+            response = await self._client.messages.create(**api_kwargs)
 
         if response.stop_reason == "refusal":
             raise RuntimeError(
@@ -255,6 +278,9 @@ def build_vercel_gateway_llm_adapter(pipeline: dict[str, Any]) -> AnthropicLLMAd
     base_url = (
         os.environ.get("AI_GATEWAY_BASE_URL")
         or DEFAULT_VERCEL_GATEWAY_BASE_URL
-    )
+    ).rstrip("/")
+    # O Anthropic SDK acrescenta /v1 automaticamente — remover se já incluído
+    if base_url.endswith("/v1"):
+        base_url = base_url[:-3]
     client = AsyncAnthropic(api_key=token, base_url=base_url)
     return AnthropicLLMAdapter(model=model, client=client)

@@ -3,6 +3,18 @@ import pytest
 
 from orchestrator.adapters.mock import MockAdapter
 
+# providers.yaml pode ter adapters reais (MVP). Garantir que todos os testes
+# usem mock — testes que precisam de adapters reais optam via --live.
+_MOCK_PROVIDERS = {
+    "adapters": {r: "mock" for r in ("llm", "creator", "video", "qc", "assembly", "distribution")},
+}
+
+
+@pytest.fixture(autouse=True)
+def _force_mock_providers(monkeypatch):
+    # Patch no namespace do cli (importou load_providers por nome)
+    monkeypatch.setattr("orchestrator.cli.load_providers", lambda *a, **kw: _MOCK_PROVIDERS)
+
 
 def pytest_addoption(parser):
     parser.addoption(

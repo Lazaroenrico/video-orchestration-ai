@@ -25,21 +25,20 @@ Rodar: `rtk proxy python -m pytest`.
       `LLMPort.generate_concepts` atualizado). Testes: `test_feedback_loop.py` (2), `test_concept_bias.py` (4).
 - [x] Docs — `CLAUDE.md`, `docs/DECISIONS.md`, este arquivo, `README.md`
 
-## MVP — Vercel AI Gateway (D20) — em andamento
+## MVP — Vercel AI Gateway (D20) — ✅ CONCLUÍDO
 
 Decisão: usar o Vercel AI Gateway como ponto único para Claude e GPT Image 2.
-Suíte atual: **132 passed, 1 skipped**. Nenhum teste muda nestas tasks.
-Ordem de execução: Task 5 → 1 → 2 → 3 → 4 → 6.
+Suíte: **132 passed, 1 skipped**. Nenhum teste mudou nestas tasks.
 
-- [ ] **Task 1** `adapters/openai_image.py` — adicionar `build_openai_image_vercel_adapter`
+- [x] **Task 1** `adapters/openai_image.py` — `build_openai_image_vercel_adapter`
       (aponta para `https://ai-gateway.vercel.sh/openai/v1`, usa `AI_GATEWAY_API_KEY`)
-- [ ] **Task 2** `adapters/creator_real.py` — adicionar `build_real_creator_vercel_adapter`
+- [x] **Task 2** `adapters/creator_real.py` — `build_real_creator_vercel_adapter`
       (OpenAI via gateway + Topaz direto + ElevenLabs direto)
-- [ ] **Task 3** `registry.py` — registrar `"creator_real_vercel"`
-- [ ] **Task 4** `config/providers.yaml` — `llm: vercel_gateway_llm`, `creator: creator_real_vercel`,
+- [x] **Task 3** `registry.py` — registrado `"creator_real_vercel"`
+- [x] **Task 4** `config/providers.yaml` — `llm: vercel_gateway_llm`, `creator: creator_real_vercel`,
       `video: replicate`
-- [ ] **Task 5** `config/judge.yaml` — header Authorization aceitar `AI_GATEWAY_API_KEY`
-- [ ] **Task 6** `.env.example` — marcar `TOPAZ_API_KEY` e `ELEVENLABS_API_KEY` como live
+- [x] **Task 5** `config/judge.yaml` — header Authorization aceita `AI_GATEWAY_API_KEY`
+- [x] **Task 6** `.env.example` — `TOPAZ_API_KEY` e `ELEVENLABS_API_KEY` marcados `[LIVE]`
 
 **Env vars para MVP:** `AI_GATEWAY_API_KEY`, `TOPAZ_API_KEY`, `ELEVENLABS_API_KEY`,
 `REPLICATE_API_TOKEN`. Tabela completa em **D20**.

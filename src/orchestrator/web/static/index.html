@@ -1,0 +1,552 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>UGC Orchestrator</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg:       #0d1117;
+    --surface:  #161b22;
+    --border:   #30363d;
+    --primary:  #58a6ff;
+    --success:  #3fb950;
+    --warning:  #d29922;
+    --error:    #f85149;
+    --muted:    #8b949e;
+    --text:     #c9d1d9;
+    --text-hi:  #e6edf3;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace;
+    font-size: 13px;
+    line-height: 1.5;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  /* ── Header ── */
+  header {
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    padding: 10px 20px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-shrink: 0;
+  }
+  header h1 { font-size: 15px; color: var(--text-hi); font-weight: 600; }
+  #run-badge {
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 20px;
+    background: var(--border);
+    color: var(--muted);
+  }
+  #run-badge.running  { background: #1f3d6e; color: var(--primary); }
+  #run-badge.done     { background: #1a3326; color: var(--success); }
+  #run-badge.error    { background: #3d1f1f; color: var(--error);   }
+  #run-id-label { font-size: 11px; color: var(--muted); font-family: monospace; }
+
+  /* ── Layout ── */
+  .layout {
+    display: grid;
+    grid-template-columns: 220px 1fr 300px;
+    grid-template-rows: auto 1fr;
+    flex: 1;
+    overflow: hidden;
+    gap: 0;
+  }
+
+  /* ── Panel base ── */
+  .panel {
+    border-right: 1px solid var(--border);
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
+  .panel-title {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: .05em;
+    color: var(--muted);
+    padding: 10px 14px 6px;
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+
+  /* ── Controls ── */
+  #controls { grid-column: 1; grid-row: 1 / 3; }
+
+  .form-group { padding: 10px 14px; }
+  .form-group label { display: block; font-size: 11px; color: var(--muted); margin-bottom: 4px; }
+  .form-group input, .form-group select {
+    width: 100%;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text-hi);
+    padding: 6px 8px;
+    font-size: 12px;
+  }
+  .form-group input:focus, .form-group select:focus {
+    outline: none;
+    border-color: var(--primary);
+  }
+  #btn-start {
+    margin: 8px 14px;
+    width: calc(100% - 28px);
+    background: var(--primary);
+    color: #0d1117;
+    border: none;
+    border-radius: 6px;
+    padding: 8px;
+    font-weight: 600;
+    cursor: pointer;
+    font-size: 12px;
+  }
+  #btn-start:hover { opacity: .9; }
+  #btn-start:disabled { opacity: .4; cursor: not-allowed; }
+
+  .divider { border: none; border-top: 1px solid var(--border); margin: 6px 0; }
+
+  /* ── Summary box ── */
+  #summary-box {
+    margin: 0 14px 10px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 8px 10px;
+    font-size: 11px;
+    display: none;
+  }
+  #summary-box.visible { display: block; }
+  #summary-box .row { display: flex; justify-content: space-between; padding: 2px 0; }
+  #summary-box .row .val { color: var(--text-hi); font-weight: 600; }
+
+  /* ── Pipeline steps ── */
+  #pipeline { grid-column: 2; grid-row: 1; overflow-y: auto; border-bottom: 1px solid var(--border); }
+
+  .steps-grid {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: 8px;
+    padding: 10px 14px;
+  }
+
+  .step-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px;
+    text-align: center;
+    transition: border-color .2s, background .2s;
+  }
+  .step-card .step-num  { font-size: 10px; color: var(--muted); }
+  .step-card .step-icon { font-size: 20px; margin: 4px 0; }
+  .step-card .step-name { font-size: 11px; color: var(--text); font-weight: 500; }
+  .step-card .step-count { font-size: 10px; color: var(--muted); margin-top: 2px; }
+
+  .step-card.running  { border-color: var(--primary);  background: #1a2740; }
+  .step-card.done     { border-color: var(--success);  background: #1a2d1a; }
+  .step-card.error    { border-color: var(--error);    background: #2d1a1a; }
+
+  .step-card.running .step-name { color: var(--primary); }
+  .step-card.done    .step-name { color: var(--success); }
+  .step-card.error   .step-name { color: var(--error);   }
+
+  @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:.4; } }
+  .step-card.running .step-icon { animation: pulse 1s infinite; }
+
+  /* ── Items grid ── */
+  #items-panel { grid-column: 2; grid-row: 2; overflow-y: auto; }
+
+  #items-grid {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 10px 14px;
+    align-content: flex-start;
+  }
+
+  .item-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 8px 10px;
+    width: 160px;
+    flex-shrink: 0;
+    transition: border-color .2s;
+  }
+  .item-card .item-id   { font-size: 10px; color: var(--muted); font-family: monospace; }
+  .item-card .item-hook { font-size: 11px; color: var(--text-hi); margin: 3px 0; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .item-card .item-style {
+    display: inline-block;
+    font-size: 10px;
+    padding: 1px 6px;
+    border-radius: 10px;
+    background: var(--border);
+    color: var(--muted);
+    margin-bottom: 4px;
+  }
+  .item-card .item-status { font-size: 10px; color: var(--muted); }
+  .item-card .item-cost   { font-size: 10px; color: var(--muted); text-align: right; }
+
+  .item-card.running     { border-color: var(--primary); }
+  .item-card.distributed { border-color: var(--success); }
+  .item-card.dropped     { border-color: var(--error); opacity: .6; }
+
+  /* ── LLM stream ── */
+  #llm-panel { grid-column: 3; grid-row: 1 / 3; border-right: none; }
+
+  #llm-output {
+    flex: 1;
+    overflow-y: auto;
+    padding: 10px 12px;
+    font-family: "SF Mono", "Fira Code", Consolas, monospace;
+    font-size: 11px;
+    line-height: 1.6;
+    color: var(--text);
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  .llm-stage-header {
+    color: var(--primary);
+    font-weight: 600;
+    margin-top: 10px;
+    margin-bottom: 2px;
+    font-size: 11px;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 2px;
+  }
+  .llm-stage-header:first-child { margin-top: 0; }
+
+  .token { color: var(--text); }
+  .token.thinking { color: var(--muted); font-style: italic; }
+
+  /* ── Scrollbar ── */
+  ::-webkit-scrollbar { width: 4px; height: 4px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>🎬 UGC Orchestrator</h1>
+  <span id="run-badge">idle</span>
+  <span id="run-id-label"></span>
+</header>
+
+<div class="layout">
+
+  <!-- Controls -->
+  <div class="panel" id="controls">
+    <div class="panel-title">Configuração</div>
+    <div class="form-group">
+      <label>Oferta / Produto</label>
+      <input id="inp-offer" type="text" value="Serum anti-aging X" placeholder="ex: serum anti-aging">
+    </div>
+    <div class="form-group">
+      <label>Batch (conceitos)</label>
+      <input id="inp-batch" type="number" value="6" min="1" max="24">
+    </div>
+    <div class="form-group">
+      <label>Plataforma</label>
+      <select id="inp-platform">
+        <option value="tiktok">TikTok</option>
+        <option value="instagram">Instagram Reels</option>
+        <option value="youtube">YouTube Shorts</option>
+      </select>
+    </div>
+    <button id="btn-start" onclick="startRun()">▶ Iniciar Pipeline</button>
+    <hr class="divider">
+    <div id="summary-box">
+      <div class="row"><span>Produzidos</span><span class="val" id="s-produced">—</span></div>
+      <div class="row"><span>Aprovados</span><span class="val" id="s-approved">—</span></div>
+      <div class="row"><span>Descartados</span><span class="val" id="s-dropped">—</span></div>
+      <div class="row"><span>Custo (USD)</span><span class="val" id="s-cost">—</span></div>
+      <div class="row"><span>Top hooks</span><span class="val" id="s-hooks">—</span></div>
+    </div>
+  </div>
+
+  <!-- Pipeline steps -->
+  <div class="panel" id="pipeline">
+    <div class="panel-title">Pipeline</div>
+    <div class="steps-grid" id="steps-grid"></div>
+  </div>
+
+  <!-- Items -->
+  <div class="panel" id="items-panel">
+    <div class="panel-title">Itens <span id="items-count" style="color:var(--muted)"></span></div>
+    <div id="items-grid"></div>
+  </div>
+
+  <!-- LLM stream -->
+  <div class="panel" id="llm-panel">
+    <div class="panel-title">Output LLM (streaming)</div>
+    <div id="llm-output"><span style="color:var(--muted)">Aguardando início...</span></div>
+  </div>
+
+</div>
+
+<script>
+const STEPS = [
+  { id:"roster",       num:3,  icon:"👤", label:"Creator Roster" },
+  { id:"concepts",     num:1,  icon:"💡", label:"Conceitos"      },
+  { id:"script",       num:2,  icon:"✍️", label:"Scripts"        },
+  { id:"ltx",          num:4,  icon:"🎬", label:"Talking-Head"   },
+  { id:"product_demo", num:5,  icon:"📦", label:"Product Demo"   },
+  { id:"process_item", num:6,  icon:"⚡", label:"Exec. Paralela" },
+  { id:"qc",           num:7,  icon:"✅", label:"QC"             },
+  { id:"assembly",     num:8,  icon:"🎞️", label:"Montagem"       },
+  { id:"distribution", num:9,  icon:"📲", label:"Distribuição"   },
+  { id:"feedback",     num:10, icon:"📊", label:"Feedback"       },
+];
+
+// Alias: kling e seedance são parte do step 4 (talking-head)
+const NODE_STEP_MAP = {
+  kling: "ltx", seedance: "ltx", drop: "qc",
+};
+
+let stepState = {};   // node → "idle"|"running"|"done"
+let itemsMap  = {};   // item_id → {...}
+let currentStage = null;
+let llmFirstToken = true;
+
+function initSteps() {
+  const grid = document.getElementById("steps-grid");
+  grid.innerHTML = "";
+  stepState = {};
+  STEPS.forEach(s => {
+    stepState[s.id] = "idle";
+    const card = document.createElement("div");
+    card.className = "step-card";
+    card.id = `step-${s.id}`;
+    card.innerHTML = `
+      <div class="step-num">Step ${s.num}</div>
+      <div class="step-icon">${s.icon}</div>
+      <div class="step-name">${s.label}</div>
+      <div class="step-count" id="step-count-${s.id}"></div>
+    `;
+    grid.appendChild(card);
+  });
+}
+
+function setStep(node, state) {
+  const canonical = NODE_STEP_MAP[node] || node;
+  const card = document.getElementById(`step-${canonical}`);
+  if (!card) return;
+  // Only upgrade state: idle → running → done/error
+  const rank = {idle:0, running:1, done:2, error:2};
+  const cur = stepState[canonical] || "idle";
+  if ((rank[state] || 0) > (rank[cur] || 0)) {
+    stepState[canonical] = state;
+    card.className = `step-card ${state}`;
+  }
+}
+
+function incrStepCount(node, label) {
+  const canonical = NODE_STEP_MAP[node] || node;
+  const el = document.getElementById(`step-count-${canonical}`);
+  if (!el) return;
+  const n = (parseInt(el.dataset.n || "0", 10)) + 1;
+  el.dataset.n = n;
+  el.textContent = `${n} ${label}`;
+}
+
+function renderItem(item) {
+  const concept = item.concept || {};
+  const id = item.id || "?";
+  let card = document.getElementById(`item-${id}`);
+  if (!card) {
+    card = document.createElement("div");
+    card.className = "item-card";
+    card.id = `item-${id}`;
+    document.getElementById("items-grid").appendChild(card);
+    updateItemsCount();
+  }
+  const status = item.distributed ? "✓ aprovado"
+               : item.dropped     ? "✗ descartado"
+               : `tentativa ${item.attempts ?? 0}`;
+  const cls = item.distributed ? "distributed"
+            : item.dropped     ? "dropped"
+            : "running";
+  card.className = `item-card ${cls}`;
+  card.innerHTML = `
+    <div class="item-id">${id.substring(0,12)}</div>
+    <div class="item-hook">${concept.hook || concept.angle || "—"}</div>
+    <span class="item-style">${concept.hook_style || "—"}</span>
+    <div style="display:flex;justify-content:space-between;align-items:center">
+      <span class="item-status">${status}</span>
+      <span class="item-cost">$${(item.cost_usd || 0).toFixed(3)}</span>
+    </div>
+  `;
+}
+
+function updateItemsCount() {
+  const n = document.getElementById("items-grid").children.length;
+  document.getElementById("items-count").textContent = `(${n})`;
+}
+
+function appendLLM(stage, token) {
+  const out = document.getElementById("llm-output");
+
+  if (stage !== currentStage) {
+    currentStage = stage;
+    llmFirstToken = true;
+    const hdr = document.createElement("div");
+    hdr.className = "llm-stage-header";
+    hdr.textContent = `── ${stage} ──`;
+    out.appendChild(hdr);
+  }
+
+  if (llmFirstToken) {
+    // Clear placeholder
+    if (out.querySelector("span[style]")) out.innerHTML = "";
+    llmFirstToken = false;
+  }
+
+  // Append token as text node
+  out.appendChild(document.createTextNode(token));
+  out.scrollTop = out.scrollHeight;
+}
+
+function clearLLM() {
+  const out = document.getElementById("llm-output");
+  out.innerHTML = '<span style="color:var(--muted)">Aguardando LLM...</span>';
+  currentStage = null;
+  llmFirstToken = true;
+}
+
+function setBadge(state, label) {
+  const b = document.getElementById("run-badge");
+  b.className = state;
+  b.textContent = label;
+}
+
+function updateSummary(s) {
+  document.getElementById("s-produced").textContent = s.produced ?? "—";
+  document.getElementById("s-approved").textContent = s.approved ?? "—";
+  document.getElementById("s-dropped").textContent  = s.dropped  ?? "—";
+  document.getElementById("s-cost").textContent     = s.total_cost_usd != null ? `$${s.total_cost_usd.toFixed(4)}` : "—";
+  document.getElementById("s-hooks").textContent    = (s.winning_styles || []).join(", ") || "—";
+  document.getElementById("summary-box").classList.add("visible");
+}
+
+let eventSource = null;
+
+async function startRun() {
+  const btn    = document.getElementById("btn-start");
+  const offer  = document.getElementById("inp-offer").value.trim() || "demo offer";
+  const batch  = parseInt(document.getElementById("inp-batch").value, 10) || 6;
+  const platform = document.getElementById("inp-platform").value;
+
+  btn.disabled = true;
+  initSteps();
+  itemsMap = {};
+  document.getElementById("items-grid").innerHTML = "";
+  updateItemsCount();
+  clearLLM();
+  document.getElementById("summary-box").classList.remove("visible");
+  setBadge("running", "iniciando...");
+
+  if (eventSource) { eventSource.close(); eventSource = null; }
+
+  // Inicia o run
+  let runId;
+  try {
+    const resp = await fetch("/api/run", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({offer, batch, platform}),
+    });
+    const data = await resp.json();
+    runId = data.run_id;
+  } catch (e) {
+    setBadge("error", "erro ao iniciar");
+    btn.disabled = false;
+    return;
+  }
+
+  document.getElementById("run-id-label").textContent = runId;
+  setBadge("running", "rodando");
+
+  // Conecta SSE
+  eventSource = new EventSource(`/api/stream/${runId}`);
+
+  eventSource.onmessage = (e) => {
+    let ev;
+    try { ev = JSON.parse(e.data); } catch { return; }
+
+    switch (ev.type) {
+      case "run_start":
+        setBadge("running", "rodando");
+        break;
+
+      case "node_start":
+        setStep(ev.node, "running");
+        setBadge("running", ev.label || ev.node);
+        break;
+
+      case "node_end":
+        setStep(ev.node, "done");
+        if (ev.node === "process_item") incrStepCount("process_item", "itens");
+        if (ev.item) renderItem(ev.item);
+        break;
+
+      case "llm_start":
+        currentStage = ev.stage;
+        break;
+
+      case "llm_token":
+        appendLLM(ev.stage, ev.token);
+        break;
+
+      case "llm_end":
+        break;
+
+      case "run_end":
+        setBadge("done", "concluído");
+        if (ev.summary) updateSummary(ev.summary);
+        btn.disabled = false;
+        eventSource.close();
+        break;
+
+      case "error":
+        setBadge("error", "erro");
+        appendLLM("ERRO", "\n" + (ev.message || "erro desconhecido"));
+        btn.disabled = false;
+        eventSource.close();
+        break;
+
+      case "stream_end":
+        if (document.getElementById("run-badge").textContent === "rodando") {
+          setBadge("done", "concluído");
+        }
+        btn.disabled = false;
+        eventSource.close();
+        break;
+    }
+  };
+
+  eventSource.onerror = () => {
+    setBadge("error", "conexão perdida");
+    btn.disabled = false;
+  };
+}
+
+// Inicializar steps no load
+initSteps();
+</script>
+</body>
+</html>

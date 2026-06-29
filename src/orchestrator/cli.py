@@ -113,5 +113,28 @@ def list_runs(db):
         click.echo(r)
 
 
+@cli.command()
+@click.option("--host", default="0.0.0.0", help="Host de escuta.")
+@click.option("--port", default=8000, type=int, help="Porta de escuta.")
+@click.option("--reload", is_flag=True, default=False, help="Hot-reload (dev).")
+def serve(host, port, reload):
+    """Inicia o servidor web com dashboard em tempo real (SSE + streaming LLM)."""
+    try:
+        import uvicorn
+    except ImportError:
+        raise click.ClickException(
+            "uvicorn não instalado. Execute: uv pip install -e '.[web]'"
+        )
+    load_dotenv(".env", override=False)
+    click.echo(f"Dashboard disponível em: http://localhost:{port}/")
+    uvicorn.run(
+        "orchestrator.web.server:app",
+        host=host,
+        port=port,
+        reload=reload,
+        log_level="info",
+    )
+
+
 if __name__ == "__main__":
     cli()

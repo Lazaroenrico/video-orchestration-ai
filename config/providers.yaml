@@ -2,10 +2,10 @@
 # Para ligar uma integração real, troque "mock" pelo nome do adapter registrado em
 # src/orchestrator/registry.py — o grafo não muda. Papéis ausentes caem em "mock".
 adapters:
-  llm: mock           # LLMPort (Steps 1/2) — MVP: trocar para "vercel_gateway_llm" + AI_GATEWAY_API_KEY
-  creator: mock       # Creator (Step 3) — MVP: trocar para "creator_real_vercel" + TOPAZ_API_KEY + ELEVENLABS_API_KEY
-  video: mock         # Vídeo (Steps 4/5) — MVP: trocar para "replicate" + REPLICATE_API_TOKEN
-  qc: mock            # QC sistematizado (Step 7)
-  assembly: mock      # montagem/edição (Step 8) — sem API única
-  distribution: mock  # portfolio de contas (Step 9) — sem API única
-  judge: gateway      # LLM Judge via API Gateway (config em judge.yaml)
+  llm: vercel_gateway_llm  # ✅ Claude via Vercel Gateway (AI_GATEWAY_API_KEY configurada)
+  creator: creator_real_vercel  # GPT Image 2 via Vercel Gateway + Topaz + ElevenLabs direto
+  video: replicate              # Replicate: LTX/Kling/Seedance via REPLICATE_API_TOKEN
+  qc: mock
+  assembly: mock
+  distribution: mock
+  judge: gateway
