@@ -19,6 +19,7 @@ from orchestrator.adapters.anthropic_llm import (
 )
 from orchestrator.adapters.creator_real import (
     build_real_creator_adapter,
+    build_real_creator_replicate_adapter,
     build_real_creator_vercel_adapter,
 )
 from orchestrator.adapters.mock import MockAdapter
@@ -46,6 +47,7 @@ _ADAPTERS: dict[str, Callable[[dict[str, Any]], Any]] = {
     "vercel_gateway_llm": build_vercel_gateway_llm_adapter,
     "creator_real": build_real_creator_adapter,
     "creator_real_vercel": build_real_creator_vercel_adapter,
+    "creator_real_replicate": build_real_creator_replicate_adapter,
 }
 
 

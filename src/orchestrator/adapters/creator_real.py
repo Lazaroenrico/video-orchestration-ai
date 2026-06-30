@@ -21,6 +21,8 @@ from typing import Any, Optional
 
 from orchestrator.adapters.elevenlabs_voice import ElevenLabsVoiceAdapter
 from orchestrator.adapters.openai_image import OpenAIImageAdapter, build_openai_image_vercel_adapter
+from orchestrator.adapters.replicate_upscale import ReplicateUpscaleAdapter
+from orchestrator.adapters.replicate_voice import ReplicateVoiceAdapter
 from orchestrator.adapters.topaz_upscale import TopazUpscaleAdapter
 
 
@@ -88,4 +90,18 @@ def build_real_creator_vercel_adapter(pipeline: dict[str, Any]) -> RealCreatorAd
         image=build_openai_image_vercel_adapter(pipeline),
         topaz=TopazUpscaleAdapter(),
         voice=ElevenLabsVoiceAdapter(),
+    )
+
+
+def build_real_creator_replicate_adapter(pipeline: dict[str, Any]) -> RealCreatorAdapter:
+    """Fábrica que monta RealCreatorAdapter usando Replicate para upscale e voz.
+
+    - OpenAI Image: roteado pelo Vercel Gateway (AI_GATEWAY_API_KEY).
+    - Upscale: Replicate nightmareai/real-esrgan (REPLICATE_API_TOKEN).
+    - Voice: Replicate suno-ai/bark (REPLICATE_API_TOKEN).
+    """
+    return RealCreatorAdapter(
+        image=build_openai_image_vercel_adapter(pipeline),
+        topaz=ReplicateUpscaleAdapter(),
+        voice=ReplicateVoiceAdapter(),
     )
