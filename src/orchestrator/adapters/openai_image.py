@@ -33,6 +33,8 @@ from typing import Any, Optional
 
 import httpx
 
+from orchestrator.tracing import traced
+
 # Base OpenAI-compatível do Vercel AI Gateway (mesmo path do Chat Completions, sem /openai).
 # Confirmado em https://vercel.com/docs/ai-gateway — image-only models usam /v1/images/generations.
 _VERCEL_GATEWAY_OPENAI_BASE_URL = "https://ai-gateway.vercel.sh/v1"
@@ -70,7 +72,8 @@ class OpenAIImageAdapter:
         self.timeout = timeout
         self._client = client
 
-    async def generate_face(self, index: int) -> dict[str, Any]:
+    @traced("adapter.openai_image.generate_face", run_type="tool", step=3, provider="openai")
+    async def generate_face(self, index: int, system_prompt: Optional[str] = None) -> dict[str, Any]:
         """Gera imagem de rosto via POST ``{base_url}/images/generations``.
 
         Retorna ``{"primary": <url ou data URI>, "angles": [...]}``.
@@ -79,9 +82,10 @@ class OpenAIImageAdapter:
             "Authorization": f"Bearer {self.token}",
             "Content-Type": "application/json",
         }
+        prompt = system_prompt if system_prompt else f"Professional creator face, front view, studio lighting, creator-{index}"
         body = {
             "model": self.model,
-            "prompt": f"Professional creator face, front view, studio lighting, creator-{index}",
+            "prompt": prompt,
         }
 
         if self._client is not None:
@@ -136,4 +140,7 @@ def build_openai_image_vercel_adapter(pipeline: dict[str, Any]) -> "OpenAIImageA
         )
     base_url = os.environ.get("AI_GATEWAY_OPENAI_BASE_URL", _VERCEL_GATEWAY_OPENAI_BASE_URL)
     model = os.environ.get("AI_GATEWAY_OPENAI_MODEL", _VERCEL_GATEWAY_IMAGE_MODEL)
-    return OpenAIImageAdapter(base_url=base_url, token=token, model=model)
+    # GPT Image 2 pode levar 60-120 s (cold start); 180 s é mais seguro.
+    # Sobrescrevível via AI_GATEWAY_IMAGE_TIMEOUT (segundos, float).
+    timeout = float(os.environ.get("AI_GATEWAY_IMAGE_TIMEOUT", "180"))
+    return OpenAIImageAdapter(base_url=base_url, token=token, model=model, timeout=timeout)
