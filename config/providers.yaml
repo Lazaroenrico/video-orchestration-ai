@@ -4,7 +4,7 @@
 adapters:
   llm: vercel_gateway_llm  # ✅ Claude via Vercel Gateway (AI_GATEWAY_API_KEY configurada)
   creator: creator_real_replicate  # GPT Image 2 via Vercel Gateway + Replicate (upscale + voice)
-  video: replicate              # Replicate: LTX/Kling/Seedance via REPLICATE_API_TOKEN
+  video: mock                   # MVP: vídeo mock (tiers ainda usam refs placeholder; live exige refs Replicate reais)
   qc: mock
   assembly: mock
   distribution: mock

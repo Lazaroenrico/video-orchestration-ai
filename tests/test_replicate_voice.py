@@ -1,94 +1,79 @@
-"""Testes do ReplicateVoiceAdapter — sem rede, usando httpx.MockTransport."""
+"""Testes do ReplicateVoiceAdapter — offline, com runner injetável (SDK replicate)."""
 from __future__ import annotations
 
-import json
 from typing import Any
 
-import httpx
 import pytest
 
 from orchestrator.adapters.replicate_voice import ReplicateVoiceAdapter
 
-_FAKE_RESPONSE = {"id": "pred-voice-42", "status": "starting", "output": None}
-_captured_requests: list[httpx.Request] = []
 
+def _make_adapter(output: Any = "https://cdn.replicate.com/voice.wav", **kwargs):
+    captured: list[dict[str, Any]] = []
 
-def _mock_handler(request: httpx.Request) -> httpx.Response:
-    _captured_requests.append(request)
-    return httpx.Response(200, json=_FAKE_RESPONSE)
+    async def fake_runner(ref: str, input: dict | None = None, **_: Any) -> Any:
+        captured.append({"ref": ref, "input": input})
+        return output
 
-
-def _make_adapter(token: str = "test-token") -> ReplicateVoiceAdapter:
-    _captured_requests.clear()
-    transport = httpx.MockTransport(_mock_handler)
-    client = httpx.AsyncClient(transport=transport)
-    return ReplicateVoiceAdapter(
-        base_url="https://api.replicate.com/v1",
-        token=token,
-        client=client,
-    )
+    adapter = ReplicateVoiceAdapter(runner=fake_runner, **kwargs)
+    return adapter, captured
 
 
 async def test_create_voice_returns_string():
-    adapter = _make_adapter()
-    voice_id = await adapter.create_voice(0)
-    assert isinstance(voice_id, str)
-    assert len(voice_id) > 0
+    adapter, _ = _make_adapter(output="https://cdn.replicate.com/v.wav")
+    result = await adapter.create_voice(0)
+    assert isinstance(result, str)
+    assert result == "https://cdn.replicate.com/v.wav"
 
 
-async def test_create_voice_returns_prediction_id():
-    adapter = _make_adapter()
-    voice_id = await adapter.create_voice(1)
-    assert voice_id == "pred-voice-42"
+async def test_create_voice_parses_dict_audio_out():
+    """Bark devolve dict tipo {'audio_out': url}; o adapter deve extrair a URL."""
+    adapter, _ = _make_adapter(output={"audio_out": "https://cdn.replicate.com/bark.wav"})
+    result = await adapter.create_voice(1)
+    assert result == "https://cdn.replicate.com/bark.wav"
 
 
-async def test_auth_header_sent():
-    adapter = _make_adapter(token="replicate-secret")
+async def test_create_voice_parses_dict_first_value_fallback():
+    """Se não houver chave conhecida, usa o primeiro valor do dict."""
+    adapter, _ = _make_adapter(output={"something": "https://cdn.replicate.com/x.wav"})
+    result = await adapter.create_voice(0)
+    assert result == "https://cdn.replicate.com/x.wav"
+
+
+async def test_create_voice_coerces_file_output():
+    class FakeFileOutput:
+        def __str__(self) -> str:
+            return "https://cdn.replicate.com/file.wav"
+
+    adapter, _ = _make_adapter(output=FakeFileOutput())
+    result = await adapter.create_voice(2)
+    assert result == "https://cdn.replicate.com/file.wav"
+
+
+async def test_create_voice_uses_correct_model_ref():
+    adapter, captured = _make_adapter()
     await adapter.create_voice(0)
-    assert len(_captured_requests) == 1
-    auth = _captured_requests[0].headers.get("authorization", "")
-    assert auth == "Token replicate-secret"
+    # Default ref pina o version hash (community model exige) → owner/name:version
+    assert captured[0]["ref"].startswith("suno-ai/bark:")
 
 
-async def test_posts_to_predictions_endpoint():
-    adapter = _make_adapter()
-    await adapter.create_voice(0)
-    req = _captured_requests[0]
-    assert req.method == "POST"
-    assert str(req.url).endswith("/predictions")
-
-
-async def test_request_body_contains_model_and_input():
-    adapter = _make_adapter()
+async def test_create_voice_sends_prompt_with_index():
+    adapter, captured = _make_adapter()
     await adapter.create_voice(3)
-    body: dict[str, Any] = json.loads(_captured_requests[0].content)
-    assert body["model"] == "suno-ai/bark"
-    assert "3" in body["input"]["prompt"]
+    assert "3" in captured[0]["input"]["prompt"]
 
 
 async def test_different_indices_produce_different_prompts():
-    reqs: list[httpx.Request] = []
-
-    def _capture(request: httpx.Request) -> httpx.Response:
-        reqs.append(request)
-        return httpx.Response(200, json=_FAKE_RESPONSE)
-
-    transport = httpx.MockTransport(_capture)
-    client = httpx.AsyncClient(transport=transport)
-    adapter = ReplicateVoiceAdapter(client=client)
+    adapter, captured = _make_adapter()
     await adapter.create_voice(0)
     await adapter.create_voice(5)
-    body0 = json.loads(reqs[0].content)
-    body5 = json.loads(reqs[1].content)
-    assert body0["input"]["prompt"] != body5["input"]["prompt"]
+    assert captured[0]["input"]["prompt"] != captured[1]["input"]["prompt"]
 
 
-async def test_http_error_raises():
-    def _error_handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(422, json={"detail": "invalid input"})
+async def test_create_voice_propagates_runner_error():
+    async def failing_runner(ref: str, input: dict | None = None, **_: Any):
+        raise RuntimeError("voice boom")
 
-    transport = httpx.MockTransport(_error_handler)
-    client = httpx.AsyncClient(transport=transport)
-    adapter = ReplicateVoiceAdapter(client=client)
-    with pytest.raises(httpx.HTTPStatusError):
+    adapter = ReplicateVoiceAdapter(runner=failing_runner)
+    with pytest.raises(RuntimeError, match="voice boom"):
         await adapter.create_voice(0)

@@ -17,7 +17,11 @@ Retorna o mesmo shape que ``MockAdapter.build_creator``::
 """
 from __future__ import annotations
 
+import os
 from typing import Any, Optional
+
+import httpx
+import replicate
 
 from orchestrator.adapters.elevenlabs_voice import ElevenLabsVoiceAdapter
 from orchestrator.adapters.openai_image import OpenAIImageAdapter, build_openai_image_vercel_adapter
@@ -99,9 +103,17 @@ def build_real_creator_replicate_adapter(pipeline: dict[str, Any]) -> RealCreato
     - OpenAI Image: roteado pelo Vercel Gateway (AI_GATEWAY_API_KEY).
     - Upscale: Replicate nightmareai/real-esrgan (REPLICATE_API_TOKEN).
     - Voice: Replicate suno-ai/bark (REPLICATE_API_TOKEN).
+
+    Usa um ``replicate.Client`` com timeout generoso — o rosto do GPT Image 2 vem
+    como data URI base64 (~2.7MB) e é enviado inline; com cold start do modelo, o
+    timeout padrão do client estoura (ReadTimeout).
     """
+    rep_client = replicate.Client(
+        api_token=os.environ.get("REPLICATE_API_TOKEN"),
+        timeout=httpx.Timeout(600.0, connect=15.0),
+    )
     return RealCreatorAdapter(
         image=build_openai_image_vercel_adapter(pipeline),
-        topaz=ReplicateUpscaleAdapter(),
-        voice=ReplicateVoiceAdapter(),
+        topaz=ReplicateUpscaleAdapter(runner=rep_client.async_run),
+        voice=ReplicateVoiceAdapter(runner=rep_client.async_run),
     )

@@ -1,82 +1,60 @@
-"""ReplicateUpscaleAdapter — upscale de imagem via Replicate API.
+"""ReplicateUpscaleAdapter — upscale de imagem via SDK oficial ``replicate``.
 
-Contrato HTTP (Replicate v1 simplificado):
-POST ``{base_url}/predictions``
+Usa ``replicate.async_run(ref, input=...)``, que resolve a versão do modelo, faz
+o polling da prediction assíncrona e devolve o output já pronto (um ``FileOutput``
+URL-like). Isso evita o contrato HTTP manual (campo ``version`` + header
+``Prefer: wait`` + polling) que causava ``422``/``output: null``.
 
-Request body::
+Modelo padrão: ``nightmareai/real-esrgan`` — input ``image`` (URL ou data URI
+base64) + ``scale``. ``upscale`` retorna a URL da imagem upscalada como string.
 
-    {
-        "model": "nightmareai/real-esrgan",
-        "input": {"image": "<url>", "scale": 4}
-    }
-
-Response JSON::
-
-    {
-        "id": "<prediction-id>",
-        "output": "https://cdn.replicate.com/..."
-    }
-
-``output`` é uma string (não lista) — diferente do VideoAdapter que usa lista.
+Nota: modelos *community* (não-oficiais) exigem o **version hash** pinado no ref
+(``owner/name:version``) — sem versão, o SDK usa o endpoint de official models e
+retorna 404. O hash abaixo é a versão corrente; sobrescreva via ``model=`` se mudar.
 """
 from __future__ import annotations
 
-import os
-from typing import Optional
+from typing import Any, Awaitable, Callable, Optional
 
-import httpx
+import replicate
 
-_UPSCALE_MODEL = "nightmareai/real-esrgan"
+_DEFAULT_MODEL = (
+    "nightmareai/real-esrgan:"
+    "b3ef194191d13140337468c916c2c5b96dd0cb06dffc032a022a31807f6a5ea8"
+)
+
+# Assinatura do runner: (ref, input=...) -> output (FileOutput/URL/str)
+Runner = Callable[..., Awaitable[Any]]
 
 
 class ReplicateUpscaleAdapter:
-    """Faz upscale 4x de imagem via Replicate.
+    """Faz upscale de imagem via Replicate.
 
     Parameters
     ----------
-    base_url:
-        Base da API. Padrão: ``https://api.replicate.com/v1``.
-    token:
-        Token (``Authorization: Token <token>``). Se vazio, lê ``REPLICATE_API_TOKEN``.
-    client:
-        ``httpx.AsyncClient`` injetável para testes.
+    model:
+        Ref do modelo Replicate (``owner/name`` ou ``owner/name:version``).
+    scale:
+        Fator de upscale (default 4).
+    runner:
+        Async callable ``(ref, input=...) -> output`` injetável para testes.
+        Default: ``replicate.async_run`` (lê ``REPLICATE_API_TOKEN`` do ambiente).
     """
 
     def __init__(
         self,
-        base_url: str = "https://api.replicate.com/v1",
-        token: str = "",
-        client: Optional[httpx.AsyncClient] = None,
+        model: str = _DEFAULT_MODEL,
+        scale: int = 4,
+        runner: Optional[Runner] = None,
     ) -> None:
-        self.base_url = base_url.rstrip("/")
-        self.token = token or os.environ.get("REPLICATE_API_TOKEN", "")
-        self._client = client
+        self.model = model
+        self.scale = scale
+        self._runner: Runner = runner or replicate.async_run
 
     async def upscale(self, image_url: str) -> str:
-        """Faz upscale 4x da imagem. Retorna URL da imagem upscalada."""
-        headers = {
-            "Authorization": f"Token {self.token}",
-            "Content-Type": "application/json",
-        }
-        body = {
-            "model": _UPSCALE_MODEL,
-            "input": {"image": image_url, "scale": 4},
-        }
-
-        if self._client is not None:
-            resp = await self._client.post(
-                f"{self.base_url}/predictions",
-                headers=headers,
-                json=body,
-            )
-        else:
-            async with httpx.AsyncClient() as client:
-                resp = await client.post(
-                    f"{self.base_url}/predictions",
-                    headers=headers,
-                    json=body,
-                )
-
-        resp.raise_for_status()
-        data = resp.json()
-        return data["output"]
+        """Faz upscale da imagem. Retorna a URL da imagem upscalada (string)."""
+        output = await self._runner(
+            self.model,
+            input={"image": image_url, "scale": self.scale},
+        )
+        return str(output)

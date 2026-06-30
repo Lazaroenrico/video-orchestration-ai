@@ -1,78 +1,73 @@
-"""Testes do ReplicateUpscaleAdapter — sem rede, usando httpx.MockTransport."""
+"""Testes do ReplicateUpscaleAdapter — offline, com runner injetável (SDK replicate)."""
 from __future__ import annotations
 
-import json
 from typing import Any
 
-import httpx
 import pytest
 
 from orchestrator.adapters.replicate_upscale import ReplicateUpscaleAdapter
 
-_FAKE_RESPONSE = {"id": "pred-upscale-1", "output": "https://cdn.replicate.com/upscaled.png"}
-_captured_requests: list[httpx.Request] = []
+
+def _make_adapter(output: Any = "https://cdn.replicate.com/upscaled.png", **kwargs):
+    """Cria um adapter com runner falso que captura ref/input e devolve `output`."""
+    captured: list[dict[str, Any]] = []
+
+    async def fake_runner(ref: str, input: dict | None = None, **_: Any) -> Any:
+        captured.append({"ref": ref, "input": input})
+        return output
+
+    adapter = ReplicateUpscaleAdapter(runner=fake_runner, **kwargs)
+    return adapter, captured
 
 
-def _mock_handler(request: httpx.Request) -> httpx.Response:
-    _captured_requests.append(request)
-    return httpx.Response(200, json=_FAKE_RESPONSE)
-
-
-def _make_adapter(token: str = "test-token") -> ReplicateUpscaleAdapter:
-    _captured_requests.clear()
-    transport = httpx.MockTransport(_mock_handler)
-    client = httpx.AsyncClient(transport=transport)
-    return ReplicateUpscaleAdapter(
-        base_url="https://api.replicate.com/v1",
-        token=token,
-        client=client,
-    )
-
-
-async def test_upscale_returns_url():
-    adapter = _make_adapter()
-    url = await adapter.upscale("https://example.com/image.png")
-    assert url == "https://cdn.replicate.com/upscaled.png"
-
-
-async def test_upscale_returns_string():
-    adapter = _make_adapter()
-    result = await adapter.upscale("https://example.com/img.jpg")
+async def test_upscale_returns_string_url():
+    adapter, _ = _make_adapter(output="https://cdn.replicate.com/up.png")
+    result = await adapter.upscale("https://example.com/image.png")
+    assert result == "https://cdn.replicate.com/up.png"
     assert isinstance(result, str)
-    assert result.startswith("https://")
 
 
-async def test_auth_header_sent():
-    adapter = _make_adapter(token="my-secret-token")
+async def test_upscale_coerces_file_output_to_str():
+    """O SDK devolve um FileOutput (URL-like); o adapter deve coagir para str."""
+
+    class FakeFileOutput:
+        def __init__(self, url: str) -> None:
+            self._url = url
+
+        def __str__(self) -> str:
+            return self._url
+
+    adapter, _ = _make_adapter(output=FakeFileOutput("https://cdn.replicate.com/f.png"))
+    result = await adapter.upscale("https://example.com/img.png")
+    assert result == "https://cdn.replicate.com/f.png"
+
+
+async def test_upscale_uses_correct_model_ref():
+    adapter, captured = _make_adapter()
     await adapter.upscale("https://example.com/img.png")
-    assert len(_captured_requests) == 1
-    auth = _captured_requests[0].headers.get("authorization", "")
-    assert auth == "Token my-secret-token"
+    # Default ref pina o version hash (community model exige) → owner/name:version
+    assert captured[0]["ref"].startswith("nightmareai/real-esrgan:")
 
 
-async def test_posts_to_predictions_endpoint():
-    adapter = _make_adapter()
-    await adapter.upscale("https://example.com/img.png")
-    req = _captured_requests[0]
-    assert req.method == "POST"
-    assert str(req.url).endswith("/predictions")
-
-
-async def test_request_body_contains_model_and_input():
-    adapter = _make_adapter()
+async def test_upscale_sends_image_and_scale_input():
+    adapter, captured = _make_adapter()
     await adapter.upscale("https://example.com/face.png")
-    body: dict[str, Any] = json.loads(_captured_requests[0].content)
-    assert body["model"] == "nightmareai/real-esrgan"
-    assert body["input"]["image"] == "https://example.com/face.png"
-    assert body["input"]["scale"] == 4
+    inp = captured[0]["input"]
+    assert inp["image"] == "https://example.com/face.png"
+    assert inp["scale"] == 4
 
 
-async def test_http_error_raises():
-    def _error_handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(500, json={"error": "internal"})
+async def test_upscale_respects_custom_model_and_scale():
+    adapter, captured = _make_adapter(model="other/upscaler", scale=2)
+    await adapter.upscale("https://example.com/x.png")
+    assert captured[0]["ref"] == "other/upscaler"
+    assert captured[0]["input"]["scale"] == 2
 
-    transport = httpx.MockTransport(_error_handler)
-    client = httpx.AsyncClient(transport=transport)
-    adapter = ReplicateUpscaleAdapter(client=client)
-    with pytest.raises(httpx.HTTPStatusError):
+
+async def test_upscale_propagates_runner_error():
+    async def failing_runner(ref: str, input: dict | None = None, **_: Any):
+        raise RuntimeError("replicate boom")
+
+    adapter = ReplicateUpscaleAdapter(runner=failing_runner)
+    with pytest.raises(RuntimeError, match="replicate boom"):
         await adapter.upscale("https://example.com/img.png")

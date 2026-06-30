@@ -1,84 +1,67 @@
-"""ReplicateVoiceAdapter — cria referência de voz de creator via Replicate.
+"""ReplicateVoiceAdapter — referência de voz de creator via SDK oficial ``replicate``.
 
-Contrato HTTP (Replicate v1 simplificado):
-POST ``{base_url}/predictions``
+Usa ``replicate.async_run(ref, input=...)``, que resolve versão, faz o polling e
+devolve o output pronto. Evita o contrato HTTP manual (campo ``version`` + header
+``Prefer: wait`` + polling) que causava ``422``/``output: null``.
 
-Request body::
+Modelo padrão: ``suno-ai/bark`` (TTS) — input ``prompt`` (texto). O output pode
+vir como string, ``FileOutput`` (URL-like) ou dict (ex.: ``{"audio_out": url}``);
+``create_voice`` normaliza tudo para uma string (a referência de voz).
 
-    {
-        "model": "suno-ai/bark",
-        "input": {"prompt": "creator voice {index}"}
-    }
-
-Response JSON::
-
-    {
-        "id": "<prediction-id>",
-        "status": "starting",
-        "output": null
-    }
-
-``create_voice`` retorna o ``id`` da prediction como ``voice_id``.
-Esse ID pode ser usado futuramente para buscar o áudio gerado via GET /predictions/{id}.
+Nota: modelos *community* exigem o **version hash** pinado no ref
+(``owner/name:version``) — sem versão, o SDK retorna 404. Sobrescreva via ``model=``.
 """
 from __future__ import annotations
 
-import os
-from typing import Optional
+from typing import Any, Awaitable, Callable, Optional
 
-import httpx
+import replicate
 
-_VOICE_MODEL = "suno-ai/bark"
+_DEFAULT_MODEL = (
+    "suno-ai/bark:"
+    "b76242b40d67c76ab6742e987628a2a9ac019e11d56ab96c4e91ce03b79b2787"
+)
+# Chaves conhecidas onde modelos de áudio costumam expor a saída.
+_AUDIO_KEYS = ("audio_out", "audio", "output")
+
+Runner = Callable[..., Awaitable[Any]]
 
 
 class ReplicateVoiceAdapter:
-    """Cria referência de voz sintética via Replicate.
+    """Cria referência de voz de creator via Replicate.
 
     Parameters
     ----------
-    base_url:
-        Base da API. Padrão: ``https://api.replicate.com/v1``.
-    token:
-        Token (``Authorization: Token <token>``). Se vazio, lê ``REPLICATE_API_TOKEN``.
-    client:
-        ``httpx.AsyncClient`` injetável para testes.
+    model:
+        Ref do modelo Replicate (``owner/name`` ou ``owner/name:version``).
+    runner:
+        Async callable ``(ref, input=...) -> output`` injetável para testes.
+        Default: ``replicate.async_run`` (lê ``REPLICATE_API_TOKEN`` do ambiente).
     """
 
     def __init__(
         self,
-        base_url: str = "https://api.replicate.com/v1",
-        token: str = "",
-        client: Optional[httpx.AsyncClient] = None,
+        model: str = _DEFAULT_MODEL,
+        runner: Optional[Runner] = None,
     ) -> None:
-        self.base_url = base_url.rstrip("/")
-        self.token = token or os.environ.get("REPLICATE_API_TOKEN", "")
-        self._client = client
+        self.model = model
+        self._runner: Runner = runner or replicate.async_run
 
     async def create_voice(self, index: int) -> str:
-        """Inicia geração de voz para o creator ``index``. Retorna prediction ID."""
-        headers = {
-            "Authorization": f"Token {self.token}",
-            "Content-Type": "application/json",
-        }
-        body = {
-            "model": _VOICE_MODEL,
-            "input": {"prompt": f"creator voice {index}"},
-        }
+        """Gera a referência de voz do creator ``index``. Retorna uma string (URL)."""
+        output = await self._runner(
+            self.model,
+            input={"prompt": f"creator voice {index}"},
+        )
+        return self._coerce_output(output)
 
-        if self._client is not None:
-            resp = await self._client.post(
-                f"{self.base_url}/predictions",
-                headers=headers,
-                json=body,
-            )
-        else:
-            async with httpx.AsyncClient() as client:
-                resp = await client.post(
-                    f"{self.base_url}/predictions",
-                    headers=headers,
-                    json=body,
-                )
-
-        resp.raise_for_status()
-        data = resp.json()
-        return data["id"]
+    @staticmethod
+    def _coerce_output(output: Any) -> str:
+        """Normaliza o output (str | FileOutput | dict) para uma string."""
+        if isinstance(output, dict):
+            for key in _AUDIO_KEYS:
+                if key in output:
+                    return str(output[key])
+            # fallback: primeiro valor do dict
+            return str(next(iter(output.values())))
+        return str(output)
