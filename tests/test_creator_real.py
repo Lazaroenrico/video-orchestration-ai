@@ -12,7 +12,10 @@ import pytest
 
 from orchestrator.adapters.creator_real import RealCreatorAdapter, build_real_creator_adapter
 from orchestrator.adapters.elevenlabs_voice import ElevenLabsVoiceAdapter
-from orchestrator.adapters.openai_image import OpenAIImageAdapter
+from orchestrator.adapters.openai_image import (
+    OpenAIImageAdapter,
+    build_openai_image_vercel_adapter,
+)
 from orchestrator.adapters.topaz_upscale import TopazUpscaleAdapter
 
 # ---------------------------------------------------------------------------
@@ -355,3 +358,100 @@ async def test_build_real_creator_adapter_factory() -> None:
     assert isinstance(adapter.image, OpenAIImageAdapter)
     assert isinstance(adapter.topaz, TopazUpscaleAdapter)
     assert isinstance(adapter.voice, ElevenLabsVoiceAdapter)
+
+
+# ---------------------------------------------------------------------------
+# Testes do GPT Image 2 via Vercel AI Gateway
+# (contrato confirmado em https://vercel.com/docs/ai-gateway image-generation)
+# ---------------------------------------------------------------------------
+
+
+async def test_vercel_factory_uses_v1_base_url_and_prefixed_model(monkeypatch) -> None:
+    """A factory do gateway deve usar base_url .../v1 (sem /openai) e model openai/gpt-image-2."""
+    monkeypatch.setenv("AI_GATEWAY_API_KEY", "vck_test")
+    monkeypatch.delenv("AI_GATEWAY_OPENAI_BASE_URL", raising=False)
+
+    adapter = build_openai_image_vercel_adapter({})
+
+    assert adapter.base_url == "https://ai-gateway.vercel.sh/v1"
+    assert adapter.model == "openai/gpt-image-2"
+    assert adapter.token == "vck_test"
+
+
+async def test_vercel_factory_respects_base_url_env_override(monkeypatch) -> None:
+    """AI_GATEWAY_OPENAI_BASE_URL deve sobrescrever o base_url padrão."""
+    monkeypatch.setenv("AI_GATEWAY_API_KEY", "vck_test")
+    monkeypatch.setenv("AI_GATEWAY_OPENAI_BASE_URL", "https://custom.gateway/v1")
+
+    adapter = build_openai_image_vercel_adapter({})
+
+    assert adapter.base_url == "https://custom.gateway/v1"
+
+
+async def test_openai_image_parses_b64_json_into_data_uri() -> None:
+    """Quando a resposta traz b64_json (gateway), primary deve virar um data URI."""
+    fake_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": [{"b64_json": fake_b64}]})
+
+    base = "https://ai-gateway.vercel.sh/v1"
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url=base)
+    adapter = OpenAIImageAdapter(
+        base_url=base, token="vck_test", model="openai/gpt-image-2", client=client
+    )
+
+    result = await adapter.generate_face(0)
+
+    assert result["primary"] == f"data:image/png;base64,{fake_b64}"
+    assert result["angles"] == ["front", "3/4", "profile", "smile", "neutral"]
+
+
+async def test_openai_image_sends_configured_model() -> None:
+    """O body deve enviar o model configurado (ex.: openai/gpt-image-2 no gateway)."""
+    calls: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        return httpx.Response(200, json={"data": [{"b64_json": "abc"}]})
+
+    base = "https://ai-gateway.vercel.sh/v1"
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url=base)
+    adapter = OpenAIImageAdapter(
+        base_url=base, token="vck_test", model="openai/gpt-image-2", client=client
+    )
+
+    await adapter.generate_face(0)
+
+    body = json.loads(calls[0].content)
+    assert body["model"] == "openai/gpt-image-2"
+    assert str(calls[0].url).endswith("/images/generations")
+
+
+async def test_vercel_factory_sets_generous_timeout(monkeypatch) -> None:
+    """Geração de imagem é lenta — a factory deve configurar timeout generoso (>=60s)."""
+    monkeypatch.setenv("AI_GATEWAY_API_KEY", "vck_test")
+
+    adapter = build_openai_image_vercel_adapter({})
+
+    assert adapter.timeout >= 60.0
+
+
+async def test_openai_image_default_timeout() -> None:
+    """O adapter deve ter timeout padrão generoso para suportar geração de imagem."""
+    adapter = OpenAIImageAdapter(token="t")
+    assert adapter.timeout >= 60.0
+
+
+async def test_openai_image_raises_when_no_url_or_b64() -> None:
+    """Resposta sem url nem b64_json deve levantar erro claro."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": [{}]})
+
+    base = "https://ai-gateway.vercel.sh/v1"
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url=base)
+    adapter = OpenAIImageAdapter(base_url=base, token="t", client=client)
+
+    with pytest.raises(RuntimeError):
+        await adapter.generate_face(0)
