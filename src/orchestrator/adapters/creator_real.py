@@ -17,6 +17,7 @@ Retorna o mesmo shape que ``MockAdapter.build_creator``::
 """
 from __future__ import annotations
 
+import logging
 import os
 from typing import Any, Optional
 
@@ -29,6 +30,8 @@ from orchestrator.adapters.replicate_upscale import ReplicateUpscaleAdapter
 from orchestrator.adapters.replicate_voice import ReplicateVoiceAdapter
 from orchestrator.adapters.topaz_upscale import TopazUpscaleAdapter
 from orchestrator.tracing import traced
+
+_log = logging.getLogger(__name__)
 
 
 class RealCreatorAdapter:
@@ -60,9 +63,23 @@ class RealCreatorAdapter:
 
         Retorna o mesmo shape que ``MockAdapter.build_creator``.
         """
+        # A face gerada é o artefato mínimo: se generate_face falhar, não há o que
+        # salvar e o erro propaga. Upscale e voz são best-effort — uma falha neles
+        # (ConnectTimeout, indisponibilidade) NÃO pode descartar a face já gerada.
         face = await self.image.generate_face(index, system_prompt=system_prompt)
-        upscaled = await self.topaz.upscale(face["primary"])
-        voice_id = await self.voice.create_voice(index)
+        primary = face["primary"]
+
+        try:
+            upscaled = await self.topaz.upscale(primary)
+        except Exception as exc:  # noqa: BLE001 — preserva a face; segue sem upscale
+            _log.error("upscale falhou (creator-%d): %s; usando imagem original", index, exc)
+            upscaled = primary
+
+        try:
+            voice_id = await self.voice.create_voice(index)
+        except Exception as exc:  # noqa: BLE001 — voz é opcional; imagem preservada
+            _log.error("voz falhou (creator-%d): %s", index, exc)
+            voice_id = ""
 
         return {
             "id": f"creator-{index}",

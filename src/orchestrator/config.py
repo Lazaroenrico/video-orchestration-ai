@@ -51,3 +51,7 @@ def default_db_path() -> Path:
 
 def default_creator_store_path() -> Path:
     return Path(os.environ.get("ORCH_CREATORS", ".orchestrator/creators.json"))
+
+
+def default_media_path() -> Path:
+    return Path(os.environ.get("ORCH_MEDIA", ".orchestrator/media"))

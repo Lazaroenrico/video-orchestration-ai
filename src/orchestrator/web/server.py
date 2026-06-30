@@ -18,19 +18,32 @@ from urllib.parse import urlparse
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from langgraph.types import Command
 
 from orchestrator import runner, stream_bus
 import orchestrator.creator_store as creator_store
-from orchestrator.config import default_creator_store_path, default_db_path, load_pipeline, load_providers
+from orchestrator.config import (
+    default_creator_store_path,
+    default_db_path,
+    default_media_path,
+    load_pipeline,
+    load_providers,
+)
 from orchestrator.tracing import run_trace_config
 from orchestrator.graph.builder import build_graph
 from orchestrator.graph.checkpoint import open_checkpointer
 from orchestrator.registry import build_adapter_from_providers
 
 app = FastAPI(title="UGC Orchestrator")
+
+# Serve os bytes persistidos do creator (imagem/voz baixadas pelo media_store) em
+# /media/{run_id}/{creator_id}/...; _is_renderable_uri já trata esses paths.
+_media_root = default_media_path()
+_media_root.mkdir(parents=True, exist_ok=True)
+app.mount("/media", StaticFiles(directory=str(_media_root)), name="media")
 
 # run_id → {queues: list[Queue], buffer: list[dict], done: bool}
 _runs: dict[str, dict[str, Any]] = {}

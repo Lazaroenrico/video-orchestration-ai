@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import httpx
 import pytest
 
 from orchestrator.adapters.replicate_upscale import ReplicateUpscaleAdapter
@@ -65,9 +66,45 @@ async def test_upscale_respects_custom_model_and_scale():
 
 
 async def test_upscale_propagates_runner_error():
+    calls = 0
+
     async def failing_runner(ref: str, input: dict | None = None, **_: Any):
+        nonlocal calls
+        calls += 1
         raise RuntimeError("replicate boom")
 
     adapter = ReplicateUpscaleAdapter(runner=failing_runner)
     with pytest.raises(RuntimeError, match="replicate boom"):
         await adapter.upscale("https://example.com/img.png")
+    # RuntimeError não é erro de transporte → propaga na 1ª, sem retry.
+    assert calls == 1
+
+
+async def test_upscale_retries_on_connect_timeout_then_succeeds():
+    calls = 0
+
+    async def flaky_runner(ref: str, input: dict | None = None, **_: Any) -> Any:
+        nonlocal calls
+        calls += 1
+        if calls < 3:
+            raise httpx.ConnectTimeout("connect failed")
+        return "https://cdn.replicate.com/ok.png"
+
+    adapter = ReplicateUpscaleAdapter(runner=flaky_runner, backoff_base=0)
+    result = await adapter.upscale("https://example.com/img.png")
+    assert result == "https://cdn.replicate.com/ok.png"
+    assert calls == 3  # 2 falhas + 1 sucesso
+
+
+async def test_upscale_raises_after_exhausting_retries():
+    calls = 0
+
+    async def always_timeout(ref: str, input: dict | None = None, **_: Any):
+        nonlocal calls
+        calls += 1
+        raise httpx.ConnectTimeout("connect failed")
+
+    adapter = ReplicateUpscaleAdapter(runner=always_timeout, max_retries=2, backoff_base=0)
+    with pytest.raises(httpx.ConnectTimeout):
+        await adapter.upscale("https://example.com/img.png")
+    assert calls == 3  # tentativa inicial + 2 retries

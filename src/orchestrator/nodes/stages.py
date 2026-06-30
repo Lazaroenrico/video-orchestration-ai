@@ -16,7 +16,8 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.types import interrupt
 
 import orchestrator.feedback_store as _feedback_store
-from orchestrator import stream_bus
+from orchestrator import media_store, stream_bus
+from orchestrator.config import default_media_path
 from orchestrator.graph.state import Item, new_item
 from orchestrator.nodes.base import as_item, get_adapter, get_pipeline
 from orchestrator.tracing import add_trace_metadata, traced
@@ -31,10 +32,17 @@ async def node_roster(state: dict[str, Any], config: RunnableConfig) -> dict[str
     run_cfg = config["configurable"].get("run", {})
     n = int(pipeline.get("roster", {}).get("creators", 5))
     creator_prompt = run_cfg.get("creator_prompt")
+    run_id = config["configurable"].get("thread_id", "run")
+    media_root = default_media_path()
     add_trace_metadata(step=3, stage="roster", creators=n)
 
     async def _build(i: int) -> dict[str, Any]:
         creator = await adapter.build_creator(index=i, system_prompt=creator_prompt)
+        # Baixa e persiste os bytes (imagem/voz) e reescreve as URIs para caminhos
+        # locais servíveis. No-op para mock:// / voice_id (sem rede, sem disco).
+        creator = await media_store.persist_creator_media(
+            creator, run_id=run_id, media_root=media_root,
+        )
         # Emite assim que cada creator fica pronto, com a mídia real (imagem + voz),
         # para feedback imediato na UI. No-op fora do contexto de streaming web.
         stream_bus.emit_token({

@@ -18,6 +18,7 @@ from typing import Any, Awaitable, Callable, Optional
 
 import replicate
 
+from orchestrator.adapters._retry import with_transport_retry
 from orchestrator.tracing import traced
 
 _DEFAULT_MODEL = (
@@ -48,16 +49,26 @@ class ReplicateUpscaleAdapter:
         model: str = _DEFAULT_MODEL,
         scale: int = 4,
         runner: Optional[Runner] = None,
+        max_retries: int = 3,
+        backoff_base: float = 1.0,
     ) -> None:
         self.model = model
         self.scale = scale
         self._runner: Runner = runner or replicate.async_run
+        self.max_retries = max_retries
+        self.backoff_base = backoff_base
 
     @traced("adapter.replicate_upscale.upscale", run_type="tool", step=3, provider="replicate")
     async def upscale(self, image_url: str) -> str:
-        """Faz upscale da imagem. Retorna a URL da imagem upscalada (string)."""
-        output = await self._runner(
-            self.model,
-            input={"image": image_url, "scale": self.scale},
+        """Faz upscale da imagem. Retorna a URL da imagem upscalada (string).
+
+        Retenta em blips de conexão (``httpx.ConnectTimeout`` etc.); erros HTTP e de
+        lógica propagam na hora.
+        """
+        output = await with_transport_retry(
+            lambda: self._runner(self.model, input={"image": image_url, "scale": self.scale}),
+            max_retries=self.max_retries,
+            backoff_base=self.backoff_base,
+            label="replicate.upscale",
         )
         return str(output)

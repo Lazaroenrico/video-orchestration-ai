@@ -17,6 +17,7 @@ from typing import Any, Awaitable, Callable, Optional
 
 import replicate
 
+from orchestrator.adapters._retry import with_transport_retry
 from orchestrator.tracing import traced
 
 _DEFAULT_MODEL = (
@@ -45,16 +46,26 @@ class ReplicateVoiceAdapter:
         self,
         model: str = _DEFAULT_MODEL,
         runner: Optional[Runner] = None,
+        max_retries: int = 3,
+        backoff_base: float = 1.0,
     ) -> None:
         self.model = model
         self._runner: Runner = runner or replicate.async_run
+        self.max_retries = max_retries
+        self.backoff_base = backoff_base
 
     @traced("adapter.replicate_voice.create_voice", run_type="tool", step=3, provider="replicate")
     async def create_voice(self, index: int) -> str:
-        """Gera a referência de voz do creator ``index``. Retorna uma string (URL)."""
-        output = await self._runner(
-            self.model,
-            input={"prompt": f"creator voice {index}"},
+        """Gera a referência de voz do creator ``index``. Retorna uma string (URL).
+
+        Retenta em blips de conexão (``httpx.ConnectTimeout`` etc.); erros HTTP e de
+        lógica propagam na hora.
+        """
+        output = await with_transport_retry(
+            lambda: self._runner(self.model, input={"prompt": f"creator voice {index}"}),
+            max_retries=self.max_retries,
+            backoff_base=self.backoff_base,
+            label="replicate.voice",
         )
         return self._coerce_output(output)
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import httpx
 import pytest
 
 from orchestrator.adapters.replicate_voice import ReplicateVoiceAdapter
@@ -71,9 +72,44 @@ async def test_different_indices_produce_different_prompts():
 
 
 async def test_create_voice_propagates_runner_error():
+    calls = 0
+
     async def failing_runner(ref: str, input: dict | None = None, **_: Any):
+        nonlocal calls
+        calls += 1
         raise RuntimeError("voice boom")
 
     adapter = ReplicateVoiceAdapter(runner=failing_runner)
     with pytest.raises(RuntimeError, match="voice boom"):
         await adapter.create_voice(0)
+    assert calls == 1  # RuntimeError não retenta
+
+
+async def test_create_voice_retries_on_connect_timeout_then_succeeds():
+    calls = 0
+
+    async def flaky_runner(ref: str, input: dict | None = None, **_: Any) -> Any:
+        nonlocal calls
+        calls += 1
+        if calls < 3:
+            raise httpx.ConnectTimeout("connect failed")
+        return "https://cdn.replicate.com/voice.wav"
+
+    adapter = ReplicateVoiceAdapter(runner=flaky_runner, backoff_base=0)
+    result = await adapter.create_voice(0)
+    assert result == "https://cdn.replicate.com/voice.wav"
+    assert calls == 3
+
+
+async def test_create_voice_raises_after_exhausting_retries():
+    calls = 0
+
+    async def always_timeout(ref: str, input: dict | None = None, **_: Any):
+        nonlocal calls
+        calls += 1
+        raise httpx.ConnectTimeout("connect failed")
+
+    adapter = ReplicateVoiceAdapter(runner=always_timeout, max_retries=2, backoff_base=0)
+    with pytest.raises(httpx.ConnectTimeout):
+        await adapter.create_voice(0)
+    assert calls == 3

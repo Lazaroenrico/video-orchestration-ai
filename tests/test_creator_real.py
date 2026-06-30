@@ -361,6 +361,67 @@ async def test_build_real_creator_adapter_factory() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Degradação graciosa: a face gerada nunca é perdida
+# ---------------------------------------------------------------------------
+
+
+class _FakeImage:
+    def __init__(self, primary: str = "data:image/png;base64,AAAA") -> None:
+        self.primary = primary
+
+    async def generate_face(self, index: int, system_prompt=None) -> dict:
+        return {"primary": self.primary, "angles": ["front", "3/4", "profile", "smile", "neutral"]}
+
+
+class _BoomUpscale:
+    async def upscale(self, image_url: str) -> str:
+        raise RuntimeError("upscale indisponível")
+
+
+class _OkUpscale:
+    async def upscale(self, image_url: str) -> str:
+        return "https://cdn/upscaled.png"
+
+
+class _BoomVoice:
+    async def create_voice(self, index: int) -> str:
+        raise RuntimeError("voz indisponível")
+
+
+class _OkVoice:
+    async def create_voice(self, index: int) -> str:
+        return "voice-xyz"
+
+
+async def test_build_creator_falls_back_to_generated_face_when_upscale_fails() -> None:
+    """Upscale falha → usa a face gerada (não-upscalada); creator não levanta."""
+    creator = RealCreatorAdapter(image=_FakeImage(), topaz=_BoomUpscale(), voice=_OkVoice())
+    result = await creator.build_creator(0)
+    assert result["upscaled_base"] == "data:image/png;base64,AAAA"
+    assert result["voice_id"] == "voice-xyz"
+
+
+async def test_build_creator_falls_back_to_empty_voice_when_voice_fails() -> None:
+    """Voz falha → voice_id vazio; imagem preservada, creator não levanta."""
+    creator = RealCreatorAdapter(image=_FakeImage(), topaz=_OkUpscale(), voice=_BoomVoice())
+    result = await creator.build_creator(0)
+    assert result["upscaled_base"] == "https://cdn/upscaled.png"
+    assert result["voice_id"] == ""
+
+
+async def test_build_creator_propagates_when_face_generation_fails() -> None:
+    """Sem face não há o que salvar → generate_face falhar deve propagar."""
+
+    class _BoomImage:
+        async def generate_face(self, index: int, system_prompt=None) -> dict:
+            raise RuntimeError("image indisponível")
+
+    creator = RealCreatorAdapter(image=_BoomImage(), topaz=_OkUpscale(), voice=_OkVoice())
+    with pytest.raises(RuntimeError, match="image indisponível"):
+        await creator.build_creator(0)
+
+
+# ---------------------------------------------------------------------------
 # Testes do GPT Image 2 via Vercel AI Gateway
 # (contrato confirmado em https://vercel.com/docs/ai-gateway image-generation)
 # ---------------------------------------------------------------------------
