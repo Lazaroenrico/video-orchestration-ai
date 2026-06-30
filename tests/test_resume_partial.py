@@ -39,7 +39,7 @@ class FlakyAdapter(MockAdapter):
         self._failed_once: bool = False
         self.generate_clip_call_count: int = 0
 
-    async def generate_clip(self, item_id: str, tier: str, seconds: int, attempt: int) -> Artifact:
+    async def generate_clip(self, item_id: str, tier: str, seconds: int, attempt: int, system_prompt=None) -> Artifact:
         self.generate_clip_call_count += 1
         if not self._failed_once and self.generate_clip_call_count == self._fail_on_call:
             self._failed_once = True
@@ -47,7 +47,7 @@ class FlakyAdapter(MockAdapter):
                 f"boom — falha controlada na chamada #{self._fail_on_call} de generate_clip "
                 f"(item_id={item_id})"
             )
-        return await super().generate_clip(item_id=item_id, tier=tier, seconds=seconds, attempt=attempt)
+        return await super().generate_clip(item_id=item_id, tier=tier, seconds=seconds, attempt=attempt, system_prompt=system_prompt)
 
 
 # ---------------------------------------------------------------------------

@@ -27,14 +27,17 @@ class LLMPort(Protocol):
 class CreatorPort(Protocol):
     """GPT Image 2 + Topaz + ElevenLabs — creator reutilizável (Step 3)."""
 
-    async def build_creator(self, index: int) -> dict[str, Any]: ...
+    async def build_creator(self, index: int, system_prompt: Optional[str] = None) -> dict[str, Any]: ...
 
 
 @runtime_checkable
 class VideoPort(Protocol):
     """LTX / Kling / Seedance via plataforma de geração (Steps 4 e 5)."""
 
-    async def generate_clip(self, item_id: str, tier: str, seconds: int, attempt: int) -> Artifact: ...
+    async def generate_clip(
+        self, item_id: str, tier: str, seconds: int, attempt: int,
+        system_prompt: Optional[str] = None,
+    ) -> Artifact: ...
 
 
 @runtime_checkable

@@ -38,6 +38,7 @@ from typing import Any, Optional
 import httpx
 
 from orchestrator.graph.state import Artifact
+from orchestrator.tracing import traced
 
 
 class ReplicateVideoAdapter:
@@ -70,12 +71,14 @@ class ReplicateVideoAdapter:
         self.token = token or os.environ.get("REPLICATE_API_TOKEN", "")
         self._client = client
 
+    @traced("adapter.replicate_video.generate_clip", run_type="tool", step="video", provider="replicate")
     async def generate_clip(
         self,
         item_id: str,
         tier: str,
         seconds: int,
         attempt: int,
+        system_prompt: Optional[str] = None,
     ) -> Artifact:
         """Gera um clip via POST ``{base_url}/predictions``.
 
@@ -89,13 +92,16 @@ class ReplicateVideoAdapter:
             "Authorization": f"Token {self.token}",
             "Content-Type": "application/json",
         }
+        inp: dict[str, Any] = {
+            "item_id": item_id,
+            "seconds": seconds,
+            "attempt": attempt,
+        }
+        if system_prompt:
+            inp["prompt"] = system_prompt
         body = {
             "model": model,
-            "input": {
-                "item_id": item_id,
-                "seconds": seconds,
-                "attempt": attempt,
-            },
+            "input": inp,
         }
 
         if self._client is not None:

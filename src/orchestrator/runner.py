@@ -11,6 +11,7 @@ from orchestrator.graph.builder import build_graph
 from orchestrator.graph.checkpoint import open_checkpointer
 from orchestrator.graph.state import Item
 from orchestrator.registry import build_adapter_from_providers
+from orchestrator.tracing import run_trace_config
 
 
 def _build_config(
@@ -49,6 +50,7 @@ async def run_pipeline(
 ) -> tuple[str, dict[str, Any]]:
     run_id = run_id or f"run-{uuid.uuid4().hex[:8]}"
     cfg = _build_config(pipeline, providers, run_id, platform, feedback_store)
+    cfg.update(run_trace_config(run_id, offer=offer, platform=platform, batch=batch))
     # Step 10 -> Step 1: lê o feedback do ciclo anterior (se houver) e o injeta no
     # estado inicial, fechando o loop (concepts pode usar isso como viés no futuro).
     prior = load_latest_feedback(feedback_store) if feedback_store is not None else None
@@ -107,6 +109,7 @@ async def resume_pipeline(
     feedback_store: Optional[str | Path] = None,
 ) -> tuple[str, dict[str, Any]]:
     cfg = _build_config(pipeline, providers, run_id, platform, feedback_store)
+    cfg.update(run_trace_config(run_id, platform=platform))
     async with open_checkpointer(db_path) as cp:
         app = build_graph(pipeline, checkpointer=cp)
         out = await app.ainvoke(None, cfg)  # None => retoma do checkpoint

@@ -28,6 +28,7 @@ from orchestrator.adapters.openai_image import OpenAIImageAdapter, build_openai_
 from orchestrator.adapters.replicate_upscale import ReplicateUpscaleAdapter
 from orchestrator.adapters.replicate_voice import ReplicateVoiceAdapter
 from orchestrator.adapters.topaz_upscale import TopazUpscaleAdapter
+from orchestrator.tracing import traced
 
 
 class RealCreatorAdapter:
@@ -53,12 +54,13 @@ class RealCreatorAdapter:
         self.topaz = topaz if topaz is not None else TopazUpscaleAdapter()
         self.voice = voice if voice is not None else ElevenLabsVoiceAdapter()
 
-    async def build_creator(self, index: int) -> dict[str, Any]:
+    @traced("adapter.creator_real.build_creator", run_type="chain", step=3, provider="creator_real")
+    async def build_creator(self, index: int, system_prompt: Optional[str] = None) -> dict[str, Any]:
         """Constrói o creator reutilizável combinando imagem, upscale e voz.
 
         Retorna o mesmo shape que ``MockAdapter.build_creator``.
         """
-        face = await self.image.generate_face(index)
+        face = await self.image.generate_face(index, system_prompt=system_prompt)
         upscaled = await self.topaz.upscale(face["primary"])
         voice_id = await self.voice.create_voice(index)
 

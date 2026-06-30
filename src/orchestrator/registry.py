@@ -24,6 +24,7 @@ from orchestrator.adapters.creator_real import (
 )
 from orchestrator.adapters.mock import MockAdapter
 from orchestrator.adapters.replicate_video import ReplicateVideoAdapter
+from orchestrator.tracing import traced
 
 # Papéis que o grafo exerce (cada método de node mapeia para um destes).
 ROLES = ("llm", "creator", "video", "qc", "assembly", "distribution")
@@ -75,29 +76,36 @@ class CompositeAdapter:
         self._by_role = by_role
 
     # --- llm (Steps 1 e 2) ---
+    @traced("adapter.llm.generate_concepts", run_type="chain", role="llm", step=1)
     async def generate_concepts(self, *args: Any, **kwargs: Any) -> Any:
         return await self._by_role["llm"].generate_concepts(*args, **kwargs)
 
+    @traced("adapter.llm.write_script", run_type="chain", role="llm", step=2)
     async def write_script(self, *args: Any, **kwargs: Any) -> Any:
         return await self._by_role["llm"].write_script(*args, **kwargs)
 
     # --- creator (Step 3) ---
+    @traced("adapter.creator.build_creator", run_type="chain", role="creator", step=3)
     async def build_creator(self, *args: Any, **kwargs: Any) -> Any:
         return await self._by_role["creator"].build_creator(*args, **kwargs)
 
     # --- video (Steps 4 e 5) ---
+    @traced("adapter.video.generate_clip", run_type="chain", role="video", step="video")
     async def generate_clip(self, *args: Any, **kwargs: Any) -> Any:
         return await self._by_role["video"].generate_clip(*args, **kwargs)
 
     # --- qc (Step 7) ---
+    @traced("adapter.qc.qc_check", run_type="chain", role="qc", step=7)
     async def qc_check(self, *args: Any, **kwargs: Any) -> Any:
         return await self._by_role["qc"].qc_check(*args, **kwargs)
 
     # --- assembly (Step 8) ---
+    @traced("adapter.assembly.assemble", run_type="chain", role="assembly", step=8)
     async def assemble(self, *args: Any, **kwargs: Any) -> Any:
         return await self._by_role["assembly"].assemble(*args, **kwargs)
 
     # --- distribution (Step 9) ---
+    @traced("adapter.distribution.distribute", run_type="chain", role="distribution", step=9)
     async def distribute(self, *args: Any, **kwargs: Any) -> Any:
         return await self._by_role["distribution"].distribute(*args, **kwargs)
 

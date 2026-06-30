@@ -18,6 +18,7 @@ from orchestrator.graph.state import BatchState, Item, new_item
 from orchestrator.nodes.base import as_item, tier_names
 from orchestrator.nodes.stages import (
     make_gen_node,
+    node_approval,
     node_assembly,
     node_concepts,
     node_distribution,
@@ -28,6 +29,7 @@ from orchestrator.nodes.stages import (
     node_roster,
     node_script,
 )
+from orchestrator.tracing import add_trace_metadata, traced
 
 
 def build_item_graph(pipeline: dict[str, Any]):
@@ -43,24 +45,15 @@ def build_item_graph(pipeline: dict[str, Any]):
         sg.add_node(t, make_gen_node(t))
     sg.add_node("product_demo", node_product_demo)
 
-    async def node_qc_and_route(state: dict[str, Any], config: RunnableConfig) -> Command:
-        update = await node_qc(state, config)
-        updated_item = as_item(state).model_copy(update=update)
-        destination = route_after_qc(updated_item, max_attempts, tns)
-        return Command(update=update, goto=destination)
-
-    sg.add_node("qc", node_qc_and_route, destinations=qc_map)
+    sg.add_node("qc", make_qc_route_node(tns, max_attempts), destinations=qc_map)
     sg.add_node("assembly", node_assembly)
     sg.add_node("distribution", node_distribution)
     sg.add_node("drop", node_drop)
 
     sg.add_edge(START, "script")
 
-    async def route_after_script_node(state: dict[str, Any]) -> str:
-        return route_after_script(as_item(state), tns)
-
     sg.add_conditional_edges(
-        "script", route_after_script_node, {t: t for t in tns}
+        "script", make_script_route_node(tns), {t: t for t in tns}
     )
     for t in tns:
         sg.add_edge(t, "product_demo")
@@ -69,6 +62,33 @@ def build_item_graph(pipeline: dict[str, Any]):
     sg.add_edge("distribution", END)
     sg.add_edge("drop", END)
     return sg.compile()
+
+
+def make_qc_route_node(tns: list[str], max_attempts: int):
+    """Cria o node de QC + roteamento com marcador de tracing testável."""
+
+    @traced("node.qc.route", run_type="chain", step=7)
+    async def node_qc_and_route(state: dict[str, Any], config: RunnableConfig) -> Command:
+        update = await node_qc(state, config)
+        updated_item = as_item(state).model_copy(update=update)
+        destination = route_after_qc(updated_item, max_attempts, tns)
+        add_trace_metadata(
+            step=7, stage="qc_route", item_id=updated_item.id,
+            destination=destination,
+        )
+        return Command(update=update, goto=destination)
+
+    return node_qc_and_route
+
+
+def make_script_route_node(tns: list[str]):
+    """Cria o roteador pós-script com marcador de tracing testável."""
+
+    @traced("node.script.route", run_type="chain", step=4)
+    async def route_after_script_node(state: dict[str, Any]) -> str:
+        return route_after_script(as_item(state), tns)
+
+    return route_after_script_node
 
 
 def _sub_config(config: dict[str, Any]) -> dict[str, Any]:
@@ -84,31 +104,35 @@ def _sub_config(config: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def build_graph(pipeline: dict[str, Any], checkpointer: Optional[Any] = None):
-    """Grafo de topo, com fan-out paralelo e (opcional) checkpointer p/ resume."""
-    item_app = build_item_graph(pipeline)
+def make_process_item_node(item_app: Any):
+    """Cria o node do fan-out por item com marcador de tracing testável."""
 
-    g = StateGraph(BatchState)
-    g.add_node("roster", node_roster)
-    g.add_node("concepts", node_concepts)
-
+    @traced("node.process_item", run_type="chain", step=6)
     async def process_item(state: dict[str, Any], config: RunnableConfig) -> dict[str, Any]:
+        item_in = as_item(state)
+        add_trace_metadata(step=6, stage="process_item", item_id=item_in.id)
         result = await item_app.ainvoke(state, _sub_config(config))
         item = as_item(result)
+        add_trace_metadata(
+            step=6, stage="process_item_done", item_id=item.id,
+            cost_usd=item.cost_usd, dropped=item.dropped, distributed=item.distributed,
+        )
         return {
             "results": [item],
             "total_cost_usd": item.cost_usd,
         }
 
-    g.add_node("process_item", process_item)
-    g.add_node("feedback", node_feedback)
+    return process_item
 
-    g.add_edge(START, "roster")
-    g.add_edge("roster", "concepts")
 
+def make_fan_out_node():
+    """Cria o fan-out de conceitos para itens com marcador de tracing testável."""
+
+    @traced("node.fan_out", run_type="chain", step=6)
     async def fan_out(state: dict[str, Any]) -> list[Send]:
         concepts = state.get("concepts", [])
         roster = state.get("roster") or [{}]
+        add_trace_metadata(step=6, stage="fan_out", items=len(concepts), roster_size=len(roster))
         sends: list[Send] = []
         for i, concept in enumerate(concepts):
             creator = roster[i % len(roster)]
@@ -119,7 +143,26 @@ def build_graph(pipeline: dict[str, Any], checkpointer: Optional[Any] = None):
             sends.append(Send("process_item", item.model_dump()))
         return sends
 
-    g.add_conditional_edges("concepts", fan_out, ["process_item"])
+    return fan_out
+
+
+def build_graph(pipeline: dict[str, Any], checkpointer: Optional[Any] = None):
+    """Grafo de topo, com fan-out paralelo e (opcional) checkpointer p/ resume."""
+    item_app = build_item_graph(pipeline)
+
+    g = StateGraph(BatchState)
+    g.add_node("roster", node_roster)
+    g.add_node("approval", node_approval)
+    g.add_node("concepts", node_concepts)
+
+    g.add_node("process_item", make_process_item_node(item_app))
+    g.add_node("feedback", node_feedback)
+
+    g.add_edge(START, "roster")
+    g.add_edge("roster", "approval")
+    g.add_edge("approval", "concepts")
+
+    g.add_conditional_edges("concepts", make_fan_out_node(), ["process_item"])
     g.add_edge("process_item", "feedback")
     g.add_edge("feedback", END)
     return g.compile(checkpointer=checkpointer)

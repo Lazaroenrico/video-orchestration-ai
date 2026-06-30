@@ -47,3 +47,7 @@ def load_judge(path: str | None = None) -> dict[str, Any]:
 
 def default_db_path() -> Path:
     return Path(os.environ.get("ORCH_DB", ".orchestrator/runs.sqlite"))
+
+
+def default_creator_store_path() -> Path:
+    return Path(os.environ.get("ORCH_CREATORS", ".orchestrator/creators.json"))

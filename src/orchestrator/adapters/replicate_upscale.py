@@ -18,6 +18,8 @@ from typing import Any, Awaitable, Callable, Optional
 
 import replicate
 
+from orchestrator.tracing import traced
+
 _DEFAULT_MODEL = (
     "nightmareai/real-esrgan:"
     "b3ef194191d13140337468c916c2c5b96dd0cb06dffc032a022a31807f6a5ea8"
@@ -51,6 +53,7 @@ class ReplicateUpscaleAdapter:
         self.scale = scale
         self._runner: Runner = runner or replicate.async_run
 
+    @traced("adapter.replicate_upscale.upscale", run_type="tool", step=3, provider="replicate")
     async def upscale(self, image_url: str) -> str:
         """Faz upscale da imagem. Retorna a URL da imagem upscalada (string)."""
         output = await self._runner(

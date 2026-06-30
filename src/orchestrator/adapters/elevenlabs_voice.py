@@ -29,6 +29,8 @@ from typing import Optional
 
 import httpx
 
+from orchestrator.tracing import traced
+
 
 class ElevenLabsVoiceAdapter:
     """Cria voz sintética de creator via ElevenLabs.
@@ -55,6 +57,7 @@ class ElevenLabsVoiceAdapter:
         self.token = token or os.environ.get("ELEVENLABS_API_KEY", "")
         self._client = client
 
+    @traced("adapter.elevenlabs.create_voice", run_type="tool", step=3, provider="elevenlabs")
     async def create_voice(self, index: int) -> str:
         """Cria voz de creator via POST ``{base_url}/voices/add``.
 

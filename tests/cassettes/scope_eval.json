@@ -1,0 +1,47 @@
+{
+  "scope-1": {
+    "json": {
+      "output": {
+        "score": 0.94,
+        "verdict": "pass"
+      }
+    },
+    "status": 200
+  },
+  "scope-2": {
+    "json": {
+      "output": {
+        "score": 0.91,
+        "verdict": "pass"
+      }
+    },
+    "status": 200
+  },
+  "scope-3": {
+    "json": {
+      "output": {
+        "score": 0.88,
+        "verdict": "pass"
+      }
+    },
+    "status": 200
+  },
+  "scope-4": {
+    "json": {
+      "output": {
+        "score": 0.35,
+        "verdict": "fail"
+      }
+    },
+    "status": 200
+  },
+  "scope-5": {
+    "json": {
+      "output": {
+        "score": 0.42,
+        "verdict": "fail"
+      }
+    },
+    "status": 200
+  }
+}

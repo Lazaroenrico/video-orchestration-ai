@@ -14,13 +14,18 @@ import json
 import uuid
 from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import urlparse
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 
+from langgraph.types import Command
+
 from orchestrator import runner, stream_bus
-from orchestrator.config import default_db_path, load_pipeline, load_providers
+import orchestrator.creator_store as creator_store
+from orchestrator.config import default_creator_store_path, default_db_path, load_pipeline, load_providers
+from orchestrator.tracing import run_trace_config
 from orchestrator.graph.builder import build_graph
 from orchestrator.graph.checkpoint import open_checkpointer
 from orchestrator.registry import build_adapter_from_providers
@@ -31,13 +36,20 @@ app = FastAPI(title="UGC Orchestrator")
 _runs: dict[str, dict[str, Any]] = {}
 
 PIPELINE_NODES = {
-    "roster", "concepts", "process_item", "feedback",
+    "roster", "approval", "concepts", "process_item", "feedback",
     "script", "ltx", "kling", "seedance",
     "product_demo", "qc", "assembly", "distribution", "drop",
 }
 
+ITEM_UPDATE_NODES = {
+    "script", "ltx", "kling", "seedance",
+    "product_demo", "qc", "assembly", "distribution", "drop",
+    "process_item",
+}
+
 NODE_LABELS: dict[str, str] = {
     "roster": "Creator Roster",
+    "approval": "Aceite Human",
     "concepts": "Conceitos",
     "process_item": "Item",
     "feedback": "Feedback",
@@ -74,6 +86,236 @@ async def _emit(run_id: str, event: dict[str, Any]) -> None:
     _emit_sync(run_id, event)
 
 
+def _to_plain(obj: Any) -> Any:
+    """Converte pydantic models e containers para estruturas JSON-like."""
+    if hasattr(obj, "model_dump"):
+        obj = obj.model_dump()
+    if isinstance(obj, dict):
+        return {k: _to_plain(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_to_plain(v) for v in obj]
+    return obj
+
+
+def _media_type_for_uri(uri: str) -> str:
+    lower = uri.lower()
+    if lower.startswith("data:image/"):
+        return "image"
+    if lower.startswith("data:video/"):
+        return "video"
+    if lower.startswith("data:audio/"):
+        return "audio"
+    path = urlparse(uri).path.lower()
+    if path.endswith((".png", ".jpg", ".jpeg", ".webp", ".gif", ".avif")):
+        return "image"
+    if path.endswith((".mp4", ".mov", ".webm", ".m4v")):
+        return "video"
+    if path.endswith((".mp3", ".wav", ".m4a", ".ogg")):
+        return "audio"
+    return "reference"
+
+
+def _is_renderable_uri(uri: str) -> bool:
+    parsed = urlparse(uri)
+    if parsed.scheme in {"http", "https"}:
+        return _media_type_for_uri(uri) != "reference"
+    if uri.startswith("data:"):
+        return _media_type_for_uri(uri) in {"image", "video", "audio"}
+    if parsed.scheme:
+        return False
+    # Path local já servido pelo web app, absoluto ou relativo.
+    if uri.startswith("/") or uri.startswith("./") or uri.startswith("../"):
+        return _media_type_for_uri(uri) != "reference"
+    return False
+
+
+def _normalize_artifact(art: Any) -> Optional[dict[str, Any]]:
+    """Normaliza um Artifact para o contrato público da UI."""
+    art = _to_plain(art)
+    if not isinstance(art, dict) or not art.get("uri"):
+        return None
+    uri = str(art["uri"])
+    media_type = _media_type_for_uri(uri)
+    return {
+        "kind": art.get("kind", "artifact"),
+        "uri": uri,
+        "media_type": media_type,
+        "renderable": _is_renderable_uri(uri),
+    }
+
+
+def _normalize_creator(creator: dict[str, Any]) -> dict[str, Any]:
+    """Normaliza creator mantendo aliases legados durante a migração da UI."""
+    image_uri = (
+        creator.get("image_uri")
+        or creator.get("image")
+        or creator.get("upscaled_base")
+    )
+    voice_ref = (
+        creator.get("voice_ref")
+        or creator.get("voice")
+        or creator.get("voice_id")
+    )
+    voice_preview_uri = (
+        creator.get("voice_preview_uri")
+        or creator.get("voice_preview")
+        or creator.get("preview_uri")
+    )
+    return {
+        "id": creator.get("id") or creator.get("creator_id"),
+        "image_uri": image_uri,
+        "voice_ref": voice_ref,
+        "voice_preview_uri": voice_preview_uri,
+        "image": image_uri,
+        "voice": voice_ref,
+        "angles": list(creator.get("angles") or []),
+    }
+
+
+def _artifact_dict(art: Any) -> Optional[dict[str, Any]]:
+    """Normaliza um Artifact (model ou dict) para o contrato público da UI."""
+    if hasattr(art, "model_dump"):
+        art = art.model_dump()
+    return _normalize_artifact(art)
+
+
+def _extract_artifacts(item: dict[str, Any]) -> list[dict[str, Any]]:
+    """Lista os artefatos gerados (clips + montagem final) com kind e uri."""
+    arts: list[dict[str, Any]] = []
+    for clip in item.get("clips", []) or []:
+        norm = _artifact_dict(clip)
+        if norm:
+            arts.append(norm)
+    final = _artifact_dict(item.get("assembled"))
+    if final:
+        arts.append(final)
+    return arts
+
+
+def _normalize_qc(qc: Any) -> Optional[dict[str, Any]]:
+    qc = _to_plain(qc)
+    if not isinstance(qc, dict):
+        return None
+    return {
+        "passed": bool(qc.get("passed")),
+        "score": qc.get("score"),
+        "reasons": list(qc.get("reasons") or []),
+    }
+
+
+def _snapshot_from_item(item: Any) -> dict[str, Any]:
+    item = _to_plain(item)
+    if not isinstance(item, dict):
+        return {}
+    snap: dict[str, Any] = {}
+    for key in (
+        "id", "creator_ref", "concept", "script", "tier",
+        "attempts", "cost_usd", "distributed", "dropped",
+    ):
+        if key in item:
+            snap[key] = _safe_serialize(item[key])
+    if item.get("qc") is not None:
+        snap["qc"] = _normalize_qc(item["qc"])
+    artifacts = _extract_artifacts(item)
+    if artifacts:
+        snap["artifacts"] = artifacts
+    assembled = _normalize_artifact(item.get("assembled"))
+    if assembled:
+        snap["assembled"] = assembled
+    return snap
+
+
+def _merge_artifacts(
+    existing: list[dict[str, Any]] | None,
+    incoming: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    merged: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for art in (existing or []) + (incoming or []):
+        key = (str(art.get("kind")), str(art.get("uri")))
+        if art.get("uri") and key not in seen:
+            merged.append(art)
+            seen.add(key)
+    return merged
+
+
+def _merge_item_snapshot(base: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:
+    merged = {**base, **{k: v for k, v in incoming.items() if k != "artifacts"}}
+    if "artifacts" in base or "artifacts" in incoming:
+        merged["artifacts"] = _merge_artifacts(base.get("artifacts"), incoming.get("artifacts"))
+    return merged
+
+
+def _item_id_from(data: dict[str, Any], current: dict[str, Any]) -> Optional[str]:
+    for candidate in (data.get("input"), data.get("output"), current):
+        plain = _to_plain(candidate)
+        if isinstance(plain, dict) and plain.get("id"):
+            return str(plain["id"])
+    output = _to_plain(data.get("output"))
+    if isinstance(output, dict):
+        results = output.get("results") or []
+        if results:
+            item = _to_plain(results[-1])
+            if isinstance(item, dict) and item.get("id"):
+                return str(item["id"])
+    return None
+
+
+def _complete_item_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": snapshot.get("id"),
+        "creator_ref": snapshot.get("creator_ref"),
+        "concept": snapshot.get("concept") or {},
+        "script": snapshot.get("script"),
+        "tier": snapshot.get("tier"),
+        "attempts": snapshot.get("attempts", 0),
+        "cost_usd": snapshot.get("cost_usd", 0.0),
+        "qc": snapshot.get("qc"),
+        "artifacts": snapshot.get("artifacts") or [],
+        "assembled": snapshot.get("assembled"),
+        "distributed": snapshot.get("distributed", False),
+        "dropped": snapshot.get("dropped", False),
+    }
+
+
+def _build_item_update(
+    run_id: str,
+    node: str,
+    data: dict[str, Any],
+    snapshots: dict[str, dict[str, Any]],
+) -> Optional[dict[str, Any]]:
+    """Cria ``item_update`` incremental a partir de um ``node_end`` LangGraph."""
+    if node not in ITEM_UPDATE_NODES:
+        return None
+    output = _to_plain(data.get("output"))
+    if node == "process_item" and isinstance(output, dict):
+        results = output.get("results") or []
+        if not results:
+            return None
+        incoming = _snapshot_from_item(results[-1])
+    else:
+        current = _snapshot_from_item(data.get("input"))
+        item_id = _item_id_from(data, current)
+        if not item_id:
+            return None
+        incoming = _merge_item_snapshot(current, _snapshot_from_item(output))
+        incoming["id"] = item_id
+
+    item_id = str(incoming.get("id") or "")
+    if not item_id:
+        return None
+    previous = snapshots.get(item_id, {})
+    snapshot = _merge_item_snapshot(previous, incoming)
+    snapshots[item_id] = snapshot
+    return {
+        "type": "item_update",
+        "run_id": run_id,
+        "node": node,
+        "label": NODE_LABELS.get(node, node),
+        "item": _safe_serialize(_complete_item_payload(snapshot)),
+    }
+
+
 def _safe_serialize(obj: Any, depth: int = 0) -> Any:
     """Serializa de forma segura objetos do estado para JSON."""
     if depth > 3:
@@ -100,13 +342,30 @@ async def _execute_run(
     platform: str,
     config_dir: Optional[str],
     db_path: str,
+    creator_prompt: Optional[str] = None,
+    video_prompt: Optional[str] = None,
 ) -> None:
-    """Roda a pipeline completa, emitindo eventos para os subscribers SSE."""
+    """Roda a pipeline completa, emitindo eventos para os subscribers SSE.
+
+    Quando ``approve_creators=True`` o loop pausa no interrupt, emite
+    ``awaiting_approval`` e aguarda a resolução do Future criado por
+    ``POST /api/approve/{run_id}``, depois retoma com ``Command(resume=...)``.
+    """
 
     def token_cb(event: dict[str, Any]) -> None:
+        if event.get("type") == "creator_ready" and isinstance(event.get("creator"), dict):
+            event = {**event, "creator": _normalize_creator(event["creator"])}
         _emit_sync(run_id, event)
 
     stream_bus.set_token_callback(token_cb)
+
+    store_path = str(default_creator_store_path())
+    # Guarda metadados do run para uso no record_creators
+    run_state = _runs.get(run_id, {})
+    run_state["offer"] = offer
+    run_state["creator_prompt"] = creator_prompt
+    run_state["video_prompt"] = video_prompt
+    run_state.setdefault("item_snapshots", {})
 
     try:
         pipeline = load_pipeline(config_dir)
@@ -117,13 +376,19 @@ async def _execute_run(
             "configurable": {
                 "adapter": adapter,
                 "pipeline": pipeline,
-                "run": {"platform": platform},
+                "run": {
+                    "platform": platform,
+                    "creator_prompt": creator_prompt,
+                    "video_prompt": video_prompt,
+                    "approve_creators": True,
+                },
                 "thread_id": run_id,
             },
             "max_concurrency": int(pipeline.get("batch", {}).get("max_concurrency", 8)),
             "recursion_limit": 100,
         }
-        init = {
+        cfg.update(run_trace_config(run_id, offer=offer, platform=platform, batch=batch))
+        init: Any = {
             "run_id": run_id,
             "config": {"offer": offer, "batch_size": batch},
         }
@@ -134,48 +399,94 @@ async def _execute_run(
 
         async with open_checkpointer(db_path) as cp:
             graph = build_graph(pipeline, checkpointer=cp)
-            async for event in graph.astream_events(init, cfg, version="v2"):
-                etype: str = event["event"]
-                meta = event.get("metadata", {})
-                node = meta.get("langgraph_node") or event.get("name", "")
+            resume_input = init
 
-                if node in PIPELINE_NODES:
-                    if etype == "on_chain_start":
-                        await _emit(run_id, {
-                            "type": "node_start",
-                            "node": node,
-                            "label": NODE_LABELS.get(node, node),
-                        })
-                    elif etype == "on_chain_end":
-                        output = event.get("data", {}).get("output", {})
-                        payload: dict[str, Any] = {
-                            "type": "node_end",
-                            "node": node,
-                            "label": NODE_LABELS.get(node, node),
-                        }
-                        # Para process_item extraímos o resumo do item
-                        if node == "process_item" and isinstance(output, dict):
-                            items = output.get("results", [])
-                            if items:
-                                item = items[-1]
-                                if hasattr(item, "model_dump"):
-                                    item = item.model_dump()
-                                payload["item"] = _safe_serialize({
-                                    "id": item.get("id"),
-                                    "concept": item.get("concept", {}),
-                                    "distributed": item.get("distributed"),
-                                    "dropped": item.get("dropped"),
-                                    "attempts": item.get("attempts"),
-                                    "cost_usd": item.get("cost_usd"),
-                                    "qc": item.get("qc"),
-                                })
-                        await _emit(run_id, payload)
+            while True:
+                async for event in graph.astream_events(resume_input, cfg, version="v2"):
+                    etype: str = event["event"]
+                    meta = event.get("metadata", {})
+                    node = meta.get("langgraph_node") or event.get("name", "")
 
-                # Captura o estado final do grafo raiz
-                if etype == "on_chain_end" and event.get("name") == "LangGraph":
-                    out = event.get("data", {}).get("output", {})
-                    if isinstance(out, dict):
-                        final_output = out
+                    if node in PIPELINE_NODES:
+                        if etype == "on_chain_start":
+                            await _emit(run_id, {
+                                "type": "node_start",
+                                "node": node,
+                                "label": NODE_LABELS.get(node, node),
+                            })
+                        elif etype == "on_chain_end":
+                            data = event.get("data", {})
+                            output = data.get("output", {})
+                            payload: dict[str, Any] = {
+                                "type": "node_end",
+                                "node": node,
+                                "label": NODE_LABELS.get(node, node),
+                            }
+                            # Para process_item extraímos o resumo do item
+                            if node == "process_item" and isinstance(output, dict):
+                                items = output.get("results", [])
+                                if items:
+                                    item = items[-1]
+                                    if hasattr(item, "model_dump"):
+                                        item = item.model_dump()
+                                    payload["item"] = _safe_serialize({
+                                        "id": item.get("id"),
+                                        "concept": item.get("concept", {}),
+                                        "distributed": item.get("distributed"),
+                                        "dropped": item.get("dropped"),
+                                        "attempts": item.get("attempts"),
+                                        "cost_usd": item.get("cost_usd"),
+                                        "qc": item.get("qc"),
+                                        "artifacts": _extract_artifacts(item),
+                                    })
+                            await _emit(run_id, payload)
+                            item_update = _build_item_update(
+                                run_id,
+                                node,
+                                data,
+                                run_state.setdefault("item_snapshots", {}),
+                            )
+                            if item_update:
+                                await _emit(run_id, item_update)
+
+                    # Captura o estado final do grafo raiz
+                    if etype == "on_chain_end" and event.get("name") == "LangGraph":
+                        out = event.get("data", {}).get("output", {})
+                        if isinstance(out, dict):
+                            final_output = out
+
+                # Verifica se há interrupt pendente
+                snap = await graph.aget_state(cfg)
+                all_interrupts = [i for t in snap.tasks for i in getattr(t, "interrupts", ())]
+                if snap.next and all_interrupts:
+                    intr_payload = all_interrupts[0].value  # {"type":"approve_creators",...}
+                    # NÃO usar **intr_payload aqui: ele carrega seu próprio "type"
+                    # ("approve_creators") que sobrescreveria o "awaiting_approval".
+                    await _emit(run_id, {
+                        "type": "awaiting_approval",
+                        "creators": [
+                            _normalize_creator(c)
+                            for c in intr_payload.get("creators", [])
+                        ],
+                    })
+                    # Cria Future e aguarda decisão via POST /api/approve
+                    fut: asyncio.Future = asyncio.get_event_loop().create_future()
+                    run_state_ref = _runs.get(run_id)
+                    if run_state_ref is not None:
+                        run_state_ref["approval"] = fut
+                    decision = await fut
+                    # Persiste creators no store
+                    creator_store.record_creators(
+                        store_path, run_id,
+                        [_normalize_creator(c) for c in intr_payload.get("creators", [])],
+                        approved_ids=decision.get("approved", []),
+                        creator_prompt=creator_prompt,
+                        video_prompt=video_prompt,
+                        offer=offer,
+                    )
+                    resume_input = Command(resume=decision)
+                    continue
+                break
 
         summary = runner.summarize({**final_output, "run_id": run_id}) if final_output else {}
         await _emit(run_id, {"type": "run_end", "run_id": run_id, "summary": summary})
@@ -202,6 +513,8 @@ class RunRequest(BaseModel):
     platform: str = "tiktok"
     config_dir: Optional[str] = None
     db: Optional[str] = None
+    creator_prompt: Optional[str] = None
+    video_prompt: Optional[str] = None
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -218,8 +531,28 @@ async def start_run(req: RunRequest, background_tasks: BackgroundTasks) -> dict[
     background_tasks.add_task(
         _execute_run,
         run_id, req.offer, req.batch, req.platform, req.config_dir, db_path,
+        req.creator_prompt, req.video_prompt,
     )
     return {"run_id": run_id}
+
+
+class ApproveRequest(BaseModel):
+    approved: list[str] = []
+
+
+@app.post("/api/approve/{run_id}")
+async def approve(run_id: str, req: ApproveRequest) -> dict[str, Any]:
+    st = _runs.get(run_id)
+    fut = (st or {}).get("approval")
+    if not fut or fut.done():
+        raise HTTPException(409, "nenhuma aprovação pendente")
+    fut.set_result({"approved": req.approved})
+    return {"ok": True}
+
+
+@app.get("/api/creators")
+async def creators_history() -> dict[str, Any]:
+    return {"creators": creator_store.load_creators(str(default_creator_store_path()))}
 
 
 @app.get("/api/stream/{run_id}")

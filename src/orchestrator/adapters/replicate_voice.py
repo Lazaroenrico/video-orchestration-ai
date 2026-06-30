@@ -17,6 +17,8 @@ from typing import Any, Awaitable, Callable, Optional
 
 import replicate
 
+from orchestrator.tracing import traced
+
 _DEFAULT_MODEL = (
     "suno-ai/bark:"
     "b76242b40d67c76ab6742e987628a2a9ac019e11d56ab96c4e91ce03b79b2787"
@@ -47,6 +49,7 @@ class ReplicateVoiceAdapter:
         self.model = model
         self._runner: Runner = runner or replicate.async_run
 
+    @traced("adapter.replicate_voice.create_voice", run_type="tool", step=3, provider="replicate")
     async def create_voice(self, index: int) -> str:
         """Gera a referência de voz do creator ``index``. Retorna uma string (URL)."""
         output = await self._runner(

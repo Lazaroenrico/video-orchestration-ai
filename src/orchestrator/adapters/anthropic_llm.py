@@ -22,6 +22,7 @@ from typing import Any, Optional
 from anthropic import AsyncAnthropic
 
 from orchestrator import stream_bus
+from orchestrator.tracing import traced, wrap_anthropic_client
 
 _HOOK_STYLES = ["problem", "curiosity", "bold_claim", "emotional", "social_proof"]
 _FORMATS = ["talking_head", "demo", "reaction"]
@@ -66,7 +67,7 @@ class AnthropicLLMAdapter:
     ----------
     model:
         ID do modelo. Padrão: ``"claude-opus-4-8"``.
-    client:
+        client:
         Instância de ``AsyncAnthropic`` injetável (para testes offline).
         Se ``None``, cria ``AsyncAnthropic()`` que lê ``ANTHROPIC_API_KEY``
         do ambiente.
@@ -78,12 +79,14 @@ class AnthropicLLMAdapter:
         client: Optional[AsyncAnthropic] = None,
     ) -> None:
         self.model = model
-        self._client: AsyncAnthropic = client if client is not None else AsyncAnthropic()
+        raw_client = client if client is not None else AsyncAnthropic()
+        self._client: AsyncAnthropic = wrap_anthropic_client(raw_client)
 
     # ------------------------------------------------------------------ #
     # Step 1 — Conceitos                                                   #
     # ------------------------------------------------------------------ #
 
+    @traced("adapter.anthropic.generate_concepts", run_type="llm", step=1, provider="anthropic")
     async def generate_concepts(
         self,
         offer: str,
@@ -176,6 +179,7 @@ class AnthropicLLMAdapter:
     # Step 2 — Scripts                                                     #
     # ------------------------------------------------------------------ #
 
+    @traced("adapter.anthropic.write_script", run_type="llm", step=2, provider="anthropic")
     async def write_script(
         self,
         concept: dict[str, Any],

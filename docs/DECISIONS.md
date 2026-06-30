@@ -205,3 +205,48 @@ Datas absolutas. Apendar novas decisões ao final.
 - **Consequência:** com as 4 chaves no ambiente e o flip do providers.yaml, a pipeline
   roda ponta a ponta real (Steps 1-7 reais, 8-9 mock). A suíte de testes continua 100%
   offline e determinística — nenhum teste existente muda.
+
+## 2026-06-30
+
+### D21 — Tracing LangSmith por node e adapter, com gate runtime
+- **Contexto:** só o root run recebia `run_trace_config`; não havia spans explícitos nos
+  10 passos, nos adapters, nem no Anthropic SDK direto. Além disso, o CLI carrega `.env`
+  depois de importar módulos, então decidir tracing no import impediria ativar spans por
+  `.env`.
+- **Decisão:** centralizar tracing em `orchestrator.tracing` com `@traced`, sanitizer de
+  inputs/outputs/metadata, `wrap_anthropic_client` e gate runtime por
+  `LANGSMITH_TRACING`. Os nodes e adapters ganham spans nomeados offline-testáveis via
+  marcadores `__trace_*`. `config`, `self`, clients, headers, tokens, prompts, scripts,
+  URLs/data URIs e blobs base64 não são serializados nos spans. `offer` entra no root
+  trace só como hash curto.
+- **Consequência:** com tracing off, mocks e testes continuam determinísticos/offline; com
+  `LANGSMITH_TRACING=true`, o LangSmith enxerga root run, nodes da pipeline, roteamento
+  por papel no `CompositeAdapter`, adapters concretos e wrapper do client Anthropic.
+
+### D22 — Dashboard human-on-the-loop com timeline de artefatos
+- **Contexto:** a UI web já inicia runs, consome SSE, mostra steps do LangGraph,
+  tokens do LLM e aprova creators via interrupt. Porém a visualização ainda é centrada
+  em status de nodes e só mostra o item completo no fim de `process_item`, ocultando o
+  que acontece durante script, talking-head, product demo, QC, montagem e distribuição.
+- **Decisão:** o dashboard vira um cockpit operacional human-on-the-loop. A UI deve
+  streamar updates por item ao longo do fluxo, exibindo conceito, script gerado, mídia
+  produzida, QC, vídeo final e distribuição. No v1 desta decisão, o único checkpoint
+  bloqueante continua sendo o aceite de creators; os demais outputs são revisáveis e
+  auditáveis, mas não pausam o grafo.
+- **Contrato de UI/eventos:** o backend web deve emitir `item_update` a partir dos
+  `node_end` dos stages per-item, acumulando snapshots por `item_id`. Creators devem ser
+  normalizados com campos explícitos (`image_uri`, `voice_ref`, `voice_preview_uri`) e
+  aliases legados (`image`, `voice`) enquanto a UI migra. Artefatos devem carregar
+  `kind`, `uri`, `media_type` e `renderable`.
+- **Política de mídia:** a UI só renderiza preview/player quando a URI for navegável
+  (`http(s)`, path local servido, ou `data:` compatível). URIs `mock://...`, `voice_id`
+  e refs técnicas aparecem como referência rastreável, não como mídia quebrada.
+- **Creator store:** `creator_store` continua sendo histórico pós-decisão humana, mas
+  passa a persistir os campos normalizados de creator de forma retrocompatível. Ele não
+  é a fonte do streaming ao vivo; a fonte ao vivo são eventos SSE do run.
+- **Segurança de renderização:** conteúdo gerado por LLM/adapters deve entrar na UI por
+  `textContent`/criação DOM segura, não por `innerHTML` com interpolação direta.
+- **Consequência:** o operador consegue acompanhar o processo enquanto ele acontece:
+  ver o rosto enviado, identificar a voz ou ouvir preview quando existir, ler o script,
+  inspecionar clips e QC, e aprovar creators antes do fan-out. Gates adicionais para
+  script/mídia/final ficam como evolução futura, sem alterar esta decisão.

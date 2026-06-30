@@ -133,6 +133,13 @@ class GatewayJudge:
 
 # ---------------- Avaliação (estilo LangSmith) ----------------
 
+# Critério de aderência ao escopo (offer + system prompts)
+SCOPE_CRITERIA = {
+    "on_offer": "o conteúdo trata do produto/oferta pedido?",
+    "on_prompt": "respeita o system prompt (persona/estilo/restrições)?",
+    "no_offtopic": "evita introduzir tema fora do escopo?",
+}
+
 
 def qc_correctness_evaluator(verdict: JudgeVerdict, expected_pass: bool) -> dict[str, Any]:
     """Evaluator: o veredito do judge bate com o rótulo humano?"""
@@ -140,17 +147,30 @@ def qc_correctness_evaluator(verdict: JudgeVerdict, expected_pass: bool) -> dict
     return {"key": "qc_correctness", "score": 1.0 if correct else 0.0}
 
 
+def scope_adherence_evaluator(verdict: JudgeVerdict, expected_pass: bool) -> dict[str, Any]:
+    """Evaluator: o veredito de aderência ao escopo bate com o rótulo?"""
+    correct = verdict.passed == expected_pass
+    return {"key": "scope_adherence", "score": 1.0 if correct else 0.0}
+
+
 def evaluate_judge(
     judge: GatewayJudge,
     dataset: list[dict[str, Any]],
     criteria: Optional[dict[str, Any]] = None,
+    evaluator: Any = None,
 ) -> dict[str, Any]:
-    """Roda o judge sobre o dataset e agrega a acurácia vs rótulos esperados."""
+    """Roda o judge sobre o dataset e agrega a acurácia vs rótulos esperados.
+
+    Retrocompatível: sem ``criteria`` usa ``DEFAULT_QC_CRITERIA``; sem ``evaluator``
+    usa ``qc_correctness_evaluator``.
+    """
     criteria = criteria or DEFAULT_QC_CRITERIA
+    if evaluator is None:
+        evaluator = qc_correctness_evaluator
     rows = []
     for ex in dataset:
         verdict = judge.judge(criteria, ex["subject"], key=ex["id"])
-        ev = qc_correctness_evaluator(verdict, ex["expected_pass"])
+        ev = evaluator(verdict, ex["expected_pass"])
         rows.append(
             {"id": ex["id"], "score": verdict.score, "passed": verdict.passed, **ev}
         )

@@ -28,4 +28,4 @@ clip:
   duration_seconds: 8
 
 roster:
-  creators: 5               # quantos creators reutilizáveis no roster (Step 3)
+  creators: 2               # quantos creators reutilizáveis no roster (Step 3)

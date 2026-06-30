@@ -30,6 +30,8 @@ from typing import Optional
 
 import httpx
 
+from orchestrator.tracing import traced
+
 
 class TopazUpscaleAdapter:
     """Upscale de referência primária do creator via Topaz Labs.
@@ -56,6 +58,7 @@ class TopazUpscaleAdapter:
         self.token = token or os.environ.get("TOPAZ_API_KEY", "")
         self._client = client
 
+    @traced("adapter.topaz.upscale", run_type="tool", step=3, provider="topaz")
     async def upscale(self, image_url: str) -> str:
         """Faz upscale 4x via POST ``{base_url}/upscale``.
 

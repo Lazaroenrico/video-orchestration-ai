@@ -11,6 +11,7 @@ import hashlib
 from typing import Any, Optional
 
 from orchestrator.graph.state import Artifact, QCResult
+from orchestrator.tracing import traced
 
 _HOOK_STYLES = ["problem", "curiosity", "bold_claim", "emotional", "social_proof"]
 _QC_SUSPECTS = ["hands", "eyes", "lip_sync", "lighting", "skin_texture"]
@@ -39,6 +40,7 @@ class MockAdapter:
             await asyncio.sleep(self.latency)
 
     # --- Step 1: conceitos ---
+    @traced("adapter.mock.generate_concepts", run_type="chain", step=1, provider="mock")
     async def generate_concepts(
         self,
         offer: str,
@@ -70,6 +72,7 @@ class MockAdapter:
         return concepts
 
     # --- Step 2: scripts ---
+    @traced("adapter.mock.write_script", run_type="chain", step=2, provider="mock")
     async def write_script(self, concept: dict[str, Any], creator_ref: str, platform: str) -> str:
         await self._tick()
         hook = concept.get("hook", "hook")
@@ -82,34 +85,49 @@ class MockAdapter:
         )
 
     # --- Step 3: creator reutilizável ---
-    async def build_creator(self, index: int) -> dict[str, Any]:
+    @traced("adapter.mock.build_creator", run_type="tool", step=3, provider="mock")
+    async def build_creator(self, index: int, system_prompt: Optional[str] = None) -> dict[str, Any]:
         await self._tick()
+        sfx = ""
+        if system_prompt:
+            sfx = "-" + hashlib.sha256(system_prompt.encode()).hexdigest()[:8]
         return {
             "id": f"creator-{index}",
             "angles": ["front", "3/4", "profile", "smile", "neutral"],
-            "upscaled_base": f"mock://creator/{index}/base_4k.png",
-            "voice_id": f"voice-{index}",
+            "upscaled_base": f"mock://creator/{index}{sfx}/base_4k.png",
+            "voice_id": f"voice-{index}{sfx}",
         }
 
     # --- Steps 4/5: vídeo (talking-head / demo) ---
-    async def generate_clip(self, item_id: str, tier: str, seconds: int, attempt: int) -> Artifact:
+    @traced("adapter.mock.generate_clip", run_type="tool", step="video", provider="mock")
+    async def generate_clip(
+        self, item_id: str, tier: str, seconds: int, attempt: int,
+        system_prompt: Optional[str] = None,
+    ) -> Artifact:
         spec = self.tiers[tier]  # KeyError em tier desconhecido (contratual)
         async with self._semaphores[tier]:
             await self._tick()
             cost = round(spec["cost_per_second"] * seconds, 4)
+            sfx = ""
+            if system_prompt:
+                sfx = "-" + hashlib.sha256(system_prompt.encode()).hexdigest()[:8]
+            meta: dict[str, Any] = {
+                "tier": tier,
+                "model": spec["model"],
+                "seconds": seconds,
+                "cost_usd": cost,
+                "attempt": attempt,
+            }
+            if system_prompt:
+                meta["system_prompt"] = system_prompt
             return Artifact(
                 kind="clip",
-                uri=f"mock://clip/{item_id}/a{attempt}",
-                meta={
-                    "tier": tier,
-                    "model": spec["model"],
-                    "seconds": seconds,
-                    "cost_usd": cost,
-                    "attempt": attempt,
-                },
+                uri=f"mock://clip/{item_id}/a{attempt}{sfx}",
+                meta=meta,
             )
 
     # --- Step 7: QC ---
+    @traced("adapter.mock.qc_check", run_type="tool", step=7, provider="mock")
     async def qc_check(self, item_id: str, attempt: int, fail_rate: float) -> QCResult:
         await self._tick()
         base = _unit("qc", item_id)
@@ -123,6 +141,7 @@ class MockAdapter:
         return QCResult(passed=passed, score=round(score, 4), reasons=reasons)
 
     # --- Step 8: montagem ---
+    @traced("adapter.mock.assemble", run_type="tool", step=8, provider="mock")
     async def assemble(self, item_id: str, platform: str) -> Artifact:
         await self._tick()
         return Artifact(
@@ -132,6 +151,7 @@ class MockAdapter:
         )
 
     # --- Step 9: distribuição ---
+    @traced("adapter.mock.distribute", run_type="tool", step=9, provider="mock")
     async def distribute(self, item_id: str) -> dict[str, Any]:
         await self._tick()
         acct = int(_unit("acct", item_id) * 20)

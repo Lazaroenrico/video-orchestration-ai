@@ -88,7 +88,7 @@
 
   .form-group { padding: 10px 14px; }
   .form-group label { display: block; font-size: 11px; color: var(--muted); margin-bottom: 4px; }
-  .form-group input, .form-group select {
+  .form-group input, .form-group select, .form-group textarea {
     width: 100%;
     background: var(--bg);
     border: 1px solid var(--border);
@@ -96,8 +96,10 @@
     color: var(--text-hi);
     padding: 6px 8px;
     font-size: 12px;
+    font-family: inherit;
+    resize: vertical;
   }
-  .form-group input:focus, .form-group select:focus {
+  .form-group input:focus, .form-group select:focus, .form-group textarea:focus {
     outline: none;
     border-color: var(--primary);
   }
@@ -166,6 +168,25 @@
   @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:.4; } }
   .step-card.running .step-icon { animation: pulse 1s infinite; }
 
+  /* ── Creators strip ── */
+  #creators-wrap { padding: 6px 14px 0; }
+  #creators-wrap.empty { display: none; }
+  #creators-label { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; margin-bottom: 6px; }
+  #creators-grid { display: flex; flex-wrap: wrap; gap: 8px; }
+  .creator-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 6px;
+    width: 120px;
+    flex-shrink: 0;
+  }
+  .creator-card .creator-id { font-size: 9px; color: var(--muted); font-family: monospace; margin-bottom: 4px; }
+  .creator-card img { width: 100%; height: 88px; object-fit: cover; border-radius: 6px; background: var(--bg); display: block; }
+  .creator-card .no-img { width: 100%; height: 88px; border-radius: 6px; background: var(--bg); display: flex; align-items: center; justify-content: center; color: var(--muted); font-size: 18px; }
+  .creator-card audio { width: 100%; height: 28px; margin-top: 4px; }
+  .creator-card .no-audio { font-size: 9px; color: var(--muted); margin-top: 4px; display: block; }
+
   /* ── Items grid ── */
   #items-panel { grid-column: 2; grid-row: 2; overflow-y: auto; }
 
@@ -181,13 +202,14 @@
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: 8px;
-    padding: 8px 10px;
-    width: 160px;
+    padding: 10px;
+    width: 360px;
     flex-shrink: 0;
     transition: border-color .2s;
   }
-  .item-card .item-id   { font-size: 10px; color: var(--muted); font-family: monospace; }
-  .item-card .item-hook { font-size: 11px; color: var(--text-hi); margin: 3px 0; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .item-card .item-head { display:flex; justify-content:space-between; gap:8px; align-items:flex-start; margin-bottom:6px; }
+  .item-card .item-id   { font-size: 10px; color: var(--muted); font-family: monospace; word-break: break-all; }
+  .item-card .item-hook { font-size: 12px; color: var(--text-hi); margin: 3px 0; font-weight: 600; overflow-wrap: anywhere; }
   .item-card .item-style {
     display: inline-block;
     font-size: 10px;
@@ -197,12 +219,60 @@
     color: var(--muted);
     margin-bottom: 4px;
   }
-  .item-card .item-status { font-size: 10px; color: var(--muted); }
-  .item-card .item-cost   { font-size: 10px; color: var(--muted); text-align: right; }
+  .item-card .item-status { font-size: 10px; color: var(--muted); white-space: nowrap; }
+  .item-card .item-cost   { font-size: 10px; color: var(--muted); text-align: right; white-space: nowrap; }
+  .item-card .item-assets { margin-top: 5px; display: flex; flex-wrap: wrap; gap: 4px; }
+  .item-card .item-assets a {
+    font-size: 9px;
+    padding: 1px 6px;
+    border-radius: 10px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    color: var(--primary);
+    text-decoration: none;
+  }
+  .item-card .item-assets a:hover { border-color: var(--primary); }
 
   .item-card.running     { border-color: var(--primary); }
   .item-card.distributed { border-color: var(--success); }
   .item-card.dropped     { border-color: var(--error); opacity: .6; }
+
+  .item-timeline { display:flex; flex-direction:column; gap:8px; }
+  .item-section { border-top:1px solid var(--border); padding-top:7px; }
+  .item-section-title {
+    font-size: 10px;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: .05em;
+    margin-bottom: 4px;
+  }
+  .item-text {
+    font-size: 11px;
+    color: var(--text);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+  .qc-pass { color: var(--success); }
+  .qc-fail { color: var(--error); }
+  .artifact-grid { display:flex; flex-direction:column; gap:6px; }
+  .artifact-entry { display:flex; flex-direction:column; gap:3px; }
+  .artifact-label { font-size:10px; color:var(--primary); }
+  .artifact-ref {
+    font-size: 10px;
+    color: var(--muted);
+    font-family: "SF Mono", "Fira Code", Consolas, monospace;
+    overflow-wrap: anywhere;
+  }
+  .artifact-entry img,
+  .artifact-entry video {
+    width: 100%;
+    max-height: 180px;
+    object-fit: contain;
+    border-radius: 6px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+  }
+  .artifact-entry audio { width: 100%; height: 30px; }
 
   /* ── LLM stream ── */
   #llm-panel { grid-column: 3; grid-row: 1 / 3; border-right: none; }
@@ -233,6 +303,83 @@
   .token { color: var(--text); }
   .token.thinking { color: var(--muted); font-style: italic; }
 
+  /* ── Approval panel ── */
+  #approval-panel {
+    display: none;
+    margin: 8px 14px;
+    background: #1f2d1f;
+    border: 1px solid var(--success);
+    border-radius: 8px;
+    padding: 10px;
+  }
+  #approval-panel.visible { display: block; }
+  #approval-panel .ap-title { font-size: 11px; font-weight: 600; color: var(--success); margin-bottom: 8px; }
+  #approval-panel .ap-creator { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+  #approval-panel .ap-creator label { display: flex; align-items: center; gap: 6px; cursor: pointer; font-size: 11px; }
+  #approval-panel .ap-creator input[type=checkbox] { width: auto; cursor: pointer; }
+  #btn-approve {
+    margin-top: 8px;
+    width: 100%;
+    background: var(--success);
+    color: #0d1117;
+    border: none;
+    border-radius: 6px;
+    padding: 6px;
+    font-weight: 600;
+    cursor: pointer;
+    font-size: 12px;
+  }
+  #btn-approve:hover { opacity: .9; }
+
+  /* ── History modal ── */
+  #history-overlay {
+    display: none;
+    position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(0,0,0,0.7);
+    z-index: 100;
+    align-items: center;
+    justify-content: center;
+  }
+  #history-overlay.visible { display: flex; }
+  #history-modal {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    width: 700px;
+    max-width: 95vw;
+    max-height: 80vh;
+    display: flex;
+    flex-direction: column;
+  }
+  #history-modal .modal-header {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border);
+    font-weight: 600; font-size: 13px;
+  }
+  #history-modal .modal-close {
+    background: none; border: none; color: var(--muted);
+    cursor: pointer; font-size: 16px; line-height: 1;
+  }
+  #history-modal .modal-body {
+    flex: 1; overflow-y: auto; padding: 12px 16px;
+    display: flex; flex-wrap: wrap; gap: 10px; align-content: flex-start;
+  }
+  .hist-card {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 8px;
+    width: 120px;
+  }
+  .hist-card.approved { border-color: var(--success); }
+  .hist-card.rejected { border-color: var(--error); opacity: .6; }
+  .hist-card img { width: 100%; height: 80px; object-fit: cover; border-radius: 6px; background: var(--bg); }
+  .hist-card .hist-id { font-size: 9px; color: var(--muted); font-family: monospace; margin-bottom: 4px; }
+  .hist-card .hist-status { font-size: 9px; margin-top: 4px; }
+  .hist-card.approved .hist-status { color: var(--success); }
+  .hist-card.rejected .hist-status { color: var(--error); }
+
   /* ── Scrollbar ── */
   ::-webkit-scrollbar { width: 4px; height: 4px; }
   ::-webkit-scrollbar-track { background: transparent; }
@@ -245,7 +392,19 @@
   <h1>🎬 UGC Orchestrator</h1>
   <span id="run-badge">idle</span>
   <span id="run-id-label"></span>
+  <button id="btn-history" onclick="openHistory()" style="margin-left:auto;background:var(--surface);border:1px solid var(--border);border-radius:6px;color:var(--text);padding:4px 12px;cursor:pointer;font-size:12px;">📋 Histórico</button>
 </header>
+
+<!-- History modal -->
+<div id="history-overlay" onclick="if(event.target===this)closeHistory()">
+  <div id="history-modal">
+    <div class="modal-header">
+      <span>Histórico de Creators</span>
+      <button class="modal-close" onclick="closeHistory()">✕</button>
+    </div>
+    <div class="modal-body" id="history-grid"></div>
+  </div>
+</div>
 
 <div class="layout">
 
@@ -268,7 +427,22 @@
         <option value="youtube">YouTube Shorts</option>
       </select>
     </div>
+    <div class="form-group">
+      <label>System prompt (creator)</label>
+      <textarea id="inp-creator-prompt" rows="3" placeholder="ex: influencer jovem, estilo casual, pele clara"></textarea>
+    </div>
+    <div class="form-group">
+      <label>System prompt (vídeo)</label>
+      <textarea id="inp-video-prompt" rows="3" placeholder="ex: demonstra o produto no espelho, inicia com problema de pele"></textarea>
+    </div>
     <button id="btn-start" onclick="startRun()">▶ Iniciar Pipeline</button>
+
+    <!-- Painel de aceite humano (aparece ao receber awaiting_approval) -->
+    <div id="approval-panel">
+      <div class="ap-title">⏸ Aguardando aceite dos creators</div>
+      <div id="approval-creators"></div>
+      <button id="btn-approve" onclick="confirmApproval()">✓ Confirmar aceite</button>
+    </div>
     <hr class="divider">
     <div id="summary-box">
       <div class="row"><span>Produzidos</span><span class="val" id="s-produced">—</span></div>
@@ -287,6 +461,11 @@
 
   <!-- Items -->
   <div class="panel" id="items-panel">
+    <div class="panel-title">Creators &amp; Itens</div>
+    <div id="creators-wrap" class="empty">
+      <div id="creators-label">Creators (rosto + voz)</div>
+      <div id="creators-grid"></div>
+    </div>
     <div class="panel-title">Itens <span id="items-count" style="color:var(--muted)"></span></div>
     <div id="items-grid"></div>
   </div>
@@ -364,6 +543,66 @@ function incrStepCount(node, label) {
   el.textContent = `${n} ${label}`;
 }
 
+function clearElement(el) {
+  while (el.firstChild) el.removeChild(el.firstChild);
+}
+
+function el(tag, className, text) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text != null) node.textContent = String(text);
+  return node;
+}
+
+function appendSection(parent, title, contentNode) {
+  const section = el("div", "item-section");
+  section.appendChild(el("div", "item-section-title", title));
+  section.appendChild(contentNode);
+  parent.appendChild(section);
+}
+
+function renderableCreatorUri(uri) {
+  if (!uri) return false;
+  return /^(https?:\/\/|data:image\/|\/|\.\/|\.\.\/)/i.test(uri);
+}
+
+function mediaElementForArtifact(artifact) {
+  if (!artifact || !artifact.renderable || !artifact.uri) return null;
+  if (artifact.media_type === "image") {
+    const img = document.createElement("img");
+    img.src = artifact.uri;
+    img.alt = artifact.kind || "artifact";
+    return img;
+  }
+  if (artifact.media_type === "video") {
+    const video = document.createElement("video");
+    video.controls = true;
+    video.preload = "metadata";
+    video.src = artifact.uri;
+    return video;
+  }
+  if (artifact.media_type === "audio") {
+    const audio = document.createElement("audio");
+    audio.controls = true;
+    audio.preload = "none";
+    audio.src = artifact.uri;
+    return audio;
+  }
+  return null;
+}
+
+function appendArtifact(parent, artifact) {
+  const entry = el("div", "artifact-entry");
+  entry.appendChild(el("div", "artifact-label", artifact.kind || "artifact"));
+  const media = mediaElementForArtifact(artifact);
+  if (media) {
+    entry.appendChild(media);
+  } else {
+    entry.appendChild(el("div", "artifact-ref", artifact.uri || "sem URI"));
+  }
+  parent.appendChild(entry);
+}
+
 function renderItem(item) {
   const concept = item.concept || {};
   const id = item.id || "?";
@@ -382,15 +621,107 @@ function renderItem(item) {
             : item.dropped     ? "dropped"
             : "running";
   card.className = `item-card ${cls}`;
-  card.innerHTML = `
-    <div class="item-id">${id.substring(0,12)}</div>
-    <div class="item-hook">${concept.hook || concept.angle || "—"}</div>
-    <span class="item-style">${concept.hook_style || "—"}</span>
-    <div style="display:flex;justify-content:space-between;align-items:center">
-      <span class="item-status">${status}</span>
-      <span class="item-cost">$${(item.cost_usd || 0).toFixed(3)}</span>
-    </div>
-  `;
+  clearElement(card);
+
+  const head = el("div", "item-head");
+  const left = el("div");
+  const idNode = el("div", "item-id");
+  idNode.textContent = String(id).substring(0, 18);
+  left.appendChild(idNode);
+  const hookNode = el("div", "item-hook");
+  hookNode.textContent = concept.hook || concept.angle || "—";
+  left.appendChild(hookNode);
+  left.appendChild(el("span", "item-style", concept.hook_style || item.tier || "—"));
+  const right = el("div");
+  right.appendChild(el("div", "item-status", status));
+  right.appendChild(el("div", "item-cost", `$${(item.cost_usd || 0).toFixed(3)}`));
+  head.appendChild(left);
+  head.appendChild(right);
+  card.appendChild(head);
+
+  const timeline = el("div", "item-timeline");
+
+  const conceptText = [
+    concept.angle ? `Ângulo: ${concept.angle}` : "",
+    concept.format ? `Formato: ${concept.format}` : "",
+    concept.offer ? `Oferta: ${concept.offer}` : "",
+  ].filter(Boolean).join("\n") || "Conceito recebido.";
+  appendSection(timeline, "Conceito", el("div", "item-text", conceptText));
+
+  if (item.script) {
+    const scriptNode = el("pre", "item-text");
+    scriptNode.textContent = item.script;
+    appendSection(timeline, "Script", scriptNode);
+  }
+
+  if ((item.artifacts || []).length) {
+    const artifacts = el("div", "artifact-grid");
+    (item.artifacts || []).forEach(a => appendArtifact(artifacts, a));
+    appendSection(timeline, "Mídia", artifacts);
+  }
+
+  if (item.qc) {
+    const qc = item.qc;
+    const qcText = el("div", "item-text");
+    const verdict = el("span", qc.passed ? "qc-pass" : "qc-fail",
+      `${qc.passed ? "pass" : "fail"} · score ${qc.score ?? "—"}`);
+    qcText.appendChild(verdict);
+    const reasons = (qc.reasons || []).join(", ");
+    if (reasons) qcText.appendChild(document.createTextNode(`\n${reasons}`));
+    appendSection(timeline, "QC", qcText);
+  }
+
+  if (item.assembled || item.distributed || item.dropped) {
+    const finalText = [
+      item.assembled ? `Final: ${item.assembled.uri}` : "",
+      item.distributed ? "Distribuição agendada." : "",
+      item.dropped ? "Item descartado." : "",
+    ].filter(Boolean).join("\n");
+    appendSection(timeline, "Final", el("div", "item-text", finalText || "Aguardando finalização."));
+  }
+
+  card.appendChild(timeline);
+}
+
+function renderCreator(c) {
+  const id = c.id || "creator";
+  const wrap = document.getElementById("creators-wrap");
+  wrap.classList.remove("empty");
+  let card = document.getElementById(`creator-${id}`);
+  if (!card) {
+    card = document.createElement("div");
+    card.className = "creator-card";
+    card.id = `creator-${id}`;
+    document.getElementById("creators-grid").appendChild(card);
+  }
+  clearElement(card);
+  card.appendChild(el("div", "creator-id", id));
+  const imageUri = c.image_uri || c.image;
+  if (renderableCreatorUri(imageUri)) {
+    const link = document.createElement("a");
+    link.href = imageUri;
+    link.target = "_blank";
+    link.rel = "noopener";
+    const img = document.createElement("img");
+    img.src = imageUri;
+    img.alt = id;
+    link.appendChild(img);
+    card.appendChild(link);
+  } else {
+    const ref = el("div", "no-img", "ref");
+    ref.title = imageUri || "sem imagem";
+    card.appendChild(ref);
+  }
+  const previewUri = c.voice_preview_uri;
+  if (previewUri && /^(https?:\/\/|data:audio\/|\/|\.\/|\.\.\/)/i.test(previewUri)) {
+    const audio = document.createElement("audio");
+    audio.controls = true;
+    audio.preload = "none";
+    audio.src = previewUri;
+    card.appendChild(audio);
+  } else {
+    card.appendChild(el("span", "no-audio", c.voice_ref || c.voice || "sem voz"));
+  }
 }
 
 function updateItemsCount() {
@@ -444,17 +775,24 @@ function updateSummary(s) {
 }
 
 let eventSource = null;
+let currentRunId = null;
+let pendingApprovalCreators = [];
 
 async function startRun() {
   const btn    = document.getElementById("btn-start");
   const offer  = document.getElementById("inp-offer").value.trim() || "demo offer";
   const batch  = parseInt(document.getElementById("inp-batch").value, 10) || 6;
   const platform = document.getElementById("inp-platform").value;
+  const creatorPrompt = document.getElementById("inp-creator-prompt").value.trim() || null;
+  const videoPrompt   = document.getElementById("inp-video-prompt").value.trim() || null;
 
   btn.disabled = true;
   initSteps();
   itemsMap = {};
   document.getElementById("items-grid").innerHTML = "";
+  document.getElementById("creators-grid").innerHTML = "";
+  document.getElementById("creators-wrap").classList.add("empty");
+  document.getElementById("approval-panel").classList.remove("visible");
   updateItemsCount();
   clearLLM();
   document.getElementById("summary-box").classList.remove("visible");
@@ -468,7 +806,7 @@ async function startRun() {
     const resp = await fetch("/api/run", {
       method: "POST",
       headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({offer, batch, platform}),
+      body: JSON.stringify({offer, batch, platform, creator_prompt: creatorPrompt, video_prompt: videoPrompt}),
     });
     const data = await resp.json();
     runId = data.run_id;
@@ -478,6 +816,7 @@ async function startRun() {
     return;
   }
 
+  currentRunId = runId;
   document.getElementById("run-id-label").textContent = runId;
   setBadge("running", "rodando");
 
@@ -504,6 +843,19 @@ async function startRun() {
         if (ev.item) renderItem(ev.item);
         break;
 
+      case "item_update":
+        if (ev.item) renderItem(ev.item);
+        break;
+
+      case "creator_ready":
+        if (ev.creator) renderCreator(ev.creator);
+        break;
+
+      case "awaiting_approval":
+        showApprovalPanel(ev.creators || []);
+        setBadge("running", "aguardando aceite");
+        break;
+
       case "llm_start":
         currentStage = ev.stage;
         break;
@@ -518,6 +870,7 @@ async function startRun() {
       case "run_end":
         setBadge("done", "concluído");
         if (ev.summary) updateSummary(ev.summary);
+        document.getElementById("approval-panel").classList.remove("visible");
         btn.disabled = false;
         eventSource.close();
         break;
@@ -525,12 +878,14 @@ async function startRun() {
       case "error":
         setBadge("error", "erro");
         appendLLM("ERRO", "\n" + (ev.message || "erro desconhecido"));
+        document.getElementById("approval-panel").classList.remove("visible");
         btn.disabled = false;
         eventSource.close();
         break;
 
       case "stream_end":
-        if (document.getElementById("run-badge").textContent === "rodando") {
+        if (document.getElementById("run-badge").textContent === "rodando" ||
+            document.getElementById("run-badge").textContent === "aguardando aceite") {
           setBadge("done", "concluído");
         }
         btn.disabled = false;
@@ -543,6 +898,115 @@ async function startRun() {
     setBadge("error", "conexão perdida");
     btn.disabled = false;
   };
+}
+
+function showApprovalPanel(creators) {
+  pendingApprovalCreators = creators;
+  const panel = document.getElementById("approval-panel");
+  const container = document.getElementById("approval-creators");
+  clearElement(container);
+  creators.forEach(c => {
+    const div = document.createElement("div");
+    div.className = "ap-creator";
+    const label = document.createElement("label");
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.checked = true;
+    input.value = c.id || "";
+    label.appendChild(input);
+    label.appendChild(el("span", null, c.id || "creator"));
+    div.appendChild(label);
+    container.appendChild(div);
+  });
+  panel.classList.add("visible");
+}
+
+async function confirmApproval() {
+  if (!currentRunId) return;
+  const checkboxes = document.querySelectorAll("#approval-creators input[type=checkbox]");
+  const approved = Array.from(checkboxes).filter(cb => cb.checked).map(cb => cb.value);
+  try {
+    await fetch(`/api/approve/${currentRunId}`, {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({approved}),
+    });
+    document.getElementById("approval-panel").classList.remove("visible");
+    setBadge("running", "retomando...");
+  } catch (e) {
+    appendLLM("ERRO", "\nErro ao confirmar aceite: " + e.message);
+  }
+}
+
+async function openHistory() {
+  const grid = document.getElementById("history-grid");
+  clearElement(grid);
+  const loading = el("span", null, "Carregando...");
+  loading.style.color = "var(--muted)";
+  loading.style.fontSize = "12px";
+  grid.appendChild(loading);
+  document.getElementById("history-overlay").classList.add("visible");
+  try {
+    const resp = await fetch("/api/creators");
+    const data = await resp.json();
+    renderHistory(data.creators || []);
+  } catch (e) {
+    clearElement(grid);
+    const error = el("span", null, `Erro: ${e.message}`);
+    error.style.color = "var(--error)";
+    error.style.fontSize = "12px";
+    grid.appendChild(error);
+  }
+}
+
+function closeHistory() {
+  document.getElementById("history-overlay").classList.remove("visible");
+}
+
+function renderHistory(creators) {
+  const grid = document.getElementById("history-grid");
+  clearElement(grid);
+  if (!creators.length) {
+    const empty = el("span", null, "Nenhum creator salvo.");
+    empty.style.color = "var(--muted)";
+    empty.style.fontSize = "12px";
+    grid.appendChild(empty);
+    return;
+  }
+  creators.forEach(c => {
+    const card = document.createElement("div");
+    card.className = `hist-card ${c.status === "approved" ? "approved" : "rejected"}`;
+    const title = [
+      c.offer ? `Oferta: ${c.offer}` : "",
+      c.creator_prompt ? `Creator prompt: ${c.creator_prompt}` : "",
+      c.video_prompt ? `Video prompt: ${c.video_prompt}` : "",
+      `Run: ${c.run_id}`,
+    ].filter(Boolean).join("\n");
+    const idNode = el("div", "hist-id", c.creator_id || c.id || "creator");
+    idNode.title = title;
+    card.appendChild(idNode);
+    const imageUri = c.image_uri || c.image;
+    if (renderableCreatorUri(imageUri)) {
+      const img = document.createElement("img");
+      img.src = imageUri;
+      img.alt = c.creator_id || c.id || "creator";
+      img.title = title;
+      card.appendChild(img);
+    } else {
+      const noImg = el("div", null, "ref");
+      noImg.style.height = "80px";
+      noImg.style.background = "var(--bg)";
+      noImg.style.borderRadius = "6px";
+      noImg.style.display = "flex";
+      noImg.style.alignItems = "center";
+      noImg.style.justifyContent = "center";
+      noImg.style.color = "var(--muted)";
+      noImg.title = imageUri || "sem imagem";
+      card.appendChild(noImg);
+    }
+    card.appendChild(el("div", "hist-status", c.status === "approved" ? "✓ aprovado" : "✗ rejeitado"));
+    grid.appendChild(card);
+  });
 }
 
 // Inicializar steps no load

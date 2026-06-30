@@ -14,6 +14,9 @@ _MOCK_PROVIDERS = {
 def _force_mock_providers(monkeypatch):
     # Patch no namespace do cli (importou load_providers por nome)
     monkeypatch.setattr("orchestrator.cli.load_providers", lambda *a, **kw: _MOCK_PROVIDERS)
+    # Testes são offline por padrão; casos que exercitam tracing live optam
+    # explicitamente via monkeypatch dentro do próprio teste.
+    monkeypatch.setenv("LANGSMITH_TRACING", "false")
 
 
 def pytest_addoption(parser):
