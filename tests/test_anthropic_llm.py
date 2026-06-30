@@ -383,9 +383,10 @@ def test_build_anthropic_llm_adapter_uses_default_model() -> None:
 
 def test_build_vercel_gateway_llm_adapter_uses_gateway_api_key(monkeypatch) -> None:
     class FakeAsyncAnthropic:
-        def __init__(self, *, api_key: str, base_url: str) -> None:
+        def __init__(self, *, api_key: str, base_url: str, **kwargs) -> None:
             self.api_key = api_key
             self.base_url = base_url
+            self.kwargs = kwargs
 
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.setenv("AI_GATEWAY_API_KEY", "test-gateway-key")
@@ -403,9 +404,10 @@ def test_build_vercel_gateway_llm_adapter_uses_gateway_api_key(monkeypatch) -> N
 
 def test_build_vercel_gateway_llm_adapter_accepts_vercel_oidc_token(monkeypatch) -> None:
     class FakeAsyncAnthropic:
-        def __init__(self, *, api_key: str, base_url: str) -> None:
+        def __init__(self, *, api_key: str, base_url: str, **kwargs) -> None:
             self.api_key = api_key
             self.base_url = base_url
+            self.kwargs = kwargs
 
     monkeypatch.delenv("AI_GATEWAY_API_KEY", raising=False)
     monkeypatch.setenv("VERCEL_OIDC_TOKEN", "test-oidc-token")
@@ -432,9 +434,10 @@ def test_build_vercel_gateway_llm_adapter_requires_auth_env(monkeypatch) -> None
 
 def test_build_vercel_gateway_llm_adapter_model_fallback_prefers_env(monkeypatch) -> None:
     class FakeAsyncAnthropic:
-        def __init__(self, *, api_key: str, base_url: str) -> None:
+        def __init__(self, *, api_key: str, base_url: str, **kwargs) -> None:
             self.api_key = api_key
             self.base_url = base_url
+            self.kwargs = kwargs
 
     monkeypatch.setenv("AI_GATEWAY_API_KEY", "test-gateway-key")
     monkeypatch.setenv("AI_GATEWAY_LLM_MODEL", "anthropic/claude-opus-4.8")
@@ -447,9 +450,10 @@ def test_build_vercel_gateway_llm_adapter_model_fallback_prefers_env(monkeypatch
 
 def test_build_vercel_gateway_llm_adapter_model_fallback_uses_pipeline(monkeypatch) -> None:
     class FakeAsyncAnthropic:
-        def __init__(self, *, api_key: str, base_url: str) -> None:
+        def __init__(self, *, api_key: str, base_url: str, **kwargs) -> None:
             self.api_key = api_key
             self.base_url = base_url
+            self.kwargs = kwargs
 
     monkeypatch.setenv("AI_GATEWAY_API_KEY", "test-gateway-key")
     monkeypatch.delenv("AI_GATEWAY_LLM_MODEL", raising=False)
@@ -462,9 +466,10 @@ def test_build_vercel_gateway_llm_adapter_model_fallback_uses_pipeline(monkeypat
 
 def test_build_vercel_gateway_llm_adapter_model_fallback_uses_default(monkeypatch) -> None:
     class FakeAsyncAnthropic:
-        def __init__(self, *, api_key: str, base_url: str) -> None:
+        def __init__(self, *, api_key: str, base_url: str, **kwargs) -> None:
             self.api_key = api_key
             self.base_url = base_url
+            self.kwargs = kwargs
 
     monkeypatch.setenv("AI_GATEWAY_API_KEY", "test-gateway-key")
     monkeypatch.delenv("AI_GATEWAY_LLM_MODEL", raising=False)
@@ -473,6 +478,25 @@ def test_build_vercel_gateway_llm_adapter_model_fallback_uses_default(monkeypatc
     adapter = build_vercel_gateway_llm_adapter({})
 
     assert adapter.model == "anthropic/claude-opus-4.8"
+
+
+def test_build_vercel_gateway_llm_adapter_sets_generous_timeout_and_retries(monkeypatch) -> None:
+    """O client do gateway deve usar timeout generoso e retries para resistir a
+    blips de conexão (Opus 4.8 com thinking adaptive pode demorar; o connect
+    timeout padrão de 5s do SDK Anthropic causa APITimeoutError intermitente)."""
+    class FakeAsyncAnthropic:
+        def __init__(self, *, api_key: str, base_url: str, **kwargs) -> None:
+            self.api_key = api_key
+            self.base_url = base_url
+            self.kwargs = kwargs
+
+    monkeypatch.setenv("AI_GATEWAY_API_KEY", "test-gateway-key")
+    monkeypatch.setattr(anthropic_llm_module, "AsyncAnthropic", FakeAsyncAnthropic)
+
+    adapter = build_vercel_gateway_llm_adapter({})
+
+    assert adapter._client.kwargs["timeout"] >= 60.0
+    assert adapter._client.kwargs["max_retries"] >= 2
 
 
 # --------------------------------------------------------------------------- #

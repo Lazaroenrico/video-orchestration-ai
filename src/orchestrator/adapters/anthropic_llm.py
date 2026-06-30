@@ -27,6 +27,11 @@ _HOOK_STYLES = ["problem", "curiosity", "bold_claim", "emotional", "social_proof
 _FORMATS = ["talking_head", "demo", "reaction"]
 DEFAULT_VERCEL_GATEWAY_BASE_URL = "https://ai-gateway.vercel.sh"
 DEFAULT_VERCEL_GATEWAY_MODEL = "anthropic/claude-opus-4.8"
+# Opus 4.8 com thinking adaptive pode demorar; o connect timeout padrão de 5s do
+# SDK Anthropic causa APITimeoutError intermitente atrás do gateway. Timeout
+# generoso + retries tornam o caminho live robusto a blips de conexão.
+DEFAULT_VERCEL_GATEWAY_TIMEOUT = 120.0
+DEFAULT_VERCEL_GATEWAY_MAX_RETRIES = 4
 
 # JSON Schema para Structured Outputs de generate_concepts
 _CONCEPT_SCHEMA: dict[str, Any] = {
@@ -282,5 +287,10 @@ def build_vercel_gateway_llm_adapter(pipeline: dict[str, Any]) -> AnthropicLLMAd
     # O Anthropic SDK acrescenta /v1 automaticamente — remover se já incluído
     if base_url.endswith("/v1"):
         base_url = base_url[:-3]
-    client = AsyncAnthropic(api_key=token, base_url=base_url)
+    client = AsyncAnthropic(
+        api_key=token,
+        base_url=base_url,
+        timeout=DEFAULT_VERCEL_GATEWAY_TIMEOUT,
+        max_retries=DEFAULT_VERCEL_GATEWAY_MAX_RETRIES,
+    )
     return AnthropicLLMAdapter(model=model, client=client)
