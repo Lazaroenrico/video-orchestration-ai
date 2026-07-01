@@ -3,6 +3,7 @@ import pytest
 
 from orchestrator.adapters.mock import MockAdapter
 from orchestrator.graph.state import Artifact, QCResult
+from orchestrator.web.server import _normalize_artifact, _normalize_creator
 
 TIERS = [
     {"name": "ltx", "model": "ltx-2.3", "cost_per_second": 0.01, "max_concurrency": 16},
@@ -50,8 +51,31 @@ async def test_build_creator_locks_identity(adapter):
     creator = await adapter.build_creator(index=0)
     assert creator["id"]
     assert len(creator["angles"]) >= 3       # front, 3/4, profile (multi-ângulo)
-    assert creator["upscaled_base"].startswith("mock://")  # base Topaz
+    assert creator["upscaled_base"].startswith("data:image/svg+xml;base64,")  # renderável offline
     assert creator["voice_id"]                # voz ElevenLabs consistente
+    assert creator["voice_preview_uri"].startswith("data:audio/wav;base64,")  # preview renderável
+
+
+async def test_build_creator_media_is_renderable_in_ui(adapter):
+    """Regressão do WS-2: o creator mock deve chegar à UI marcado como renderável."""
+    creator = await adapter.build_creator(index=0)
+    norm = _normalize_creator(creator)
+    assert norm["image_uri"] == creator["upscaled_base"]
+    art = _normalize_artifact({"kind": "face", "uri": creator["upscaled_base"]})
+    assert art["media_type"] == "image"
+    assert art["renderable"] is True
+    voice_art = _normalize_artifact({"kind": "voice_preview", "uri": creator["voice_preview_uri"]})
+    assert voice_art["media_type"] == "audio"
+    assert voice_art["renderable"] is True
+
+
+async def test_build_creator_is_deterministic(adapter):
+    a = await adapter.build_creator(index=0)
+    b = await adapter.build_creator(index=0)
+    assert a == b
+    c = await adapter.build_creator(index=1)
+    assert c["upscaled_base"] != a["upscaled_base"]
+    assert c["voice_preview_uri"] != a["voice_preview_uri"]
 
 
 # --- video (Steps 4/5): custo por tier ---
@@ -75,6 +99,15 @@ async def test_generate_clip_deterministic_uri(adapter):
     a = await adapter.generate_clip(item_id="i1", tier="ltx", seconds=8, attempt=1)
     b = await adapter.generate_clip(item_id="i1", tier="ltx", seconds=8, attempt=1)
     assert a.uri == b.uri
+    assert a.uri.startswith("data:video/mp4;base64,")
+
+
+async def test_generate_clip_media_is_renderable_in_ui(adapter):
+    """Regressão do WS-2: o clip mock deve chegar à UI marcado como renderável."""
+    clip = await adapter.generate_clip(item_id="i1", tier="ltx", seconds=8, attempt=0)
+    art = _normalize_artifact({"kind": clip.kind, "uri": clip.uri})
+    assert art["media_type"] == "video"
+    assert art["renderable"] is True
 
 
 # --- QC (Step 7): determinístico, fração reprovada, melhora com tentativas ---
@@ -127,6 +160,10 @@ async def test_assemble_returns_video_artifact(adapter):
     art = await adapter.assemble(item_id="i1", platform="tiktok")
     assert art.kind == "video"
     assert art.meta["captions"] is True
+    assert art.uri.startswith("data:video/mp4;base64,")
+    norm = _normalize_artifact({"kind": art.kind, "uri": art.uri})
+    assert norm["media_type"] == "video"
+    assert norm["renderable"] is True
 
 
 async def test_distribute_returns_schedule(adapter):

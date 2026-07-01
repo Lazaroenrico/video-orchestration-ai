@@ -28,17 +28,52 @@ neutral) junto com a imagem primária.
 """
 from __future__ import annotations
 
+import logging
 import os
 from typing import Any, Optional
 
 import httpx
 
-from orchestrator.tracing import traced
+from orchestrator.tracing import add_trace_metadata, traced
+
+_log = logging.getLogger(__name__)
 
 # Base OpenAI-compatível do Vercel AI Gateway (mesmo path do Chat Completions, sem /openai).
 # Confirmado em https://vercel.com/docs/ai-gateway — image-only models usam /v1/images/generations.
 _VERCEL_GATEWAY_OPENAI_BASE_URL = "https://ai-gateway.vercel.sh/v1"
 _VERCEL_GATEWAY_IMAGE_MODEL = "openai/gpt-image-2"
+_SAFE_CREATOR_PROMPT = (
+    "Create a realistic image of one adult professional UGC creator for a product "
+    "marketing video. The person must wear modest everyday clothing. Show a head-and-shoulders "
+    "portrait, front view, natural smartphone-style lighting, neutral background, "
+    "friendly expression, conservative commercial profile portrait, brand-safe product "
+    "review context, clearly adult, original non-famous person."
+)
+
+
+def _raise_for_status_verbose(resp: httpx.Response, *, label: str = "") -> None:
+    """Raise HTTPStatusError preserving the response body for gateway diagnostics."""
+    if resp.is_success:
+        return
+
+    body = resp.text[:2000]
+    prefix = f"{label}: " if label else ""
+    message = f"{prefix}{resp.status_code} {resp.reason_phrase} for url '{resp.url}'"
+    if body:
+        message += f"\nBody: {body}"
+    raise httpx.HTTPStatusError(message, request=resp.request, response=resp)
+
+
+def _build_creator_image_prompt(index: int, system_prompt: Optional[str] = None) -> str:
+    creator_ref = f"creator-{index}"
+    if system_prompt:
+        return (
+            f"{_SAFE_CREATOR_PROMPT}\n"
+            f"Creator reference: {creator_ref}.\n"
+            f"User appearance brief, to be interpreted only within the safe commercial "
+            f"portrait constraints above: {system_prompt.strip()}"
+        )
+    return f"{_SAFE_CREATOR_PROMPT}\nCreator reference: {creator_ref}."
 
 
 class OpenAIImageAdapter:
@@ -82,7 +117,7 @@ class OpenAIImageAdapter:
             "Authorization": f"Bearer {self.token}",
             "Content-Type": "application/json",
         }
-        prompt = system_prompt if system_prompt else f"Professional creator face, front view, studio lighting, creator-{index}"
+        prompt = _build_creator_image_prompt(index, system_prompt=system_prompt)
         body = {
             "model": self.model,
             "prompt": prompt,
@@ -102,7 +137,23 @@ class OpenAIImageAdapter:
                     json=body,
                 )
 
-        resp.raise_for_status()
+        # Tracing/log dedicado da falha: o corpo da resposta do gateway é onde o
+        # 400 explica a causa real (param não suportado, moderação, etc.). Sem isto,
+        # raise_for_status() levanta um erro opaco sem o corpo. Em 4xx o corpo é JSON
+        # curto (não há b64_json), então logá-lo não despeja base64 no terminal.
+        if not resp.is_success:
+            body = resp.text[:2000]
+            _log.error(
+                "GPT Image 2 falhou: status=%s model=%s url=%s body=%s",
+                resp.status_code, self.model, str(resp.url), body,
+            )
+            add_trace_metadata(
+                image_error_status=resp.status_code,
+                image_error_body=body,
+                image_model=self.model,
+            )
+
+        _raise_for_status_verbose(resp, label="openai_image")
         data: dict[str, Any] = resp.json()
         item: dict[str, Any] = data["data"][0]
 

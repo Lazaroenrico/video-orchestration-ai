@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from pathlib import Path
 from typing import Any
 
 _log = logging.getLogger(__name__)
@@ -21,6 +22,48 @@ from orchestrator.config import default_media_path
 from orchestrator.graph.state import Item, new_item
 from orchestrator.nodes.base import as_item, get_adapter, get_pipeline
 from orchestrator.tracing import add_trace_metadata, traced
+
+async def _build_voice_preview(
+    adapter: Any, creator: dict[str, Any], *, run_id: str, media_root: Any,
+) -> str | None:
+    """Resolve um ``voice_preview_uri`` audível para o creator, quando possível.
+
+    - Voz já baixada como áudio (Replicate bark, ``voice_source_uri`` setado por
+      ``persist_creator_media``) -> o próprio caminho local já servível é o preview.
+    - Voz opaca (ElevenLabs ``voice_id``) -> sintetiza uma amostra curta via
+      ``adapter.voice.synthesize_preview`` (quando o sub-adapter existe) e persiste.
+    - Preview já fornecido pelo adapter (ex.: mock emite ``data:audio/wav``): é
+      preservado como está — não sobrescrevemos uma amostra audível já pronta.
+    - Sem sub-adapter de voz (mock, ou falha na síntese): ``None``, no-op — não
+      quebra a suíte offline.
+    """
+    existing = creator.get("voice_preview_uri")
+    if isinstance(existing, str) and existing:
+        return existing
+    voice_ref = creator.get("voice_id")
+    if not isinstance(voice_ref, str) or not voice_ref:
+        return None
+    if creator.get("voice_source_uri"):
+        return voice_ref
+    if media_store._is_downloadable(voice_ref):
+        return None
+
+    synth = getattr(getattr(adapter, "voice", None), "synthesize_preview", None)
+    if synth is None:
+        return None
+    try:
+        audio = await synth(voice_ref)
+    except Exception as exc:  # noqa: BLE001 — preview é best-effort
+        _log.error(
+            "voice preview falhou (%s): %s: %s", creator.get("id"), type(exc).__name__, exc,
+        )
+        return None
+
+    creator_id = creator.get("id") or "creator"
+    dest_dir = Path(media_root) / run_id / creator_id
+    web_prefix = f"/media/{run_id}/{creator_id}"
+    return await media_store.persist_bytes(audio, dest_dir, "voice_preview", web_prefix=web_prefix)
+
 
 # ===================== Top-graph (BatchState) =====================
 
@@ -37,11 +80,18 @@ async def node_roster(state: dict[str, Any], config: RunnableConfig) -> dict[str
     add_trace_metadata(step=3, stage="roster", creators=n)
 
     async def _build(i: int) -> dict[str, Any]:
+        stream_bus.emit_token({
+            "type": "creator_start",
+            "creator_id": f"creator-{i}",
+        })
         creator = await adapter.build_creator(index=i, system_prompt=creator_prompt)
         # Baixa e persiste os bytes (imagem/voz) e reescreve as URIs para caminhos
         # locais servíveis. No-op para mock:// / voice_id (sem rede, sem disco).
         creator = await media_store.persist_creator_media(
             creator, run_id=run_id, media_root=media_root,
+        )
+        creator["voice_preview_uri"] = await _build_voice_preview(
+            adapter, creator, run_id=run_id, media_root=media_root,
         )
         # Emite assim que cada creator fica pronto, com a mídia real (imagem + voz),
         # para feedback imediato na UI. No-op fora do contexto de streaming web.
@@ -51,6 +101,7 @@ async def node_roster(state: dict[str, Any], config: RunnableConfig) -> dict[str
                 "id": creator.get("id"),
                 "image": creator.get("upscaled_base"),
                 "voice": creator.get("voice_id"),
+                "voice_preview_uri": creator.get("voice_preview_uri"),
             },
         })
         return creator
@@ -86,7 +137,12 @@ async def node_approval(state: dict[str, Any], config: RunnableConfig) -> dict[s
     payload = {
         "type": "approve_creators",
         "creators": [
-            {"id": c.get("id"), "image": c.get("upscaled_base"), "voice": c.get("voice_id")}
+            {
+                "id": c.get("id"),
+                "image": c.get("upscaled_base"),
+                "voice": c.get("voice_id"),
+                "voice_preview_uri": c.get("voice_preview_uri"),
+            }
             for c in roster
         ],
     }
@@ -178,10 +234,17 @@ def make_gen_node(tier: str):
             item_id=item.id, tier=tier, seconds=seconds, attempt=item.attempts,
             system_prompt=run_cfg.get("video_prompt"),
         )
+        cost_usd = round(item.cost_usd + clip.meta["cost_usd"], 4)
+        run_id = config["configurable"].get("thread_id", "run")
+        media_root = default_media_path()
+        updated = item.model_copy(update={"clips": item.clips + [clip]})
+        persisted = await media_store.persist_item_media(
+            updated, run_id=run_id, media_root=media_root,
+        )
         return {
             "tier": tier,
-            "clips": item.clips + [clip],
-            "cost_usd": round(item.cost_usd + clip.meta["cost_usd"], 4),
+            "clips": persisted.clips,
+            "cost_usd": cost_usd,
         }
 
     _gen.__name__ = f"gen_{tier}"
@@ -201,9 +264,16 @@ async def node_product_demo(state: Any, config: RunnableConfig) -> dict[str, Any
         item_id=f"{item.id}:demo", tier="ltx", seconds=seconds, attempt=item.attempts,
         system_prompt=run_cfg.get("video_prompt"),
     )
+    cost_usd = round(item.cost_usd + demo.meta["cost_usd"], 4)
+    run_id = config["configurable"].get("thread_id", "run")
+    media_root = default_media_path()
+    updated = item.model_copy(update={"clips": item.clips + [demo]})
+    persisted = await media_store.persist_item_media(
+        updated, run_id=run_id, media_root=media_root,
+    )
     return {
-        "clips": item.clips + [demo],
-        "cost_usd": round(item.cost_usd + demo.meta["cost_usd"], 4),
+        "clips": persisted.clips,
+        "cost_usd": cost_usd,
     }
 
 
@@ -232,7 +302,13 @@ async def node_assembly(state: Any, config: RunnableConfig) -> dict[str, Any]:
     platform = run_cfg.get("platform", "tiktok")
     add_trace_metadata(step=8, stage="assembly", item_id=item.id, platform=platform)
     art = await adapter.assemble(item_id=item.id, platform=platform)
-    return {"assembled": art}
+    run_id = config["configurable"].get("thread_id", "run")
+    media_root = default_media_path()
+    updated = item.model_copy(update={"assembled": art})
+    persisted = await media_store.persist_item_media(
+        updated, run_id=run_id, media_root=media_root,
+    )
+    return {"assembled": persisted.assembled}
 
 
 @traced("node.distribution", run_type="chain", step=9)

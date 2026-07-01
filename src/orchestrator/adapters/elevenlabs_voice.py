@@ -31,6 +31,10 @@ import httpx
 
 from orchestrator.tracing import traced
 
+# Texto fixo curto para o preview de voz (~2s de áudio) — não precisa refletir o
+# script real, só dar ao usuário uma amostra audível da voz do creator.
+_PREVIEW_TEXT = "Oi! Essa é uma prévia da minha voz."
+
 
 class ElevenLabsVoiceAdapter:
     """Cria voz sintética de creator via ElevenLabs.
@@ -88,3 +92,40 @@ class ElevenLabsVoiceAdapter:
         resp.raise_for_status()
         data = resp.json()
         return data["voice_id"]
+
+    @traced(
+        "adapter.elevenlabs.synthesize_preview", run_type="tool", step=3, provider="elevenlabs"
+    )
+    async def synthesize_preview(
+        self, voice_id: str, text: str = _PREVIEW_TEXT
+    ) -> bytes:
+        """Sintetiza uma amostra curta (~2s) da voz via POST ``{base_url}/text-to-speech/{voice_id}``.
+
+        Retorna os bytes de áudio (``audio/mpeg``) — usados para gerar o preview de
+        voz do creator no dashboard (``creator_ready``/``voice_preview_uri``).
+        """
+        headers = {
+            "xi-api-key": self.token,
+            "Content-Type": "application/json",
+        }
+        body = {
+            "text": text,
+            "model_id": "eleven_turbo_v2_5",
+        }
+
+        if self._client is not None:
+            resp = await self._client.post(
+                f"{self.base_url}/text-to-speech/{voice_id}",
+                headers=headers,
+                json=body,
+            )
+        else:
+            async with httpx.AsyncClient() as client:
+                resp = await client.post(
+                    f"{self.base_url}/text-to-speech/{voice_id}",
+                    headers=headers,
+                    json=body,
+                )
+
+        resp.raise_for_status()
+        return resp.content

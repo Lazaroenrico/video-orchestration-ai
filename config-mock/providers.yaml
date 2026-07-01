@@ -1,0 +1,15 @@
+# Config-dir de DEMO OFFLINE — todos os papéis em "mock" (dry-run, custo zero).
+# Uso: orchestrator run --batch 12 --offer "serum X" --config-dir config-mock
+# ou:  orchestrator ...  (com ORCH_CONFIG_DIR=config-mock)
+#
+# Diferença vs. config/: aqui NENHUM adapter real é instanciado, então não exige
+# chaves (AI_GATEWAY_API_KEY, REPLICATE_API_TOKEN, etc.) nem gasta crédito. Ideal
+# para demo do dashboard sem rede. Para ligar integrações reais, use config/.
+adapters:
+  llm: mock
+  creator: mock
+  video: mock
+  qc: mock
+  assembly: mock
+  distribution: mock
+  judge: gateway   # informativo: 'judge' não está em ROLES, não é instanciado no run

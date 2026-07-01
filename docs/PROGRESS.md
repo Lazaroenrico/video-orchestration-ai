@@ -1,9 +1,144 @@
 # PROGRESS — handoff
 
-Estado em **2026-06-30**. Suíte: **230 passando, 2 skips** (testes `--live` opt-in,
+Estado em **2026-07-01**. Suíte: **276 passando, 2 skips** (testes `--live` opt-in,
 pulados sem `JUDGE_GATEWAY_URL`) + 2 warnings conhecidos/benignos (LangSmith
 deprecation em import; LangGraph resume parcial — ver falha #5).
 Rodar: `rtk proxy python -m pytest`.
+
+## Fase retry de throttle 429 do Replicate (2026-07-01)
+
+Sintoma: em produção, `upscale`/`voz` do creator falhavam com
+`ReplicateError status: 429 — Request was throttled` porque a conta tinha < $5 de
+crédito (rate limit reduzido a 6 req/min, **burst 1**) e os creators paralelos
+disparavam upscale+voz simultâneos. Como upscale/voz são best-effort
+(`creator_real.py`), a pipeline não quebrava mas perdia upscale (caía pra imagem
+original) e voz (ficava vazia).
+
+Causa raiz: `with_transport_retry` (`_retry.py`) só retentava `httpx.TransportError`;
+o `429` vinha como `replicate.exceptions.ReplicateError` e propagava na 1ª tentativa,
+apesar de ser transitório ("resets in ~Ns").
+
+Correção: `_retry.py` agora trata como retentável também `ReplicateError` com
+`status == 429` (helper `_is_retryable`), mantendo backoff exponencial determinístico;
+outros status HTTP (422/500) e erros de lógica seguem propagando na hora.
+
+### Red → Green (TDD)
+- `tests/test_retry.py` (novo, 4 casos): retry em 429 até suceder; exaustão em 429
+  persistente; não-429 (422) propaga na 1ª; `TransportError` segue retentado.
+
+Nota operacional: a correção mitiga, mas não elimina o throttle — a solução de raiz é
+crédito ≥ $5 no Replicate (remove o burst-1). Um semáforo limitando a concorrência do
+fan-out de creators fica como melhoria futura.
+
+## Fase streaming/render de mídia — escutar & visualizar (2026-07-01)
+
+Objetivo: fazer o dashboard mostrar ao vivo o roteiro, a imagem, a voz **tocável** e o
+vídeo **tocável**, com detalhe por item e progresso por estágio — funcionando tanto no run
+real quanto na demo mock offline. Entregue em 4 workstreams (backend persistência, mock
+renderável, redesign de UI, integração), delegados a agentes Sonnet sob TDD.
+
+### Red → Green (TDD)
+
+- **Persistência de mídia de item + voz audível** (`media_store.py`, `nodes/stages.py`,
+  `adapters/elevenlabs_voice.py`):
+  - `persist_item_media` baixa `clips[].uri`/`assembled.uri` http(s) para
+    `/media/{run_id}/items/{item_id}/…` (provenance em `meta["source_uri"]`); no-op para
+    `mock://`/opaco. Chamado nos gen nodes e em `node_assembly`.
+  - `elevenlabs_voice.synthesize_preview` gera amostra TTS curta; `_build_voice_preview`
+    resolve um `voice_preview_uri` audível (reusa voz já baixada do Replicate; sintetiza
+    para id opaco ElevenLabs; preserva preview já emitido pelo adapter). `voice_preview_uri`
+    passou a sair nos eventos `creator_ready` e `approve_creators`.
+  - Regressões: testes em `test_creator_real.py` (`synthesize_preview`, `persist_item_media`,
+    `_build_voice_preview`).
+- **Mock renderável** (`adapters/mock.py`): URIs `mock://` → `data:` determinísticas e
+  renderáveis — `data:image/svg+xml` (creator), `data:audio/wav` (voice_preview_uri),
+  `data:video/mp4` (clips/assembled) com um mp4 válido/tocável de 932 bytes compartilhado,
+  variação por item via fragmento `#hash` (browser ignora no decode; mantém o teste
+  `test_generate_clip_with_prompt_uri_differs`). Regressões em `test_adapters_mock.py` e
+  `test_system_prompt.py`.
+- **Redesign de UI** (`web/static/index.html`): `itemsMap`/`creatorsMap` como estado
+  canônico com merge incremental; drawer de detalhe por item (player de vídeo, galeria de
+  imagem, áudio de voz via join `item.creator_ref → creator`, roteiro, QC); `assembled`
+  agora é `<video>` (com fallback de poster quando não tocável) e não texto; barras de
+  progresso por estágio e barra global do batch; feed de tokens LLM estilizado como prosa
+  do roteiro; voz tocável no painel de aprovação e no creator strip.
+
+### Falhas investigadas nesta fase
+
+- Sintoma: na demo mock, a voz do creator chegava à UI como `voice_preview_uri: null`,
+  apesar do MockAdapter emitir um `data:audio/wav` válido — sem voz audível offline.
+  - Causa: `_build_voice_preview` (backend) retornava `None` quando o adapter não expõe
+    `.voice.synthesize_preview` (caso mock), e `node_roster` **sobrescrevia**
+    incondicionalmente `creator["voice_preview_uri"]` com esse `None`, apagando o preview
+    que o adapter já havia setado.
+  - Correção: `_build_voice_preview` passou a preservar um `voice_preview_uri` já presente
+    no creator antes de qualquer síntese/reuso.
+  - Regressão: `test_roster_creator_ready_carries_renderable_voice_preview`
+    (`tests/test_web_item_updates.py`).
+
+### Correção pós-review — histórico não mostrava imagem/referências dos creators
+
+- Sintoma: no modal Histórico (e no creator strip), a imagem do creator aparecia em
+  branco/quebrada e as referências (voz, oferta, prompts) não eram visíveis.
+  - Causa 1 (imagem): a imagem mock é `data:image/svg+xml`, mas `_EXT_BY_MIME` em
+    `media_store.py` não mapeava `image/svg+xml` → o arquivo era persistido como
+    `image.bin` e servido pelo StaticFiles como `application/octet-stream`, que o browser
+    não renderiza em `<img>`. (Confirmado por smoke: `GET /media/.../image.bin -> 200
+    content-type=application/octet-stream`.)
+  - Correção 1: adicionado `image/svg+xml: "svg"` ao mapa e fallback via
+    `mimetypes.guess_extension` antes de degradar para `.bin` — agora persiste `image.svg`,
+    servido como `image/svg+xml`. Regressão: `test_persist_media_data_uri_svg_keeps_svg_extension`.
+  - Causa 2 (referências): `renderHistory` só mostrava id + imagem + status; voz, oferta e
+    prompts ficavam apenas no `title` (tooltip).
+  - Correção 2 (`web/static/index.html`): card de histórico agora exibe player de voz
+    (`<audio>` quando `voice_preview_uri` é audível), e referências visíveis (oferta, voz,
+    ângulos, prompts, run). Novo helper `renderableAudioUri`. Card alargado p/ acomodar.
+- Lightbox de imagem (`web/static/index.html`): clicar em qualquer imagem de creator
+  (histórico, strip, painel de aprovação, galeria do drawer, poster de vídeo) amplia em tela
+  cheia; fecha via ✕, clique no fundo ou Esc. Helpers `openLightbox`/`closeLightbox`/
+  `makeExpandable`.
+- Diagnóstico "imagens não aparecem" (ambiente do usuário): o store `.orchestrator/creators.json`
+  continha entradas obsoletas — `mock://…` (runs com o mock antigo, pré-`data:`) e
+  `/media/…/image.bin` (runs desta sessão, anteriores à correção do svg). Ambas não
+  renderizam. Runs novos (após restart do servidor p/ carregar o Python novo) persistem
+  `image.svg` renderável — confirmado por smoke: `GET /media/…/image.svg -> 200 image/svg+xml`.
+  Nota: `config/providers.yaml` usa `creator: creator_real_replicate` por padrão, então o
+  botão "start" do dashboard roda o creator REAL (custo/keys); para demo offline use um
+  config-dir all-mock.
+
+### Verificação final
+
+- `rtk proxy python -m pytest` → **272 passed, 2 skipped, 2 warnings**.
+- Smoke end-to-end offline (servidor + run mock via HTTP/SSE, config all-mock): `creator_ready`
+  com `voice_preview_uri` `data:audio/wav` renderável e imagem em `/media/…`; após aprovação,
+  cada item com `script`, 5/5 artifacts de vídeo tocáveis e `assembled` renderável; `run_end`
+  + `stream_end` limpos.
+
+## Diagnóstico de erro HTTP 400 no GPT Image via Vercel (2026-06-30)
+
+- Sintoma: `HTTPStatusError: 400 Bad Request` em `openai_image.generate_face`, sem
+  corpo da resposta no traceback do LangGraph.
+  - Causa: `httpx.Response.raise_for_status()` preservava o tipo da exceção, mas a
+    mensagem não incluía o corpo JSON do gateway, onde vem o motivo real do 400.
+  - Correção: `OpenAIImageAdapter` agora levanta `HTTPStatusError` verbose com
+    `status`, `url` e `resp.text[:2000]`, mantendo log/metadata existentes.
+  - Regressão: `test_openai_image_http_error_includes_response_body`.
+- Sintoma: o corpo real do gateway retornou `safety_violations=[sexual]` e
+  `isRetryable=false` para `openai/gpt-image-2`.
+  - Causa: `creator_prompt` customizado substituía integralmente o prompt de imagem,
+    sem guardrails fixas de retrato comercial adulto/vestido/não sexual.
+  - Correção: prompts customizados agora entram como briefing dentro de um prompt base
+    seguro (`adult professional UGC creator`, `modest everyday clothing`,
+    `head-and-shoulders portrait`, `conservative commercial profile portrait`).
+  - Regressão: `test_openai_image_wraps_custom_prompt_with_safety_guardrails`.
+- Sintoma: mesmo com guardrails, a API continuou retornando
+  `safety_violations=[sexual]`.
+  - Causa: a própria guardrail negativa continha termos sensíveis explícitos
+    (`sexual`, `nudity`, `lingerie`, `swimwear`, `erotic`), que podem acionar o
+    classificador de imagem pelo texto do prompt.
+  - Correção: prompt base reescrito como instrução positiva de retrato comercial
+    conservador, sem lista negativa com vocabulário sensível explícito.
+  - Regressão: `test_openai_image_safe_prompt_avoids_explicit_sensitive_terms`.
 
 ## Fase dashboard human-on-the-loop (D22) (2026-06-30)
 
@@ -271,3 +406,15 @@ orchestrator run --batch 2 --offer "test product" --platform tiktok
      tracing live durante teste offline.
    - Correção: criar `config-dir` temporário com providers mock e invocar a CLI com
      `LANGSMITH_TRACING=false`.
+
+8. **Web indicava nenhum creator salvo e painel de streaming ficava sem output útil**
+   - Sintoma: `/api/creators` retornava só `creators`, sem explicar qual store estava
+     sendo lido; quando não havia tokens LLM, o painel "Output LLM (streaming)" seguia
+     em "Aguardando LLM..." mesmo com eventos SSE de run/node/creator acontecendo.
+   - Causa: o histórico depende do JSON em `ORCH_CREATORS`/`.orchestrator/creators.json`
+     e a UI não mostrava esse caminho; o painel de stream só renderizava `llm_token`,
+     ignorando eventos não-LLM como `run_start`, `node_start`, `creator_ready`,
+     `awaiting_approval` e `item_update`.
+   - Correção: `/api/creators` agora retorna `store_path` e `exists`; `node_roster`
+     emite `creator_start` antes de cada geração; a UI registra progresso não-LLM no
+     painel de streaming, mantendo tokens LLM quando existirem.

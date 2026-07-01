@@ -186,6 +186,23 @@
   @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:.4; } }
   .step-card.running .step-icon { animation: pulse 1s infinite; }
 
+  /* ── Per-step progress bar ── */
+  .step-progress { height: 4px; background: var(--border); border-radius: 4px; margin-top: 6px; overflow: hidden; }
+  .step-progress-bar { height: 100%; width: 0%; background: var(--primary); transition: width .3s ease; }
+  .step-card.done .step-progress-bar  { background: var(--success); }
+  .step-card.error .step-progress-bar { background: var(--error); }
+  .step-live {
+    font-size: 9px; color: var(--text); margin-top: 6px; text-align: left;
+    white-space: pre-wrap; overflow-wrap: anywhere; max-height: 46px; overflow: hidden;
+    line-height: 1.3; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+
+  /* ── Global batch progress ── */
+  #batch-progress-wrap { padding: 8px 14px 4px; }
+  #batch-progress-head { display: flex; justify-content: space-between; font-size: 10px; color: var(--muted); margin-bottom: 4px; }
+  #batch-progress-track { height: 6px; background: var(--border); border-radius: 4px; overflow: hidden; }
+  #batch-progress-bar { height: 100%; width: 0%; background: var(--primary); transition: width .3s ease; }
+
   /* ── Creators strip ── */
   #creators-wrap { padding: 6px 14px 0; }
   #creators-wrap.empty { display: none; }
@@ -254,6 +271,9 @@
   .item-card.running     { border-color: var(--primary); }
   .item-card.distributed { border-color: var(--success); }
   .item-card.dropped     { border-color: var(--error); opacity: .6; }
+  .item-card { cursor: pointer; }
+  .item-card:hover { border-color: var(--primary); }
+  .item-hint { font-size: 9px; color: var(--muted); text-align: right; margin-top: 2px; }
 
   .item-timeline { display:flex; flex-direction:column; gap:8px; }
   .item-section { border-top:1px solid var(--border); padding-top:7px; }
@@ -292,6 +312,16 @@
   }
   .artifact-entry audio { width: 100%; height: 30px; }
 
+  /* ── Video / poster fallback ── */
+  .media-poster {
+    width: 100%; min-height: 120px; max-height: 180px;
+    border-radius: 6px; background: var(--bg); border: 1px dashed var(--border);
+    display: flex; align-items: center; justify-content: center; position: relative;
+    color: var(--muted); font-size: 11px; overflow: hidden;
+  }
+  .media-poster img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; opacity: .45; }
+  .media-poster span { position: relative; z-index: 1; background: rgba(13,17,23,.75); padding: 4px 8px; border-radius: 6px; }
+
   /* ── LLM stream ── */
   #llm-panel { grid-column: 3; grid-row: 1 / 3; border-right: none; }
 
@@ -299,9 +329,9 @@
     flex: 1;
     overflow-y: auto;
     padding: 10px 12px;
-    font-family: "SF Mono", "Fira Code", Consolas, monospace;
-    font-size: 11px;
-    line-height: 1.6;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    font-size: 12px;
+    line-height: 1.75;
     color: var(--text);
     white-space: pre-wrap;
     word-break: break-word;
@@ -359,6 +389,28 @@
     justify-content: center;
   }
   #history-overlay.visible { display: flex; }
+  #lightbox-overlay {
+    display: none;
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,0.88);
+    z-index: 200;
+    align-items: center; justify-content: center;
+    cursor: zoom-out;
+  }
+  #lightbox-overlay.open { display: flex; }
+  #lightbox-overlay img {
+    max-width: 92vw; max-height: 92vh;
+    object-fit: contain;
+    border-radius: 8px;
+    box-shadow: 0 8px 40px rgba(0,0,0,0.6);
+    background: var(--surface);
+  }
+  #lightbox-close {
+    position: fixed; top: 16px; right: 20px;
+    background: var(--surface); border: 1px solid var(--border);
+    color: var(--text); border-radius: 8px;
+    font-size: 18px; line-height: 1; padding: 6px 12px; cursor: pointer;
+  }
   #history-modal {
     background: var(--surface);
     border: 1px solid var(--border);
@@ -388,15 +440,50 @@
     border: 1px solid var(--border);
     border-radius: 8px;
     padding: 8px;
-    width: 120px;
+    width: 168px;
+    display: flex; flex-direction: column; gap: 4px;
   }
   .hist-card.approved { border-color: var(--success); }
   .hist-card.rejected { border-color: var(--error); opacity: .6; }
-  .hist-card img { width: 100%; height: 80px; object-fit: cover; border-radius: 6px; background: var(--bg); }
-  .hist-card .hist-id { font-size: 9px; color: var(--muted); font-family: monospace; margin-bottom: 4px; }
-  .hist-card .hist-status { font-size: 9px; margin-top: 4px; }
+  .hist-card img { width: 100%; height: 96px; object-fit: cover; border-radius: 6px; background: var(--bg); }
+  .hist-card audio { width: 100%; height: 30px; }
+  .hist-card .hist-id { font-size: 9px; color: var(--muted); font-family: monospace; }
+  .hist-card .hist-status { font-size: 9px; margin-top: 2px; }
   .hist-card.approved .hist-status { color: var(--success); }
   .hist-card.rejected .hist-status { color: var(--error); }
+  .hist-card .hist-refs { display: flex; flex-direction: column; gap: 2px; }
+  .hist-card .hist-ref { font-size: 9px; color: var(--text); overflow-wrap: anywhere; }
+  .hist-card .hist-ref b { color: var(--muted); font-weight: 600; }
+  .hist-card .hist-ref.mono { font-family: monospace; color: var(--muted); }
+
+  /* ── Item detail drawer ── */
+  #item-drawer-overlay {
+    display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 150;
+  }
+  #item-drawer-overlay.visible { display: block; }
+  #item-drawer {
+    position: fixed; top: 0; right: 0; bottom: 0; width: 420px; max-width: 92vw;
+    background: var(--surface); border-left: 1px solid var(--border);
+    box-shadow: -8px 0 24px rgba(0,0,0,0.4);
+    display: flex; flex-direction: column;
+    transform: translateX(100%); transition: transform .25s ease;
+  }
+  #item-drawer-overlay.visible #item-drawer { transform: translateX(0); }
+  #item-drawer .modal-header {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 12px 16px; border-bottom: 1px solid var(--border); font-weight: 600; font-size: 13px;
+  }
+  #drawer-body { flex: 1; overflow-y: auto; padding: 14px 16px; display: flex; flex-direction: column; gap: 16px; }
+  .drawer-section-title { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; margin-bottom: 6px; }
+  .drawer-video-wrap video { width: 100%; max-height: 260px; border-radius: 8px; background: var(--bg); border: 1px solid var(--border); object-fit: contain; }
+  .drawer-gallery { display: flex; gap: 6px; flex-wrap: wrap; }
+  .drawer-gallery img { width: 68px; height: 68px; object-fit: cover; border-radius: 6px; border: 1px solid var(--border); }
+  .drawer-audio-wrap audio { width: 100%; height: 32px; }
+  .drawer-script {
+    white-space: pre-wrap; font-size: 12px; line-height: 1.6; color: var(--text);
+    background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+    padding: 10px; max-height: 220px; overflow-y: auto; overflow-wrap: anywhere;
+  }
 
   /* ── Scrollbar ── */
   ::-webkit-scrollbar { width: 4px; height: 4px; }
@@ -493,6 +580,12 @@
   <button id="btn-history" onclick="openHistory()" style="margin-left:auto;background:var(--surface);border:1px solid var(--border);border-radius:6px;color:var(--text);padding:4px 12px;cursor:pointer;font-size:12px;">📋 Histórico</button>
 </header>
 
+<!-- Image lightbox -->
+<div id="lightbox-overlay" onclick="closeLightbox()">
+  <button id="lightbox-close" onclick="closeLightbox()">✕</button>
+  <img id="lightbox-img" alt="imagem ampliada" onclick="event.stopPropagation()" />
+</div>
+
 <!-- History modal -->
 <div id="history-overlay" onclick="if(event.target===this)closeHistory()">
   <div id="history-modal">
@@ -501,6 +594,17 @@
       <button class="modal-close" onclick="closeHistory()">✕</button>
     </div>
     <div class="modal-body" id="history-grid"></div>
+  </div>
+</div>
+
+<!-- Item detail drawer -->
+<div id="item-drawer-overlay" onclick="if(event.target===this)closeItemDrawer()">
+  <div id="item-drawer">
+    <div class="modal-header">
+      <span id="drawer-title">Item</span>
+      <button class="modal-close" onclick="closeItemDrawer()">✕</button>
+    </div>
+    <div id="drawer-body"></div>
   </div>
 </div>
 
@@ -558,6 +662,10 @@
       <div id="creators-grid"></div>
     </div>
     <div class="panel-title">Itens <span id="items-count" style="color:var(--muted)"></span></div>
+    <div id="batch-progress-wrap">
+      <div id="batch-progress-head"><span>Progresso do batch</span><span id="batch-progress-label">0 / 0</span></div>
+      <div id="batch-progress-track"><div id="batch-progress-bar"></div></div>
+    </div>
     <div id="items-grid"></div>
   </div>
 
@@ -589,7 +697,11 @@ const NODE_STEP_MAP = {
 };
 
 let stepState = {};   // node → "idle"|"running"|"done"
-let itemsMap  = {};   // item_id → {...}
+let itemsMap  = {};   // item_id → {...} — canonical item store
+let creatorsMap = {}; // creator_id → {...} — canonical creator store
+let stepItemSets = {}; // stepId → Set(item ids seen) — drives per-step progress
+let batchSize = 0;
+let currentDrawerItemId = null;
 let currentStage = null;
 let llmFirstToken = true;
 
@@ -597,8 +709,10 @@ function initSteps() {
   const grid = document.getElementById("steps-grid");
   grid.innerHTML = "";
   stepState = {};
+  stepItemSets = {};
   STEPS.forEach(s => {
     stepState[s.id] = "idle";
+    stepItemSets[s.id] = new Set();
     const card = document.createElement("div");
     card.className = "step-card";
     card.id = `step-${s.id}`;
@@ -607,6 +721,8 @@ function initSteps() {
       <div class="step-icon">${s.icon}</div>
       <div class="step-name">${s.label}</div>
       <div class="step-count" id="step-count-${s.id}"></div>
+      <div class="step-progress"><div class="step-progress-bar" id="step-progress-bar-${s.id}"></div></div>
+      <div class="step-live" id="step-live-${s.id}"></div>
     `;
     grid.appendChild(card);
   });
@@ -622,16 +738,47 @@ function setStep(node, state) {
   if ((rank[state] || 0) > (rank[cur] || 0)) {
     stepState[canonical] = state;
     card.className = `step-card ${state}`;
+    if (state === "running") {
+      const live = document.getElementById(`step-live-${canonical}`);
+      if (live) live.textContent = "";
+    }
+    if (state === "done" || state === "error") {
+      const bar = document.getElementById(`step-progress-bar-${canonical}`);
+      if (bar) bar.style.width = "100%";
+    }
   }
 }
 
-function incrStepCount(node, label) {
+function updateStepProgress(stepId, n) {
+  const bar = document.getElementById(`step-progress-bar-${stepId}`);
+  if (!bar) return;
+  const total = batchSize || n || 1;
+  const pct = Math.min(100, Math.round((n / total) * 100));
+  bar.style.width = `${pct}%`;
+}
+
+// Tracks unique items seen at a given stage (node_end/item_update), used to
+// drive the per-step progress bar without double counting repeated updates.
+function trackStepItem(node, itemId) {
+  if (!itemId) return;
   const canonical = NODE_STEP_MAP[node] || node;
-  const el = document.getElementById(`step-count-${canonical}`);
-  if (!el) return;
-  const n = (parseInt(el.dataset.n || "0", 10)) + 1;
-  el.dataset.n = n;
-  el.textContent = `${n} ${label}`;
+  if (!stepItemSets[canonical]) stepItemSets[canonical] = new Set();
+  stepItemSets[canonical].add(itemId);
+  const countEl = document.getElementById(`step-count-${canonical}`);
+  if (countEl) countEl.textContent = `${stepItemSets[canonical].size} itens`;
+  updateStepProgress(canonical, stepItemSets[canonical].size);
+}
+
+function updateGlobalProgress() {
+  const label = document.getElementById("batch-progress-label");
+  const bar = document.getElementById("batch-progress-bar");
+  if (!label || !bar) return;
+  const items = Object.values(itemsMap);
+  const completed = items.filter(i => i.distributed || i.dropped).length;
+  const total = batchSize || items.length;
+  label.textContent = `${completed} / ${total}`;
+  const pct = total ? Math.min(100, Math.round((completed / total) * 100)) : 0;
+  bar.style.width = `${pct}%`;
 }
 
 function clearElement(el) {
@@ -657,29 +804,105 @@ function renderableCreatorUri(uri) {
   return /^(https?:\/\/|data:image\/|\/|\.\/|\.\.\/)/i.test(uri);
 }
 
+function renderableAudioUri(uri) {
+  if (!uri) return false;
+  return /^(https?:\/\/|data:audio\/|\/|\.\/|\.\.\/)/i.test(uri);
+}
+
+// Abre a imagem gerada em tela cheia (lightbox). Fecha com clique no fundo, no ✕ ou Esc.
+function openLightbox(uri) {
+  if (!uri) return;
+  document.getElementById("lightbox-img").src = uri;
+  document.getElementById("lightbox-overlay").classList.add("open");
+}
+function closeLightbox() {
+  document.getElementById("lightbox-overlay").classList.remove("open");
+  document.getElementById("lightbox-img").src = "";
+}
+// Torna um <img> clicável para ampliar; interrompe a propagação para não abrir o
+// drawer do item por trás.
+function makeExpandable(img, uri) {
+  img.classList.add("expandable");
+  img.style.cursor = "zoom-in";
+  img.title = img.title ? `${img.title} — clique para ampliar` : "clique para ampliar";
+  img.addEventListener("click", (e) => {
+    e.stopPropagation();
+    e.preventDefault();
+    openLightbox(uri);
+  });
+  return img;
+}
+
+// Builds a labeled placeholder tile used whenever a video can't actually be
+// played (e.g. mock `data:video/mp4` blobs with no real moov/tracks). Falls
+// back to the creator image as a poster when available.
+function buildPoster(posterUri, label) {
+  const poster = el("div", "media-poster");
+  if (posterUri && renderableCreatorUri(posterUri)) {
+    const img = document.createElement("img");
+    img.src = posterUri;
+    img.alt = "poster";
+    poster.appendChild(makeExpandable(img, posterUri));
+  }
+  poster.appendChild(el("span", null, label || "mídia indisponível"));
+  return poster;
+}
+
+// Creates a <video> that gracefully degrades to buildPoster() on playback
+// error (mock cassettes are valid-for-classification but not playable).
+function videoWithFallback(uri, posterUri, label) {
+  const video = document.createElement("video");
+  video.controls = true;
+  video.preload = "metadata";
+  if (posterUri && renderableCreatorUri(posterUri)) video.poster = posterUri;
+  video.src = uri;
+  video.addEventListener("click", (e) => e.stopPropagation());
+  video.onerror = () => {
+    video.replaceWith(buildPoster(posterUri, label || "vídeo mock (não reproduzível)"));
+  };
+  return video;
+}
+
 function mediaElementForArtifact(artifact) {
   if (!artifact || !artifact.renderable || !artifact.uri) return null;
   if (artifact.media_type === "image") {
     const img = document.createElement("img");
     img.src = artifact.uri;
     img.alt = artifact.kind || "artifact";
-    return img;
+    return makeExpandable(img, artifact.uri);
   }
   if (artifact.media_type === "video") {
-    const video = document.createElement("video");
-    video.controls = true;
-    video.preload = "metadata";
-    video.src = artifact.uri;
-    return video;
+    return videoWithFallback(artifact.uri, null, "mock vídeo (não reproduzível)");
   }
   if (artifact.media_type === "audio") {
     const audio = document.createElement("audio");
     audio.controls = true;
     audio.preload = "none";
     audio.src = artifact.uri;
+    audio.addEventListener("click", (e) => e.stopPropagation());
     return audio;
   }
   return null;
+}
+
+// Resolves the best video to show for an item: the assembled final cut,
+// falling back to the last video clip artifact, falling back to a poster.
+function buildFinalMedia(item, creator) {
+  const posterUri = creator ? (creator.image_uri || creator.image) : null;
+  const wrap = el("div", "drawer-video-wrap");
+  let uri = null;
+  if (item.assembled && item.assembled.uri) {
+    uri = item.assembled.uri;
+  } else {
+    const clips = (item.artifacts || []).filter(a => a.media_type === "video" && a.uri);
+    if (clips.length) uri = clips[clips.length - 1].uri;
+  }
+  if (uri) {
+    wrap.appendChild(videoWithFallback(uri, posterUri, "vídeo (mock, não reproduzível)"));
+  } else {
+    wrap.appendChild(buildPoster(posterUri, "vídeo ainda não disponível"));
+  }
+  return wrap;
 }
 
 function appendArtifact(parent, artifact) {
@@ -694,14 +917,46 @@ function appendArtifact(parent, artifact) {
   parent.appendChild(entry);
 }
 
+// Merges a new item event into the canonical itemsMap store. Later events
+// only carry the fields that changed (e.g. just `script`, or just new
+// `artifacts`); merge instead of clobbering so earlier data isn't lost.
+function mergeItem(newItem) {
+  if (!newItem || !newItem.id) return null;
+  const old = itemsMap[newItem.id] || {};
+  const merged = Object.assign({}, old, newItem);
+  merged.concept = Object.assign({}, old.concept, newItem.concept);
+  const oldArtifacts = old.artifacts || [];
+  const newArtifacts = newItem.artifacts || [];
+  const seen = new Set();
+  const combined = [];
+  [...oldArtifacts, ...newArtifacts].forEach(a => {
+    const key = `${a.kind}|${a.uri}`;
+    if (!seen.has(key)) { seen.add(key); combined.push(a); }
+  });
+  merged.artifacts = combined;
+  itemsMap[newItem.id] = merged;
+  return merged;
+}
+
+function mergeCreator(newCreator) {
+  if (!newCreator || !newCreator.id) return null;
+  const old = creatorsMap[newCreator.id] || {};
+  const merged = Object.assign({}, old, newCreator);
+  creatorsMap[newCreator.id] = merged;
+  return merged;
+}
+
 function renderItem(item) {
+  if (!item) return;
   const concept = item.concept || {};
   const id = item.id || "?";
+  const creator = creatorsMap[item.creator_ref] || null;
   let card = document.getElementById(`item-${id}`);
   if (!card) {
     card = document.createElement("div");
     card.className = "item-card";
     card.id = `item-${id}`;
+    card.onclick = () => openItemDrawer(id);
     document.getElementById("items-grid").appendChild(card);
     updateItemsCount();
   }
@@ -726,6 +981,7 @@ function renderItem(item) {
   const right = el("div");
   right.appendChild(el("div", "item-status", status));
   right.appendChild(el("div", "item-cost", `$${(item.cost_usd || 0).toFixed(3)}`));
+  right.appendChild(el("div", "item-hint", "clique para detalhes ▸"));
   head.appendChild(left);
   head.appendChild(right);
   card.appendChild(head);
@@ -762,16 +1018,20 @@ function renderItem(item) {
     appendSection(timeline, "QC", qcText);
   }
 
-  if (item.assembled || item.distributed || item.dropped) {
-    const finalText = [
-      item.assembled ? `Final: ${item.assembled.uri}` : "",
-      item.distributed ? "Distribuição agendada." : "",
-      item.dropped ? "Item descartado." : "",
-    ].filter(Boolean).join("\n");
-    appendSection(timeline, "Final", el("div", "item-text", finalText || "Aguardando finalização."));
+  if (item.assembled || item.distributed || item.dropped || (item.artifacts || []).some(a => a.media_type === "video")) {
+    const finalWrap = el("div");
+    finalWrap.appendChild(buildFinalMedia(item, creator));
+    const captionParts = [];
+    if (item.distributed) captionParts.push("Distribuição agendada.");
+    if (item.dropped) captionParts.push("Item descartado.");
+    if (captionParts.length) finalWrap.appendChild(el("div", "item-text", captionParts.join(" ")));
+    appendSection(timeline, "Final", finalWrap);
   }
 
   card.appendChild(timeline);
+  updateGlobalProgress();
+
+  if (currentDrawerItemId === id) renderDrawer();
 }
 
 function renderCreator(c) {
@@ -789,15 +1049,10 @@ function renderCreator(c) {
   card.appendChild(el("div", "creator-id", id));
   const imageUri = c.image_uri || c.image;
   if (renderableCreatorUri(imageUri)) {
-    const link = document.createElement("a");
-    link.href = imageUri;
-    link.target = "_blank";
-    link.rel = "noopener";
     const img = document.createElement("img");
     img.src = imageUri;
     img.alt = id;
-    link.appendChild(img);
-    card.appendChild(link);
+    card.appendChild(makeExpandable(img, imageUri));
   } else {
     const ref = el("div", "no-img", "ref");
     ref.title = imageUri || "sem imagem";
@@ -813,11 +1068,122 @@ function renderCreator(c) {
   } else {
     card.appendChild(el("span", "no-audio", c.voice_ref || c.voice || "sem voz"));
   }
+  // Refresh the drawer if it's open on an item that belongs to this creator
+  // (voice / image may have just become available).
+  if (currentDrawerItemId) {
+    const openItem = itemsMap[currentDrawerItemId];
+    if (openItem && openItem.creator_ref === id) renderDrawer();
+  }
 }
 
 function updateItemsCount() {
   const n = document.getElementById("items-grid").children.length;
   document.getElementById("items-count").textContent = `(${n})`;
+}
+
+// ── Item detail drawer ──────────────────────────────────────────────────
+function openItemDrawer(id) {
+  currentDrawerItemId = id;
+  renderDrawer();
+  document.getElementById("item-drawer-overlay").classList.add("visible");
+}
+
+function closeItemDrawer() {
+  document.getElementById("item-drawer-overlay").classList.remove("visible");
+  currentDrawerItemId = null;
+}
+
+function renderDrawer() {
+  if (!currentDrawerItemId) return;
+  const item = itemsMap[currentDrawerItemId];
+  if (!item) return;
+  const creator = creatorsMap[item.creator_ref] || null;
+
+  document.getElementById("drawer-title").textContent = item.id;
+  const body = document.getElementById("drawer-body");
+  clearElement(body);
+
+  // Video
+  const videoSection = el("div");
+  videoSection.appendChild(el("div", "drawer-section-title", "Vídeo"));
+  videoSection.appendChild(buildFinalMedia(item, creator));
+  body.appendChild(videoSection);
+
+  // Creator image gallery
+  const gallerySection = el("div");
+  gallerySection.appendChild(el("div", "drawer-section-title", `Creator (${item.creator_ref || "—"})`));
+  const gallery = el("div", "drawer-gallery");
+  const imgs = [];
+  if (creator) {
+    if (creator.image_uri || creator.image) imgs.push(creator.image_uri || creator.image);
+    (creator.angles || []).forEach(a => {
+      if (typeof a === "string") imgs.push(a);
+      else if (a && a.uri) imgs.push(a.uri);
+    });
+  }
+  const renderableImgs = imgs.filter(renderableCreatorUri);
+  if (renderableImgs.length) {
+    renderableImgs.forEach(uri => {
+      const img = document.createElement("img");
+      img.src = uri;
+      img.alt = "creator";
+      gallery.appendChild(makeExpandable(img, uri));
+    });
+  } else {
+    gallery.appendChild(el("span", "no-audio", creator ? "sem imagens" : "creator não encontrado"));
+  }
+  gallerySection.appendChild(gallery);
+  body.appendChild(gallerySection);
+
+  // Voice audio (joined from the creator, not the item)
+  const audioSection = el("div", "drawer-audio-wrap");
+  audioSection.appendChild(el("div", "drawer-section-title", "Voz (creator)"));
+  const voiceUri = creator && creator.voice_preview_uri;
+  if (voiceUri) {
+    const audio = document.createElement("audio");
+    audio.controls = true;
+    audio.preload = "none";
+    audio.src = voiceUri;
+    audioSection.appendChild(audio);
+  } else {
+    audioSection.appendChild(el("span", "no-audio", (creator && (creator.voice_ref || creator.voice)) || "sem voz"));
+  }
+  body.appendChild(audioSection);
+
+  // Full script
+  const scriptSection = el("div");
+  scriptSection.appendChild(el("div", "drawer-section-title", "Script"));
+  scriptSection.appendChild(el("div", "drawer-script", item.script || "Aguardando script..."));
+  body.appendChild(scriptSection);
+
+  // QC verdict
+  const qcSection = el("div");
+  qcSection.appendChild(el("div", "drawer-section-title", "QC"));
+  if (item.qc) {
+    const verdict = el("div", item.qc.passed ? "qc-pass" : "qc-fail",
+      `${item.qc.passed ? "PASS" : "FAIL"} · score ${item.qc.score ?? "—"}`);
+    qcSection.appendChild(verdict);
+    if ((item.qc.reasons || []).length) {
+      qcSection.appendChild(el("div", "item-text", (item.qc.reasons || []).join(", ")));
+    }
+  } else {
+    qcSection.appendChild(el("div", "item-text", "Aguardando QC..."));
+  }
+  body.appendChild(qcSection);
+
+  // Concept metadata
+  const metaSection = el("div");
+  metaSection.appendChild(el("div", "drawer-section-title", "Conceito"));
+  const c = item.concept || {};
+  const metaText = [
+    c.hook ? `Hook: ${c.hook}` : "",
+    c.angle ? `Ângulo: ${c.angle}` : "",
+    c.format ? `Formato: ${c.format}` : "",
+    c.offer ? `Oferta: ${c.offer}` : "",
+    c.hook_style ? `Estilo: ${c.hook_style}` : "",
+  ].filter(Boolean).join("\n") || "—";
+  metaSection.appendChild(el("div", "item-text", metaText));
+  body.appendChild(metaSection);
 }
 
 function appendLLM(stage, token) {
@@ -840,6 +1206,24 @@ function appendLLM(stage, token) {
 
   // Append token as text node
   out.appendChild(document.createTextNode(token));
+  out.scrollTop = out.scrollHeight;
+
+  // Mirror a trailing snippet onto the matching pipeline step card so the
+  // script/concepts text reads live within the stage itself, not just in
+  // the raw side feed.
+  const liveEl = document.getElementById(`step-live-${stage}`);
+  if (liveEl) {
+    liveEl.textContent = ((liveEl.textContent || "") + token).slice(-260);
+  }
+}
+
+function appendStreamLine(kind, text) {
+  const out = document.getElementById("llm-output");
+  if (out.querySelector("span[style]")) out.innerHTML = "";
+  const line = document.createElement("div");
+  line.className = "llm-stage-header";
+  line.textContent = `[${kind}] ${text}`;
+  out.appendChild(line);
   out.scrollTop = out.scrollHeight;
 }
 
@@ -961,11 +1345,16 @@ async function startRun() {
   btn.disabled = true;
   initSteps();
   itemsMap = {};
+  creatorsMap = {};
+  batchSize = batch;
+  currentDrawerItemId = null;
+  document.getElementById("item-drawer-overlay").classList.remove("visible");
   document.getElementById("items-grid").innerHTML = "";
   document.getElementById("creators-grid").innerHTML = "";
   document.getElementById("creators-wrap").classList.add("empty");
   document.getElementById("approval-panel").classList.remove("visible");
   updateItemsCount();
+  updateGlobalProgress();
   clearLLM();
   document.getElementById("summary-box").classList.remove("visible");
   setBadge("running", "iniciando...");
@@ -1002,34 +1391,51 @@ async function startRun() {
     switch (ev.type) {
       case "run_start":
         setBadge("running", "rodando");
+        appendStreamLine("run", "pipeline iniciada");
         break;
 
       case "node_start":
         setStep(ev.node, "running");
         setBadge("running", ev.label || ev.node);
+        appendStreamLine("node", `iniciando ${ev.label || ev.node}`);
         break;
 
       case "node_end":
         setStep(ev.node, "done");
-        if (ev.node === "process_item") incrStepCount("process_item", "itens");
-        if (ev.item) renderItem(ev.item);
+        if (ev.item) {
+          trackStepItem(ev.node, ev.item.id);
+          renderItem(mergeItem(ev.item));
+        }
+        appendStreamLine("node", `concluído ${ev.label || ev.node}`);
         break;
 
       case "item_update":
-        if (ev.item) renderItem(ev.item);
+        if (ev.item) {
+          if (ev.node) trackStepItem(ev.node, ev.item.id);
+          renderItem(mergeItem(ev.item));
+        }
+        appendStreamLine("item", `${ev.item?.id || "item"} atualizado em ${ev.label || ev.node || "stage"}`);
+        break;
+
+      case "creator_start":
+        appendStreamLine("creator", `gerando ${ev.creator_id}`);
         break;
 
       case "creator_ready":
-        if (ev.creator) renderCreator(ev.creator);
+        if (ev.creator) renderCreator(mergeCreator(ev.creator));
+        appendStreamLine("creator", `${ev.creator?.id || "creator"} pronto`);
         break;
 
       case "awaiting_approval":
+        (ev.creators || []).forEach(c => mergeCreator(c));
         showApprovalPanel(ev.creators || []);
         setBadge("running", "aguardando aceite");
+        appendStreamLine("approval", `aguardando aceite de ${(ev.creators || []).length} creators`);
         break;
 
       case "llm_start":
         currentStage = ev.stage;
+        appendStreamLine("llm", `stream ${ev.stage || "stage"} iniciado`);
         break;
 
       case "llm_token":
@@ -1044,11 +1450,13 @@ async function startRun() {
         if (ev.summary) updateSummary(ev.summary);
         document.getElementById("approval-panel").classList.remove("visible");
         btn.disabled = false;
+        appendStreamLine("run", "pipeline concluída");
         eventSource.close();
         break;
 
       case "error":
         setBadge("error", "erro");
+        appendStreamLine("erro", ev.message || "erro desconhecido");
         appendLLM("ERRO", "\n" + (ev.message || "erro desconhecido"));
         document.getElementById("approval-panel").classList.remove("visible");
         btn.disabled = false;
@@ -1060,6 +1468,7 @@ async function startRun() {
             document.getElementById("run-badge").textContent === "aguardando aceite") {
           setBadge("done", "concluído");
         }
+        appendStreamLine("stream", "conexão encerrada");
         btn.disabled = false;
         eventSource.close();
         break;
@@ -1088,6 +1497,32 @@ function showApprovalPanel(creators) {
     label.appendChild(input);
     label.appendChild(el("span", null, c.id || "creator"));
     div.appendChild(label);
+
+    const imageUri = c.image_uri || c.image;
+    if (renderableCreatorUri(imageUri)) {
+      const img = document.createElement("img");
+      img.src = imageUri;
+      img.alt = c.id || "creator";
+      img.style.width = "40px";
+      img.style.height = "40px";
+      img.style.objectFit = "cover";
+      img.style.borderRadius = "6px";
+      img.style.marginLeft = "8px";
+      div.appendChild(makeExpandable(img, imageUri));
+    }
+
+    const previewUri = c.voice_preview_uri;
+    if (previewUri && /^(https?:\/\/|data:audio\/|\/|\.\/|\.\.\/)/i.test(previewUri)) {
+      const audio = document.createElement("audio");
+      audio.controls = true;
+      audio.preload = "none";
+      audio.src = previewUri;
+      audio.style.height = "26px";
+      audio.style.marginLeft = "8px";
+      audio.style.maxWidth = "160px";
+      div.appendChild(audio);
+    }
+
     container.appendChild(div);
   });
   panel.classList.add("visible");
@@ -1121,7 +1556,7 @@ async function openHistory() {
   try {
     const resp = await fetch("/api/creators");
     const data = await resp.json();
-    renderHistory(data.creators || []);
+    renderHistory(data.creators || [], data.store_path, data.exists);
   } catch (e) {
     clearElement(grid);
     const error = el("span", null, `Erro: ${e.message}`);
@@ -1135,13 +1570,16 @@ function closeHistory() {
   document.getElementById("history-overlay").classList.remove("visible");
 }
 
-function renderHistory(creators) {
+function renderHistory(creators, storePath, storeExists) {
   const grid = document.getElementById("history-grid");
   clearElement(grid);
   if (!creators.length) {
-    const empty = el("span", null, "Nenhum creator salvo.");
+    const suffix = storePath ? ` em ${storePath}` : "";
+    const missing = storeExists === false ? " (arquivo ainda não existe)" : "";
+    const empty = el("span", null, `Nenhum creator salvo${suffix}${missing}.`);
     empty.style.color = "var(--muted)";
     empty.style.fontSize = "12px";
+    empty.style.overflowWrap = "anywhere";
     grid.appendChild(empty);
     return;
   }
@@ -1163,23 +1601,60 @@ function renderHistory(creators) {
       img.src = imageUri;
       img.alt = c.creator_id || c.id || "creator";
       img.title = title;
-      card.appendChild(img);
+      card.appendChild(makeExpandable(img, imageUri));
     } else {
-      const noImg = el("div", null, "ref");
-      noImg.style.height = "80px";
+      const noImg = el("div", null, "sem imagem");
+      noImg.style.height = "96px";
       noImg.style.background = "var(--bg)";
+      noImg.style.border = "1px dashed var(--border)";
       noImg.style.borderRadius = "6px";
       noImg.style.display = "flex";
       noImg.style.alignItems = "center";
       noImg.style.justifyContent = "center";
       noImg.style.color = "var(--muted)";
+      noImg.style.fontSize = "9px";
       noImg.title = imageUri || "sem imagem";
       card.appendChild(noImg);
     }
+    // Voz: player quando há preview audível, senão a referência técnica (voice_id).
+    const previewUri = c.voice_preview_uri;
+    if (renderableAudioUri(previewUri)) {
+      const audio = document.createElement("audio");
+      audio.controls = true;
+      audio.preload = "none";
+      audio.src = previewUri;
+      card.appendChild(audio);
+    }
+    // Referências visíveis (não só no tooltip): oferta, voz, prompts, run.
+    const refs = document.createElement("div");
+    refs.className = "hist-refs";
+    const addRef = (label, value, mono) => {
+      if (!value) return;
+      const line = el("div", mono ? "hist-ref mono" : "hist-ref");
+      if (label) line.appendChild(el("b", null, `${label}: `));
+      line.appendChild(document.createTextNode(String(value)));
+      refs.appendChild(line);
+    };
+    const voiceRef = c.voice_ref || c.voice;
+    addRef("Oferta", c.offer);
+    addRef("Voz", voiceRef, true);
+    if (Array.isArray(c.angles) && c.angles.length) addRef("Ângulos", c.angles.join(", "));
+    addRef("Creator prompt", c.creator_prompt);
+    addRef("Vídeo prompt", c.video_prompt);
+    addRef("Run", c.run_id, true);
+    if (refs.childNodes.length) card.appendChild(refs);
     card.appendChild(el("div", "hist-status", c.status === "approved" ? "✓ aprovado" : "✗ rejeitado"));
     grid.appendChild(card);
   });
 }
+
+// Esc fecha o lightbox de imagem (se aberto).
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" &&
+      document.getElementById("lightbox-overlay").classList.contains("open")) {
+    closeLightbox();
+  }
+});
 
 // Inicializar steps no load
 initSteps();

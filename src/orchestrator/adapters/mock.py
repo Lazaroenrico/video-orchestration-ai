@@ -7,6 +7,7 @@ Custo por tier segue o Context.md (LTX $0.01/s, Kling $0.10/s, Seedance $0.168/s
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 from typing import Any, Optional
 
@@ -22,6 +23,94 @@ def _unit(*parts: Any) -> float:
     key = "|".join(str(p) for p in parts)
     digest = hashlib.sha256(key.encode()).hexdigest()
     return int(digest[:12], 16) / float(1 << 48)
+
+
+def _digest_bytes(*parts: Any) -> bytes:
+    key = "|".join(str(p) for p in parts)
+    return hashlib.sha256(key.encode()).digest()
+
+
+def _svg_data_uri(label: str, *seed_parts: Any) -> str:
+    """SVG minúsculo e determinístico, renderável como imagem (sem rede/disco).
+
+    A cor é derivada de hash dos ``seed_parts`` e o texto do rótulo torna o
+    payload legível/único por creator, mantendo tudo pequeno (poucas centenas
+    de bytes) — importante porque estes data URIs trafegam pelo buffer de SSE.
+    """
+    color = "#%06x" % (int(_unit(*seed_parts) * 0xFFFFFF))
+    svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64">'
+        f'<rect width="64" height="64" fill="{color}"/>'
+        f'<text x="32" y="36" font-size="9" text-anchor="middle" fill="#fff">{label}</text>'
+        "</svg>"
+    )
+    return "data:image/svg+xml;base64," + base64.b64encode(svg.encode()).decode()
+
+
+def _wav_data_uri(*seed_parts: Any) -> str:
+    """WAV PCM 8-bit mono minúsculo (~0.1s) e determinístico.
+
+    Cabeçalho RIFF/WAVE válido + amostras derivadas de hash (sem ``random``).
+    Curto o bastante para caber no buffer de replay do SSE.
+    """
+    sample_rate = 4000
+    n_samples = 400  # ~0.1s @ 4kHz
+    digest = _digest_bytes("voice-preview", *seed_parts)
+    samples = bytes(digest[i % len(digest)] for i in range(n_samples))
+    data_size = len(samples)
+    byte_rate = sample_rate  # mono, 8 bits/sample
+    header = (
+        b"RIFF"
+        + (36 + data_size).to_bytes(4, "little")
+        + b"WAVEfmt "
+        + (16).to_bytes(4, "little")
+        + (1).to_bytes(2, "little")  # PCM
+        + (1).to_bytes(2, "little")  # mono
+        + sample_rate.to_bytes(4, "little")
+        + byte_rate.to_bytes(4, "little")
+        + (1).to_bytes(2, "little")  # block align
+        + (8).to_bytes(2, "little")  # bits per sample
+        + b"data"
+        + data_size.to_bytes(4, "little")
+    )
+    return "data:audio/wav;base64," + base64.b64encode(header + samples).decode()
+
+
+# mp4 H.264 minúsculo, VÁLIDO e REPRODUZÍVEL (1 frame azul 16x16, faststart:
+# moov antes do mdat) — 932 bytes. Gerado offline uma vez; embutido como
+# constante para que a UI toque o vídeo no demo sem rede/disco/custo.
+_MP4_PLAYABLE_B64 = (
+    "AAAAIGZ0eXBtcDQyAAAAAG1wNDJtcDQxaXNvbWlzbzIAAANHbW9vdgAAAGxtdmhkAAAAAOZrEP3maxD9"
+    "AAAMgAAADIAAAQAAAQAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAABAAAAA"
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAgAAApZ0cmFrAAAAXHRraGQAAAAH5msQ/eZrEP0AAAAB"
+    "AAAAAAAADIAAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAABAAAAA"
+    "ABAAAAAQAAAAAAAkZWR0cwAAABxlbHN0AAAAAAAAAAEAAAyAAAAAAAABAAAAAAHRbWRpYQAAACBtZGhk"
+    "AAAAAOZrEP3maxD9AAAAZAAAAGRVxAAAAAAALWhkbHIAAAAAAAAAAHZpZGUAAAAAAAAAAAAAAABWaWRl"
+    "b0hhbmRsZXIAAAABfG1pbmYAAAAUdm1oZAAAAAEAAAAAAAAAAAAAACRkaW5mAAAAHGRyZWYAAAAAAAAA"
+    "AQAAAAx1cmwgAAAAAQAAATxzdGJsAAAAwHN0c2QAAAAAAAAAAQAAALBhdmMxAAAAAAAAAAEAAAAAAAAA"
+    "AAAAAAAAAAAAABAAEABIAAAASAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    "GP//AAAAI2F2Y0MBQtAL/+EADGdC0AuMjU5APCIRqAEABGjOPIAAAAAUYnRydAAAAAAAAAAAAAABqAAA"
+    "ABNjb2xybmNseAAGAAYABgAAAAAQcGFzcAAAAAEAAAABAAAAGHN0dHMAAAAAAAAAAQAAAAEAAABkAAAA"
+    "FHN0c3MAAAAAAAAAAQAAAAEAAAAcc3RzYwAAAAAAAAABAAAAAQAAAAEAAAABAAAAGHN0c3oAAAAAAAAA"
+    "AAAAAAEAAAA1AAAAFHN0Y28AAAAAAAAAAQAAA28AAAA9dWR0YQAAADVtZXRhAAAAAAAAACFoZGxyAAAA"
+    "AG1obHJtZGlyAAAAAAAAAAAAAAAAAAAAAAhpbHN0AAAAPXVkdGEAAAA1bWV0YQAAAAAAAAAhaGRscgAA"
+    "AABtaGxybWRpcgAAAAAAAAAAAAAAAAAAAAAIaWxzdAAAAD1tZGF0AAAADGdC0AuMjU5APCIRqAAAAARo"
+    "zjyAAAAAGWW4AAQAAAn///giigACBr44AAhfRwABADw="
+)
+
+
+def _mp4_data_uri(*seed_parts: Any) -> str:
+    """Vídeo REPRODUZÍVEL e determinístico (``data:video/mp4;base64,...``).
+
+    Retorna um mp4 H.264 minúsculo, válido e tocável (constante compartilhada)
+    para que o player da UI funcione no demo offline. Um ``#fragment`` derivado
+    de hash dos ``seed_parts`` é anexado: o navegador o descarta ao decodificar
+    (o mp4 tocado é idêntico), mas a string da URI varia por item/prompt —
+    preservando o contrato de que outputs diferentes têm URIs diferentes, sem
+    quebrar a reprodução nem a classificação ``data:video/mp4``.
+    """
+    tag = hashlib.sha256("|".join(str(p) for p in seed_parts).encode()).hexdigest()[:8]
+    return "data:video/mp4;base64," + _MP4_PLAYABLE_B64 + "#" + tag
 
 
 class MockAdapter:
@@ -94,8 +183,9 @@ class MockAdapter:
         return {
             "id": f"creator-{index}",
             "angles": ["front", "3/4", "profile", "smile", "neutral"],
-            "upscaled_base": f"mock://creator/{index}{sfx}/base_4k.png",
+            "upscaled_base": _svg_data_uri(f"C{index}{sfx}", "creator", index, sfx),
             "voice_id": f"voice-{index}{sfx}",
+            "voice_preview_uri": _wav_data_uri("creator", index, sfx),
         }
 
     # --- Steps 4/5: vídeo (talking-head / demo) ---
@@ -122,7 +212,7 @@ class MockAdapter:
                 meta["system_prompt"] = system_prompt
             return Artifact(
                 kind="clip",
-                uri=f"mock://clip/{item_id}/a{attempt}{sfx}",
+                uri=_mp4_data_uri("clip", item_id, attempt, sfx),
                 meta=meta,
             )
 
@@ -146,7 +236,7 @@ class MockAdapter:
         await self._tick()
         return Artifact(
             kind="video",
-            uri=f"mock://video/{item_id}.mp4",
+            uri=_mp4_data_uri("video", item_id),
             meta={"captions": True, "broll": True, "platform": platform},
         )
 

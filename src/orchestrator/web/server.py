@@ -565,7 +565,12 @@ async def approve(run_id: str, req: ApproveRequest) -> dict[str, Any]:
 
 @app.get("/api/creators")
 async def creators_history() -> dict[str, Any]:
-    return {"creators": creator_store.load_creators(str(default_creator_store_path()))}
+    store_path = default_creator_store_path()
+    return {
+        "creators": creator_store.load_creators(str(store_path)),
+        "store_path": str(store_path),
+        "exists": store_path.exists(),
+    }
 
 
 @app.get("/api/stream/{run_id}")

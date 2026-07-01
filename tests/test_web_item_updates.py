@@ -3,7 +3,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
+from orchestrator.adapters.mock import MockAdapter
 from orchestrator.graph.state import Artifact, QCResult
+from orchestrator.nodes.stages import node_roster
+from orchestrator import stream_bus
 from orchestrator.web import server as web_server
 
 
@@ -151,3 +156,95 @@ def test_ui_handles_item_update_and_keeps_item_text_dom_safe() -> None:
     render_body = html.split("function renderItem(item)", 1)[1].split("\nfunction ", 1)[0]
     assert ".textContent" in render_body
     assert "innerHTML = `" not in render_body
+
+
+def test_ui_stream_panel_logs_non_llm_events() -> None:
+    html = Path("src/orchestrator/web/static/index.html").read_text(encoding="utf-8")
+    assert "function appendStreamLine" in html
+    assert 'case "creator_start"' in html
+    assert 'appendStreamLine("creator", `gerando ${ev.creator_id}`)' in html
+    assert 'appendStreamLine("run", "pipeline iniciada")' in html
+
+
+def test_creators_history_exposes_store_path_and_entries(tmp_path, monkeypatch) -> None:
+    store = tmp_path / "creators.json"
+    creator_store = web_server.creator_store
+    creator_store.record_creators(
+        store,
+        "run-1",
+        [{"id": "creator-0", "image": "/media/run-1/creator-0/image.png", "voice": "voice-0"}],
+        approved_ids=["creator-0"],
+    )
+    monkeypatch.setenv("ORCH_CREATORS", str(store))
+
+    import asyncio
+
+    payload = asyncio.run(web_server.creators_history())
+
+    assert payload["store_path"] == str(store)
+    assert payload["exists"] is True
+    assert payload["creators"][0]["creator_id"] == "creator-0"
+
+
+@pytest.mark.asyncio
+async def test_roster_emits_creator_start_before_creator_ready(pipeline_cfg) -> None:
+    events: list[dict] = []
+    stream_bus.set_token_callback(events.append)
+    try:
+        cfg = {
+            "configurable": {
+                "adapter": MockAdapter(tiers=pipeline_cfg["tiers"]),
+                "pipeline": pipeline_cfg,
+                "run": {},
+                "thread_id": "run-1",
+            }
+        }
+        await node_roster({"run_id": "run-1"}, cfg)
+    finally:
+        stream_bus.clear_token_callback()
+
+    creator_events = [
+        (e.get("type"), e.get("creator_id") or (e.get("creator") or {}).get("id"))
+        for e in events
+        if e.get("type") in {"creator_start", "creator_ready"}
+    ]
+    for creator_id in ("creator-0", "creator-1"):
+        assert ("creator_start", creator_id) in creator_events
+        assert ("creator_ready", creator_id) in creator_events
+        assert creator_events.index(("creator_start", creator_id)) < creator_events.index(
+            ("creator_ready", creator_id)
+        )
+
+
+@pytest.mark.asyncio
+async def test_roster_creator_ready_carries_renderable_voice_preview(pipeline_cfg) -> None:
+    """Mock: o preview de voz do adapter (data:audio/wav) chega renderável à UI.
+
+    Regressão: _build_voice_preview não pode sobrescrever com None o preview que o
+    MockAdapter já emitiu — senão a demo offline fica sem voz audível.
+    """
+    events: list[dict] = []
+    stream_bus.set_token_callback(events.append)
+    try:
+        cfg = {
+            "configurable": {
+                "adapter": MockAdapter(tiers=pipeline_cfg["tiers"]),
+                "pipeline": pipeline_cfg,
+                "run": {},
+                "thread_id": "run-1",
+            }
+        }
+        await node_roster({"run_id": "run-1"}, cfg)
+    finally:
+        stream_bus.clear_token_callback()
+
+    ready = [e["creator"] for e in events if e.get("type") == "creator_ready"]
+    assert ready, "esperava ao menos um creator_ready"
+    for creator in ready:
+        norm = web_server._normalize_creator(creator)
+        assert norm["voice_preview_uri"].startswith("data:audio/wav;base64,")
+        art = web_server._normalize_artifact(
+            {"kind": "voice_preview", "uri": norm["voice_preview_uri"]}
+        )
+        assert art["media_type"] == "audio"
+        assert art["renderable"] is True

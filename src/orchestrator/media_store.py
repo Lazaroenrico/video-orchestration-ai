@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import base64
 import logging
+import mimetypes
 from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import urlparse
@@ -29,6 +30,7 @@ _EXT_BY_MIME = {
     "image/webp": "webp",
     "image/gif": "gif",
     "image/avif": "avif",
+    "image/svg+xml": "svg",
     "audio/mpeg": "mp3",
     "audio/mp3": "mp3",
     "audio/wav": "wav",
@@ -52,7 +54,12 @@ def _is_downloadable(uri: str) -> bool:
 
 def _ext_from_mime(content_type: str) -> str:
     mime = (content_type or "").split(";", 1)[0].strip().lower()
-    return _EXT_BY_MIME.get(mime, _DEFAULT_EXT)
+    if mime in _EXT_BY_MIME:
+        return _EXT_BY_MIME[mime]
+    # Fallback para mimes conhecidos do stdlib antes de degradar para .bin — evita
+    # servir imagem/áudio como application/octet-stream (browser não renderiza).
+    guessed = mimetypes.guess_extension(mime) if mime else None
+    return guessed.lstrip(".") if guessed else _DEFAULT_EXT
 
 
 def _ext_from_url(uri: str) -> Optional[str]:
@@ -114,6 +121,86 @@ async def persist_media(
     filename = f"{basename}.{ext}"
     (dest_dir / filename).write_bytes(data)
     return f"{web_prefix}/{filename}"
+
+
+async def persist_bytes(
+    data: bytes,
+    dest_dir: str | Path,
+    basename: str,
+    *,
+    web_prefix: str,
+    ext: str = "mp3",
+) -> str:
+    """Grava ``data`` em ``dest_dir/{basename}.{ext}`` e retorna o caminho web servível.
+
+    Usado quando os bytes já estão em mãos (ex.: TTS síncrono de preview de voz) e
+    não há uri para baixar via ``persist_media``.
+    """
+    dest_dir = Path(dest_dir)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    filename = f"{basename}.{ext}"
+    (dest_dir / filename).write_bytes(data)
+    return f"{web_prefix}/{filename}"
+
+
+async def persist_item_media(
+    item: Any,
+    *,
+    run_id: str,
+    media_root: str | Path,
+    client: Optional[httpx.AsyncClient] = None,
+) -> Any:
+    """Persiste os bytes dos clips e do vídeo montado de um ``Item``.
+
+    - ``clips[n].uri`` http(s)/data: -> baixado para
+      ``/media/{run_id}/items/{item_id}/clip-{n}.{ext}``; a uri original fica em
+      ``meta["source_uri"]``.
+    - ``assembled.uri`` http(s)/data: -> baixado para
+      ``/media/{run_id}/items/{item_id}/assembled.{ext}``, mesma proveniência.
+    - Não-baixáveis (``mock://``, ids opacos): no-op total, item devolvido inalterado.
+
+    Aceita ``item`` como ``Item`` (pydantic) ou dict — devolve o mesmo tipo recebido,
+    mirando o padrão já usado em ``persist_creator_media``/``_to_plain`` do server.
+    """
+    is_model = hasattr(item, "model_dump")
+    data = item.model_dump() if is_model else dict(item)
+    item_id = data.get("id") or "item"
+    dest_dir = Path(media_root) / run_id / "items" / item_id
+    web_prefix = f"/media/{run_id}/items/{item_id}"
+
+    clips = data.get("clips") or []
+    new_clips: list[dict[str, Any]] = []
+    for n, clip in enumerate(clips):
+        clip = dict(clip)
+        uri = clip.get("uri")
+        if isinstance(uri, str) and _is_downloadable(uri):
+            local = await persist_media(
+                uri, dest_dir, f"clip-{n}", web_prefix=web_prefix, client=client,
+            )
+            if local != uri:
+                meta = dict(clip.get("meta") or {})
+                meta["source_uri"] = uri
+                clip = {**clip, "uri": local, "meta": meta}
+        new_clips.append(clip)
+    data["clips"] = new_clips
+
+    assembled = data.get("assembled")
+    if assembled:
+        assembled = dict(assembled)
+        uri = assembled.get("uri")
+        if isinstance(uri, str) and _is_downloadable(uri):
+            local = await persist_media(
+                uri, dest_dir, "assembled", web_prefix=web_prefix, client=client,
+            )
+            if local != uri:
+                meta = dict(assembled.get("meta") or {})
+                meta["source_uri"] = uri
+                assembled = {**assembled, "uri": local, "meta": meta}
+        data["assembled"] = assembled
+
+    if is_model:
+        return type(item).model_validate(data)
+    return data
 
 
 async def persist_creator_media(

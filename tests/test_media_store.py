@@ -69,6 +69,19 @@ async def test_persist_media_data_uri_writes_png(tmp_path):
     assert written == _PNG_BYTES
 
 
+@pytest.mark.asyncio
+async def test_persist_media_data_uri_svg_keeps_svg_extension(tmp_path):
+    """SVG (ex.: imagem mock do creator) precisa de extensão .svg — servido como
+    application/octet-stream via .bin, o browser não renderiza a imagem."""
+    svg = b"<svg xmlns='http://www.w3.org/2000/svg'/>"
+    uri = "data:image/svg+xml;base64," + base64.b64encode(svg).decode()
+    out = await media_store.persist_media(
+        uri, tmp_path / "c", "image", web_prefix="/media/c",
+    )
+    assert out == "/media/c/image.svg"
+    assert (tmp_path / "c" / "image.svg").read_bytes() == svg
+
+
 # --------------------------------------------------------------------------- #
 # persist_media — HTTP                                                         #
 # --------------------------------------------------------------------------- #

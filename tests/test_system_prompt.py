@@ -29,11 +29,15 @@ def adapter():
 
 
 async def test_build_creator_no_prompt_is_legacy(adapter):
-    """Sem system_prompt o retorno deve ser idêntico ao original."""
+    """Sem system_prompt o retorno deve ser idêntico ao original (mesmos campos e determinismo)."""
     c = await adapter.build_creator(0)
+    c2 = await adapter.build_creator(0)
     assert c["id"] == "creator-0"
-    assert c["upscaled_base"] == "mock://creator/0/base_4k.png"
+    assert c["upscaled_base"].startswith("data:image/svg+xml;base64,")
+    assert c["upscaled_base"] == c2["upscaled_base"]  # determinístico
     assert c["voice_id"] == "voice-0"
+    assert c["voice_preview_uri"].startswith("data:audio/wav;base64,")
+    assert c["voice_preview_uri"] == c2["voice_preview_uri"]  # determinístico
 
 
 async def test_build_creator_with_prompt_differs_from_legacy(adapter):
@@ -65,7 +69,9 @@ async def test_build_creator_different_prompts_differ(adapter):
 
 async def test_generate_clip_no_prompt_is_legacy(adapter):
     art = await adapter.generate_clip("item-1", "ltx", 8, 1)
-    assert art.uri == "mock://clip/item-1/a1"
+    art2 = await adapter.generate_clip("item-1", "ltx", 8, 1)
+    assert art.uri.startswith("data:video/mp4;base64,")
+    assert art.uri == art2.uri  # determinístico
 
 
 async def test_generate_clip_with_prompt_uri_differs(adapter):

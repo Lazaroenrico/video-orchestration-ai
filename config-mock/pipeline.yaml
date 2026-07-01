@@ -1,0 +1,31 @@
+# Parâmetros da pipeline. A topologia do grafo é fixa no builder (v1); este arquivo
+# ajusta os "knobs" (tamanho de batch, concorrência, QC, custo/concorrência por tier).
+batch:
+  default_size: 12
+  max_concurrency: 8        # fan-out paralelo no nível do item (RunnableConfig.max_concurrency)
+
+qc:
+  max_attempts: 3           # tentativas antes de descartar um item (Step 7 regen loop)
+  fail_rate: 0.34           # fração determinística reprovada no mock (exercita o loop)
+
+# Roteamento + custo por tier (Step 4 / "The Cost at Scale" do Context.md).
+# Tentativas escalam o tier: 1ª LTX, 2ª Kling, 3ª Seedance (cheap -> premium).
+tiers:
+  - name: ltx
+    model: ltx-2.3
+    cost_per_second: 0.01
+    max_concurrency: 16     # barato: alta concorrência (bulk de testes)
+  - name: kling
+    model: kling-3.0
+    cost_per_second: 0.10
+    max_concurrency: 6      # sinal: reprodução mais limpa
+  - name: seedance
+    model: seedance-2.0
+    cost_per_second: 0.168
+    max_concurrency: 2      # premium: vencedores, baixa concorrência
+
+clip:
+  duration_seconds: 8
+
+roster:
+  creators: 2               # quantos creators reutilizáveis no roster (Step 3)
