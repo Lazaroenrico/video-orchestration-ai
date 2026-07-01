@@ -5,6 +5,51 @@ pulados sem `JUDGE_GATEWAY_URL`) + 2 warnings conhecidos/benignos (LangSmith
 deprecation em import; LangGraph resume parcial — ver falha #5).
 Rodar: `rtk proxy python -m pytest`.
 
+## Correção — histórico recupera creators quando `creators.json` está vazio (2026-07-01)
+
+Sintoma: o modal de histórico do frontend não mostrava creators antigos; `/api/creators`
+lia `.orchestrator/creators.json`, mas o arquivo local estava zerado (`{}`), enquanto a
+mídia antiga ainda existia em `.orchestrator/media/<run_id>/creator-*`.
+
+Causa raiz: o histórico dependia exclusivamente do JSON de store. Se o arquivo fosse
+apagado/reescrito vazio ou configurado para um caminho sem dados, a UI não tinha fallback
+para a mídia já persistida.
+
+Correção: `/api/creators` mantém o store como fonte primária, mas quando ele não tem
+entradas reconstrói um histórico básico a partir de `ORCH_MEDIA`/`.orchestrator/media`,
+preferindo imagens renderizáveis (`image.png`/`image.svg`/etc.) e previews de voz
+(`voice.wav`/`voice.mp3`/etc.), marcando os itens como `status: recovered`.
+Regressão: `test_creators_history_recovers_from_media_when_store_is_empty`.
+
+## Fase vídeo Replicate LTX 2.3 sem áudio (2026-07-01)
+
+Objetivo: ligar o role `video` ao Replicate real usando LTX 2.3 Fast, primeiro sem
+áudio. Áudio/voiceover e concatenação ficam para a próxima etapa.
+
+Sintoma: `ReplicateVideoAdapter` ainda usava um contrato REST manual/fictício
+(`/predictions` com `model` e `output`) e não seguia o padrão já corrigido de
+`ReplicateUpscaleAdapter`/`ReplicateVoiceAdapter` (`replicate.async_run` + retry). Além
+disso, o grafo não carregava a imagem do creator para o stage de vídeo.
+
+Causa raiz: D14 provou o papel `video` com httpx injetável antes dos adapters Replicate
+migrarem para SDK oficial. Depois que upscale/voz passaram para SDK, vídeo ficou com um
+contrato divergente e sem dados de creator suficientes para image-to-video.
+
+Correção: `ReplicateVideoAdapter` agora usa `replicate.async_run` com runner injetável,
+retenta via `with_transport_retry`, força `generate_audio: false` e normaliza outputs
+`str`/`list`/`dict`. O tier `ltx` usa `lightricks/ltx-2.3-fast`; `kling`/`seedance`
+ficam em fallback mock com `fallback_reason` até refs reais existirem. `Item` ganhou
+`creator_image_uri`; o fan-out preenche esse campo a partir do roster; os nodes de vídeo
+montam prompt com `video_prompt`, script e conceito e passam a imagem ao adapter.
+
+### Red → Green (TDD)
+- RED: `tests/test_replicate_video.py`, `test_fan_out_attaches_creator_image_uri_from_roster`
+  e os testes de `make_gen_node`/`node_product_demo` falharam por ausência de `runner`,
+  `creator_image_uri` e `reference_image_uri`.
+- GREEN: implementação mínima nos adapters, state/fan-out e nodes. Focado:
+  `rtk proxy python -m pytest tests/test_replicate_video.py tests/test_builder.py::test_fan_out_attaches_creator_image_uri_from_roster tests/test_system_prompt.py::test_gen_node_passes_video_prompt tests/test_system_prompt.py::test_node_product_demo_passes_video_prompt -q`
+  → 11 passed.
+
 ## Fase retry de throttle 429 do Replicate (2026-07-01)
 
 Sintoma: em produção, `upscale`/`voz` do creator falhavam com

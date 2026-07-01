@@ -37,6 +37,7 @@ class VideoPort(Protocol):
     async def generate_clip(
         self, item_id: str, tier: str, seconds: int, attempt: int,
         system_prompt: Optional[str] = None,
+        reference_image_uri: Optional[str] = None,
     ) -> Artifact: ...
 
 

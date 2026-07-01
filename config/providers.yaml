@@ -1,10 +1,10 @@
-# Mapa papel -> adapter. Tudo "mock" por padrão (dry-run, custo zero).
-# Para ligar uma integração real, troque "mock" pelo nome do adapter registrado em
-# src/orchestrator/registry.py — o grafo não muda. Papéis ausentes caem em "mock".
+# Perfil live/híbrido: papéis abaixo apontam para adapters reais onde já existem
+# integrações estáveis. Para dry-run sem rede/custo, use --config-dir config-mock.
+# Papéis ausentes ainda caem em "mock" no registry, sem mudar o grafo.
 adapters:
   llm: vercel_gateway_llm  # ✅ Claude via Vercel Gateway (AI_GATEWAY_API_KEY configurada)
   creator: creator_real_replicate  # GPT Image 2 via Vercel Gateway + Replicate (upscale + voice)
-  video: mock                   # MVP: vídeo mock (tiers ainda usam refs placeholder; live exige refs Replicate reais)
+  video: replicate              # LTX 2.3 Fast via Replicate; áudio fica para etapa posterior
   qc: mock
   assembly: mock
   distribution: mock

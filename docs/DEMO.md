@@ -1,12 +1,14 @@
 # DEMO — testar o motor mock ponta a ponta
 
-Guia para rodar e **ver** a pipeline de AI UGC em modo **mock/dry-run** (sem rede, custo
-zero, determinístico). É a prova de conceito do motor: os 10 passos do `Context.md` rodam
-como nodes do LangGraph e produzem um batch de "vídeos" fictícios com custo por tier, QC,
-montagem, distribuição e o loop de feedback.
+Guia para rodar e **ver** a pipeline de AI UGC em modo **mock/dry-run** usando
+`--config-dir config-mock` (sem rede, custo zero, determinístico). É a prova de
+conceito do motor: os 10 passos do `Context.md` rodam como nodes do LangGraph e
+produzem um batch de vídeos fictícios/renderizáveis com custo por tier, QC,
+montagem, distribuição e loop de feedback.
 
-> Nada aqui chama API externa. Todas as URIs são `mock://...` e os custos são calculados
-> a partir das tabelas de tier do `config/pipeline.yaml`.
+> Nada aqui chama API externa. As mídias mock usam `data:` renderizável quando possível,
+> e os custos são calculados a partir das tabelas de tier do `config-mock/pipeline.yaml`.
+> O diretório `config/` é live/híbrido e pode chamar APIs reais.
 
 ## 1. Setup
 
@@ -32,7 +34,7 @@ O único skip é o teste `--live` do LLM Judge (opt-in, exige um gateway externo
 ## 2. Rodar um batch
 
 ```bash
-orchestrator run --batch 12 --offer "serum X" --run-id demo-run --config-dir config
+orchestrator run --batch 12 --offer "serum X" --run-id demo-run --config-dir config-mock
 ```
 
 ```
@@ -74,9 +76,9 @@ do `Context.md`.
 O estado de cada run fica checkpointado (sqlite); `thread_id = run_id`.
 
 ```bash
-orchestrator status demo-run --config-dir config   # relê o relatório do checkpoint
+orchestrator status demo-run --config-dir config-mock   # relê o relatório do checkpoint
 orchestrator list                                   # lista os run_ids conhecidos
-orchestrator resume demo-run --config-dir config    # retoma no mesmo thread_id
+orchestrator resume demo-run --config-dir config-mock    # retoma no mesmo thread_id
 ```
 
 `status` e `resume` de um run já completo reproduzem o mesmo relatório do passo 2 (o run
@@ -92,7 +94,7 @@ usa como **viés** na geração de conceitos do próximo.
 
 ```bash
 orchestrator loop --cycles 3 --batch 8 --offer "serum X" \
-  --run-id-prefix demo --feedback-store fb.json --config-dir config
+  --run-id-prefix demo --feedback-store fb.json --config-dir config-mock
 ```
 
 ```

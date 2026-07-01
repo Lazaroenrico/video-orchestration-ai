@@ -186,6 +186,42 @@ def test_creators_history_exposes_store_path_and_entries(tmp_path, monkeypatch) 
     assert payload["creators"][0]["creator_id"] == "creator-0"
 
 
+def test_creators_history_recovers_from_media_when_store_is_empty(tmp_path, monkeypatch) -> None:
+    store = tmp_path / "creators.json"
+    store.write_text("{}", encoding="utf-8")
+    media_root = tmp_path / "media"
+    creator_dir = media_root / "web-old" / "creator-0"
+    creator_dir.mkdir(parents=True)
+    (creator_dir / "image.png").write_bytes(b"png")
+    (creator_dir / "voice.wav").write_bytes(b"wav")
+    monkeypatch.setenv("ORCH_CREATORS", str(store))
+    monkeypatch.setattr(web_server, "default_media_path", lambda: media_root)
+
+    import asyncio
+
+    payload = asyncio.run(web_server.creators_history())
+
+    assert payload["store_path"] == str(store)
+    assert payload["exists"] is True
+    assert payload["creators"] == [
+        {
+            "run_id": "web-old",
+            "creator_id": "creator-0",
+            "id": "creator-0",
+            "image_uri": "/media/web-old/creator-0/image.png",
+            "image": "/media/web-old/creator-0/image.png",
+            "voice_ref": "/media/web-old/creator-0/voice.wav",
+            "voice": "/media/web-old/creator-0/voice.wav",
+            "voice_preview_uri": "/media/web-old/creator-0/voice.wav",
+            "angles": [],
+            "creator_prompt": None,
+            "video_prompt": None,
+            "offer": None,
+            "status": "recovered",
+        }
+    ]
+
+
 @pytest.mark.asyncio
 async def test_roster_emits_creator_start_before_creator_ready(pipeline_cfg) -> None:
     events: list[dict] = []

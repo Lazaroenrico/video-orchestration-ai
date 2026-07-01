@@ -1,75 +1,46 @@
-"""ReplicateVideoAdapter — adapter de vídeo real estilo Replicate, implementa VideoPort.
+"""ReplicateVideoAdapter — vídeo real via SDK oficial ``replicate``.
 
-## Decisão async vs httpx
-``generate_clip`` é ``async`` por contrato (VideoPort). Para manter testabilidade sem
-rede, optamos por ``httpx.AsyncClient`` (nativo async) em vez de rodar um
-``httpx.Client`` sync em ``asyncio.to_thread``.
-
-Vantagens da abordagem AsyncClient:
-- Sem overhead de thread pool.
-- Testável com ``httpx.MockTransport`` + ``httpx.AsyncClient`` direto, sem precisar de
-  ``respx`` ou patches de thread.
-- Composição natural com ``await``.
-
-## Formato de resposta assumido (Replicate v1 simplificado)
-POST ``{base_url}/predictions``
-
-Request body::
-
-    {
-        "model": "<model-id>",
-        "input": {"item_id": "...", "seconds": 8, "attempt": 1}
-    }
-
-Response JSON esperado::
-
-    {
-        "id": "<prediction-id>",
-        "output": ["https://cdn.example.com/clip.mp4"]
-    }
-
-``output`` é uma lista; o URI do clip é o primeiro elemento.
+Usa ``replicate.async_run(ref, input=...)`` para deixar o SDK resolver versionamento,
+criação da prediction e polling. O tier ``ltx`` usa LTX 2.3 Fast sem áudio; tiers
+premium ainda não têm refs reais confirmadas e caem em mock para manter o QC loop vivo.
 """
 from __future__ import annotations
 
-import os
-from typing import Any, Optional
+from typing import Any, Awaitable, Callable, Optional
 
-import httpx
+import replicate
 
+from orchestrator.adapters._retry import with_transport_retry
+from orchestrator.adapters.mock import MockAdapter
 from orchestrator.graph.state import Artifact
 from orchestrator.tracing import traced
 
+Runner = Callable[..., Awaitable[Any]]
+
+_VIDEO_OUTPUT_KEYS = ("video", "video_url", "output")
+
 
 class ReplicateVideoAdapter:
-    """Implementa VideoPort chamando a API Replicate (ou compatível).
-
-    Parameters
-    ----------
-    tiers:
-        Lista de dicts com ``name``, ``model``, ``cost_per_second`` (e opcionalmente
-        ``max_concurrency``). Espelha o formato de ``conftest.TIERS``.
-    base_url:
-        Base da API. Padrão: ``https://api.replicate.com/v1``.
-    token:
-        Token de autenticação (``Authorization: Token <token>``).
-        Se vazio, lê de ``REPLICATE_API_TOKEN``.
-    client:
-        ``httpx.AsyncClient`` injetado. Se ``None``, cria um por chamada.
-        Injete nos testes usando ``httpx.AsyncClient(transport=httpx.MockTransport(...))``.
-    """
+    """Implementa VideoPort chamando Replicate LTX 2.3 Fast para o tier ``ltx``."""
 
     def __init__(
         self,
         tiers: list[dict[str, Any]],
-        base_url: str = "https://api.replicate.com/v1",
-        token: str = "",
-        client: Optional[httpx.AsyncClient] = None,
+        runner: Optional[Runner] = None,
+        clip: Optional[dict[str, Any]] = None,
+        max_retries: int = 3,
+        backoff_base: float = 1.0,
     ) -> None:
         self.tiers: dict[str, dict[str, Any]] = {t["name"]: t for t in tiers}
-        self.base_url = base_url.rstrip("/")
-        self.token = token or os.environ.get("REPLICATE_API_TOKEN", "")
-        self._client = client
+        self._runner: Runner = runner or replicate.async_run
+        self._mock = MockAdapter(tiers=tiers)
+        clip = clip or {}
+        self.resolution = str(clip.get("resolution", "1080p"))
+        self.aspect_ratio = str(clip.get("aspect_ratio", "9:16"))
+        self.fps = int(clip.get("fps", 25))
+        self.camera_motion = str(clip.get("camera_motion", "static"))
+        self.max_retries = max_retries
+        self.backoff_base = backoff_base
 
     @traced("adapter.replicate_video.generate_clip", run_type="tool", step="video", provider="replicate")
     async def generate_clip(
@@ -79,50 +50,46 @@ class ReplicateVideoAdapter:
         seconds: int,
         attempt: int,
         system_prompt: Optional[str] = None,
+        reference_image_uri: Optional[str] = None,
     ) -> Artifact:
-        """Gera um clip via POST ``{base_url}/predictions``.
-
-        Levanta ``KeyError`` para tier desconhecido (contratual, igual ao MockAdapter).
-        """
+        """Gera um clip LTX silencioso ou delega tiers ainda não plugados ao mock."""
         spec = self.tiers[tier]  # KeyError em tier desconhecido (contratual)
-        model = spec["model"]
-        cost_usd = round(spec["cost_per_second"] * seconds, 4)
-
-        headers = {
-            "Authorization": f"Token {self.token}",
-            "Content-Type": "application/json",
-        }
-        inp: dict[str, Any] = {
-            "item_id": item_id,
-            "seconds": seconds,
-            "attempt": attempt,
-        }
-        if system_prompt:
-            inp["prompt"] = system_prompt
-        body = {
-            "model": model,
-            "input": inp,
-        }
-
-        if self._client is not None:
-            resp = await self._client.post(
-                f"{self.base_url}/predictions",
-                headers=headers,
-                json=body,
+        if tier != "ltx":
+            artifact = await self._mock.generate_clip(
+                item_id,
+                tier,
+                seconds,
+                attempt,
+                system_prompt=system_prompt,
+                reference_image_uri=reference_image_uri,
             )
-        else:
-            async with httpx.AsyncClient() as client:
-                resp = await client.post(
-                    f"{self.base_url}/predictions",
-                    headers=headers,
-                    json=body,
-                )
+            meta = dict(artifact.meta)
+            meta["provider"] = "mock"
+            meta["fallback_reason"] = "replicate_model_not_configured"
+            return artifact.model_copy(update={"meta": meta})
 
-        resp.raise_for_status()
-        data: dict[str, Any] = resp.json()
+        model = spec["model"]
+        prompt = system_prompt or f"Generate a silent vertical UGC video for item {item_id}."
+        cost_usd = round(spec["cost_per_second"] * seconds, 4)
+        inp: dict[str, Any] = {
+            "prompt": prompt,
+            "duration": seconds,
+            "generate_audio": False,
+            "resolution": self.resolution,
+            "aspect_ratio": self.aspect_ratio,
+            "fps": self.fps,
+            "camera_motion": self.camera_motion,
+        }
+        if reference_image_uri:
+            inp["image"] = reference_image_uri
 
-        prediction_id: str = data["id"]
-        uri: str = data["output"][0]
+        output = await with_transport_retry(
+            lambda: self._runner(model, input=inp),
+            max_retries=self.max_retries,
+            backoff_base=self.backoff_base,
+            label="replicate.video",
+        )
+        uri = self._coerce_output(output)
 
         return Artifact(
             kind="clip",
@@ -134,6 +101,33 @@ class ReplicateVideoAdapter:
                 "cost_usd": cost_usd,
                 "attempt": attempt,
                 "provider": "replicate",
-                "prediction_id": prediction_id,
+                "generate_audio": False,
+                "has_reference_image": bool(reference_image_uri),
             },
         )
+
+    @staticmethod
+    def _coerce_output(output: Any) -> str:
+        """Normaliza outputs comuns do SDK para uma URI de vídeo."""
+        if isinstance(output, list):
+            if not output:
+                raise RuntimeError("Replicate video output list is empty")
+            return str(output[0])
+        if isinstance(output, dict):
+            for key in _VIDEO_OUTPUT_KEYS:
+                value = output.get(key)
+                if value:
+                    if isinstance(value, list):
+                        if not value:
+                            raise RuntimeError(f"Replicate video output key {key!r} is empty")
+                        return str(value[0])
+                    return str(value)
+            if not output:
+                raise RuntimeError("Replicate video output dict is empty")
+            first = next(iter(output.values()))
+            if isinstance(first, list):
+                if not first:
+                    raise RuntimeError("Replicate video output fallback list is empty")
+                return str(first[0])
+            return str(first)
+        return str(output)

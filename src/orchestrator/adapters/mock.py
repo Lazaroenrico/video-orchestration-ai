@@ -193,6 +193,7 @@ class MockAdapter:
     async def generate_clip(
         self, item_id: str, tier: str, seconds: int, attempt: int,
         system_prompt: Optional[str] = None,
+        reference_image_uri: Optional[str] = None,
     ) -> Artifact:
         spec = self.tiers[tier]  # KeyError em tier desconhecido (contratual)
         async with self._semaphores[tier]:
@@ -210,6 +211,8 @@ class MockAdapter:
             }
             if system_prompt:
                 meta["system_prompt"] = system_prompt
+            if reference_image_uri:
+                meta["has_reference_image"] = True
             return Artifact(
                 kind="clip",
                 uri=_mp4_data_uri("clip", item_id, attempt, sfx),

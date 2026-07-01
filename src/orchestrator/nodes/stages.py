@@ -203,6 +203,26 @@ def _top_styles(items: list[Item]) -> list[str]:
 
 # ===================== Subgrafo per-item (Item) =====================
 
+
+def _video_prompt(item: Item, run_prompt: str | None, *, stage: str) -> str:
+    """Prompt textual para vídeo sem áudio, usando script e conceito disponíveis."""
+    parts: list[str] = []
+    if run_prompt:
+        parts.append(run_prompt.strip())
+    parts.append(f"Generate a silent vertical UGC {stage} video.")
+    if item.script:
+        parts.append(f"Script context:\n{item.script}")
+    concept = item.concept or {}
+    concept_bits = [
+        f"{key}: {concept[key]}"
+        for key in ("hook", "angle", "hook_style", "offer", "format")
+        if concept.get(key)
+    ]
+    if concept_bits:
+        parts.append("Concept context: " + "; ".join(concept_bits))
+    parts.append("No audio. No captions burned into the video.")
+    return "\n\n".join(parts)
+
 @traced("node.script", run_type="chain", step=2)
 async def node_script(state: Any, config: RunnableConfig) -> dict[str, Any]:
     """Step 2 — escreve o script no voice do creator, calibrado por plataforma."""
@@ -232,7 +252,10 @@ def make_gen_node(tier: str):
         )
         clip = await adapter.generate_clip(
             item_id=item.id, tier=tier, seconds=seconds, attempt=item.attempts,
-            system_prompt=run_cfg.get("video_prompt"),
+            system_prompt=_video_prompt(
+                item, run_cfg.get("video_prompt"), stage="talking-head"
+            ),
+            reference_image_uri=item.creator_image_uri,
         )
         cost_usd = round(item.cost_usd + clip.meta["cost_usd"], 4)
         run_id = config["configurable"].get("thread_id", "run")
@@ -262,7 +285,8 @@ async def node_product_demo(state: Any, config: RunnableConfig) -> dict[str, Any
     add_trace_metadata(step=5, stage="product_demo", item_id=item.id, attempt=item.attempts)
     demo = await adapter.generate_clip(
         item_id=f"{item.id}:demo", tier="ltx", seconds=seconds, attempt=item.attempts,
-        system_prompt=run_cfg.get("video_prompt"),
+        system_prompt=_video_prompt(item, run_cfg.get("video_prompt"), stage="product-demo"),
+        reference_image_uri=item.creator_image_uri,
     )
     cost_usd = round(item.cost_usd + demo.meta["cost_usd"], 4)
     run_id = config["configurable"].get("thread_id", "run")

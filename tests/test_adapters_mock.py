@@ -6,7 +6,12 @@ from orchestrator.graph.state import Artifact, QCResult
 from orchestrator.web.server import _normalize_artifact, _normalize_creator
 
 TIERS = [
-    {"name": "ltx", "model": "ltx-2.3", "cost_per_second": 0.01, "max_concurrency": 16},
+    {
+        "name": "ltx",
+        "model": "lightricks/ltx-2.3-fast",
+        "cost_per_second": 0.01,
+        "max_concurrency": 16,
+    },
     {"name": "kling", "model": "kling-3.0", "cost_per_second": 0.10, "max_concurrency": 6},
     {"name": "seedance", "model": "seedance-2.0", "cost_per_second": 0.168, "max_concurrency": 2},
 ]

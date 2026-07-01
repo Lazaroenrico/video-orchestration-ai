@@ -136,7 +136,12 @@ def make_fan_out_node():
         sends: list[Send] = []
         for i, concept in enumerate(concepts):
             creator = roster[i % len(roster)]
-            item = new_item(concept=concept, creator_ref=creator.get("id"))
+            creator_image_uri = creator.get("image_source_uri") or creator.get("upscaled_base")
+            item = new_item(
+                concept=concept,
+                creator_ref=creator.get("id"),
+                creator_image_uri=creator_image_uri,
+            )
             cid = concept.get("id")
             if cid:
                 item.id = str(cid)

@@ -12,7 +12,7 @@ qc:
 # Tentativas escalam o tier: 1ª LTX, 2ª Kling, 3ª Seedance (cheap -> premium).
 tiers:
   - name: ltx
-    model: ltx-2.3
+    model: lightricks/ltx-2.3-fast
     cost_per_second: 0.01
     max_concurrency: 16     # barato: alta concorrência (bulk de testes)
   - name: kling
@@ -26,6 +26,11 @@ tiers:
 
 clip:
   duration_seconds: 8
+  resolution: 1080p
+  aspect_ratio: "9:16"
+  fps: 25
+  camera_motion: static
+  generate_audio: false
 
 roster:
   creators: 2               # quantos creators reutilizáveis no roster (Step 3)

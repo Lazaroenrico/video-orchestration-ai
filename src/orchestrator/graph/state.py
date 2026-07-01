@@ -65,6 +65,7 @@ class Item(BaseModel):
     id: str = Field(default_factory=lambda: uuid.uuid4().hex)
     concept: dict[str, Any]
     creator_ref: Optional[str] = None
+    creator_image_uri: Optional[str] = None
     script: Optional[str] = None
     tier: Optional[str] = None
     clips: list[Artifact] = Field(default_factory=list)
@@ -76,9 +77,13 @@ class Item(BaseModel):
     cost_usd: float = 0.0
 
 
-def new_item(concept: dict[str, Any], creator_ref: Optional[str] = None) -> Item:
+def new_item(
+    concept: dict[str, Any],
+    creator_ref: Optional[str] = None,
+    creator_image_uri: Optional[str] = None,
+) -> Item:
     """Factory de um novo ``Item`` a partir de um conceito."""
-    return Item(concept=concept, creator_ref=creator_ref)
+    return Item(concept=concept, creator_ref=creator_ref, creator_image_uri=creator_image_uri)
 
 
 def add_items(left: Optional[list[Item]], right: Optional[list[Item]]) -> list[Item]:

@@ -1,8 +1,12 @@
 # UGC Orchestrator
 
-Motor de orquestração para a pipeline de **AI UGC em escala** (500+ vídeos/semana) descrita em
-`Context.md`. **v1 = só o motor**, em modo **mock/dry-run** (nenhuma chamada externa real, custo zero),
-construído via **TDD** sobre **LangGraph / LangChain / LangSmith**.
+Motor de orquestração para a pipeline de **AI UGC em escala** (500+ vídeos/semana)
+descrita em `Context.md`. O motor é construído via **TDD** sobre **LangGraph /
+LangChain / LangSmith** e permite misturar adapters reais e mock por papel.
+
+- `config-mock/` roda dry-run determinístico, sem chamadas externas e custo zero.
+- `config/` é o perfil live/híbrido atual: LLM + creator + vídeo LTX 2.3 Fast via
+  APIs reais; QC, assembly e distribuição continuam mock.
 
 ## Pipeline (10 passos)
 
@@ -10,8 +14,8 @@ construído via **TDD** sobre **LangGraph / LangChain / LangSmith**.
 4. Talking-head (LTX/Kling/Seedance) · 5. Product demo · 6. Execução paralela ·
 7. QC · 8. Montagem · 9. Distribuição · 10. Loop de feedback.
 
-No v1 cada passo é um **node mock** num `StateGraph` do LangGraph. Os adapters de provedores são
-abstraídos (LangChain `Runnable`s) e plugados de verdade depois, node a node.
+Cada passo é um node num `StateGraph` do LangGraph. Os adapters de provedores são
+abstraídos por protocols e ligados por `config/providers.yaml`, sem mexer no grafo.
 
 ## Setup
 
@@ -23,21 +27,25 @@ uv pip install -e ".[dev]"
 ## Uso
 
 ```bash
-orchestrator run --batch 12 --offer "serum X" --config-dir config   # pipeline mock ponta a ponta
-orchestrator status <run_id> --config-dir config                    # relatório do run (lê o checkpoint)
-orchestrator resume <run_id> --config-dir config                    # retoma no mesmo thread_id
+orchestrator run --batch 12 --offer "serum X" --config-dir config-mock  # dry-run sem rede
+orchestrator status <run_id> --config-dir config-mock                   # relatório do run
+orchestrator resume <run_id> --config-dir config-mock                   # retoma no mesmo thread_id
 orchestrator list                                                   # lista runs
-orchestrator loop --cycles 3 --feedback-store fb.json --config-dir config  # N ciclos encadeados (loop de feedback)
+orchestrator loop --cycles 3 --feedback-store fb.json --config-dir config-mock  # loop de feedback mock
 ```
 
-## Ativar LLM via Vercel AI Gateway
+## Rodar o perfil live
 
 ```bash
 cp .env.example .env
-# preencha AI_GATEWAY_API_KEY no .env
+# preencha as chaves reais no .env:
+# AI_GATEWAY_API_KEY, REPLICATE_API_TOKEN
+# e as chaves usadas pelo creator configurado
 ```
 
-Em `config/providers.yaml`, troque `llm: mock` por `llm: vercel_gateway_llm`, depois rode:
+O perfil `config/` já ativa `llm: vercel_gateway_llm`, `creator:
+creator_real_replicate` e `video: replicate`. O vídeo usa LTX 2.3 Fast sem áudio
+(`generate_audio: false`); o áudio/voiceover entra em etapa posterior.
 
 ```bash
 orchestrator run --batch 3 --offer "serum X" --config-dir config

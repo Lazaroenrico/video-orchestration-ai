@@ -21,6 +21,7 @@ mindmap
       fan-out Send
         1 Item por concepto
         creator_ref round-robin do roster
+        creator_image_uri para video image-to-video
       process_item
         invoca subgrafo Item
       feedback Step10
@@ -70,8 +71,9 @@ mindmap
         OpenAIImageAdapter via Vercel Gateway GPT Image 2
         ReplicateUpscaleAdapter real-esrgan
         ReplicateVoiceAdapter suno bark
-      video mock
-        sem chamada real ainda
+      video replicate
+        LTX 2.3 Fast sem audio
+        Kling e Seedance fallback mock
       qc mock
         determinístico por fail_rate
       assembly mock
@@ -88,7 +90,7 @@ sequenceDiagram
     participant G as LangGraph runner
     participant LLM as Vercel Gateway (Claude Opus 4.8)
     participant IMG as Vercel Gateway (GPT Image 2)
-    participant REP as Replicate (upscale + voice)
+    participant REP as Replicate (upscale + voice + video)
     participant MEDIA as media_store (disco local)
 
     U->>G: run(offer, batch, platform, creator_prompt, video_prompt)
@@ -104,7 +106,8 @@ sequenceDiagram
     par fan-out por item (max_concurrency)
         G->>LLM: write_script(concept, creator_ref, platform)
         LLM-->>G: script
-        G->>G: generate_clip (mock hoje — sem chamada real)
+        G->>REP: generate_clip LTX 2.3 Fast (image-to-video, sem audio)
+        REP-->>G: clip mp4
         G->>G: qc_check (mock determinístico)
         G->>MEDIA: persist_item_media (clips, assembled)
         G->>G: assemble / distribute (mock)
@@ -120,8 +123,8 @@ sequenceDiagram
 | 3.5 | `node_approval` | — | `interrupt()` humano (opcional, `run.approve_creators`) |
 | 1 | `node_concepts` | `vercel_gateway_llm` | Sim — Claude Opus 4.8 via Vercel AI Gateway |
 | 2 | `node_script` | `vercel_gateway_llm` | Sim — Claude Opus 4.8 via Vercel AI Gateway |
-| 4 | `make_gen_node(tier)` | `mock` | Não — ainda mock (LTX/Kling/Seedance não plugados) |
-| 5 | `node_product_demo` | `mock` | Não — mock |
+| 4 | `make_gen_node(tier)` | `replicate` | Sim para `ltx` — LTX 2.3 Fast image-to-video sem áudio; `kling`/`seedance` fallback mock |
+| 5 | `node_product_demo` | `replicate` | Sim — LTX 2.3 Fast image-to-video sem áudio |
 | 7 | `node_qc` | `mock` | Não — determinístico via `fail_rate` |
 | 8 | `node_assembly` | `mock` | Não — mock |
 | 9 | `node_distribution` | `mock` | Não — mock |

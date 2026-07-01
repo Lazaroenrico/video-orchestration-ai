@@ -157,12 +157,32 @@ async def test_node_roster_no_prompt_passes_none(pipeline_cfg, adapter):
 
 
 async def test_gen_node_passes_video_prompt(pipeline_cfg, adapter):
-    received: list = []
+    received: list[dict] = []
 
     class SpyAdapter(MockAdapter):
-        async def generate_clip(self, item_id, tier, seconds, attempt, system_prompt=None):
-            received.append(system_prompt)
-            return await super().generate_clip(item_id, tier, seconds, attempt, system_prompt=system_prompt)
+        async def generate_clip(
+            self,
+            item_id,
+            tier,
+            seconds,
+            attempt,
+            system_prompt=None,
+            reference_image_uri=None,
+        ):
+            received.append(
+                {
+                    "system_prompt": system_prompt,
+                    "reference_image_uri": reference_image_uri,
+                }
+            )
+            return await super().generate_clip(
+                item_id,
+                tier,
+                seconds,
+                attempt,
+                system_prompt=system_prompt,
+                reference_image_uri=reference_image_uri,
+            )
 
     spy = SpyAdapter(tiers=TIERS)
 
@@ -170,7 +190,11 @@ async def test_gen_node_passes_video_prompt(pipeline_cfg, adapter):
     from orchestrator.graph.state import Item
 
     gen = make_gen_node("ltx")
-    item = Item(concept={"id": "c1", "hook_style": "problem"})
+    item = Item(
+        concept={"id": "c1", "hook": "Hook A", "hook_style": "problem", "offer": "serum"},
+        script="HOOK: Hook A\nCTA: test hoje.",
+        creator_image_uri="data:image/png;base64,abc",
+    )
     config = {
         "configurable": {
             "adapter": spy,
@@ -179,23 +203,50 @@ async def test_gen_node_passes_video_prompt(pipeline_cfg, adapter):
         }
     }
     await gen(item.model_dump(), config)
-    assert received == ["VIDEO_PROMPT"]
+    assert received[0]["reference_image_uri"] == "data:image/png;base64,abc"
+    assert "VIDEO_PROMPT" in received[0]["system_prompt"]
+    assert "HOOK: Hook A" in received[0]["system_prompt"]
+    assert "talking-head" in received[0]["system_prompt"]
 
 
 async def test_node_product_demo_passes_video_prompt(pipeline_cfg, adapter):
-    received: list = []
+    received: list[dict] = []
 
     class SpyAdapter(MockAdapter):
-        async def generate_clip(self, item_id, tier, seconds, attempt, system_prompt=None):
-            received.append(system_prompt)
-            return await super().generate_clip(item_id, tier, seconds, attempt)
+        async def generate_clip(
+            self,
+            item_id,
+            tier,
+            seconds,
+            attempt,
+            system_prompt=None,
+            reference_image_uri=None,
+        ):
+            received.append(
+                {
+                    "system_prompt": system_prompt,
+                    "reference_image_uri": reference_image_uri,
+                }
+            )
+            return await super().generate_clip(
+                item_id,
+                tier,
+                seconds,
+                attempt,
+                system_prompt=system_prompt,
+                reference_image_uri=reference_image_uri,
+            )
 
     spy = SpyAdapter(tiers=TIERS)
 
     from orchestrator.nodes.stages import node_product_demo
     from orchestrator.graph.state import Item
 
-    item = Item(concept={"id": "c1"})
+    item = Item(
+        concept={"id": "c1", "offer": "serum"},
+        script="CTA: compra hoje.",
+        creator_image_uri="data:image/png;base64,abc",
+    )
     config = {
         "configurable": {
             "adapter": spy,
@@ -204,4 +255,7 @@ async def test_node_product_demo_passes_video_prompt(pipeline_cfg, adapter):
         }
     }
     await node_product_demo(item.model_dump(), config)
-    assert received == ["MY_VIDEO_PROMPT"]
+    assert received[0]["reference_image_uri"] == "data:image/png;base64,abc"
+    assert "MY_VIDEO_PROMPT" in received[0]["system_prompt"]
+    assert "CTA: compra hoje." in received[0]["system_prompt"]
+    assert "product-demo" in received[0]["system_prompt"]

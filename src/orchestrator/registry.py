@@ -10,7 +10,6 @@ Papéis não especificados em ``providers.yaml`` caem em ``mock`` (dry-run, cust
 """
 from __future__ import annotations
 
-import os
 from typing import Any, Callable
 
 from orchestrator.adapters.anthropic_llm import (
@@ -31,10 +30,10 @@ ROLES = ("llm", "creator", "video", "qc", "assembly", "distribution")
 
 
 def _build_replicate(pipeline: dict[str, Any]) -> ReplicateVideoAdapter:
-    """Fábrica do ReplicateVideoAdapter — lê token de REPLICATE_API_TOKEN."""
+    """Fábrica do ReplicateVideoAdapter — SDK lê REPLICATE_API_TOKEN do ambiente."""
     return ReplicateVideoAdapter(
         tiers=pipeline["tiers"],
-        token=os.environ.get("REPLICATE_API_TOKEN", ""),
+        clip=pipeline.get("clip", {}),
     )
 
 

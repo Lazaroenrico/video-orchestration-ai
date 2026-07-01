@@ -3,7 +3,7 @@ import asyncio
 
 import pytest
 
-from orchestrator.graph.builder import build_graph, build_item_graph
+from orchestrator.graph.builder import build_graph, build_item_graph, make_fan_out_node
 from orchestrator.graph.state import Item
 
 
@@ -30,6 +30,27 @@ def test_top_graph_routes_concepts_via_conditional_send(pipeline_cfg):
     ]
     assert len(matching) == 1
     assert matching[0].conditional is True
+
+
+async def test_fan_out_attaches_creator_image_uri_from_roster():
+    fan_out = make_fan_out_node()
+    sends = await fan_out(
+        {
+            "concepts": [{"id": "concept-1", "hook": "h"}],
+            "roster": [
+                {
+                    "id": "creator-0",
+                    "upscaled_base": "/media/run/creator-0/image.png",
+                    "image_source_uri": "data:image/png;base64,abc",
+                }
+            ],
+        }
+    )
+
+    assert len(sends) == 1
+    item_payload = sends[0].arg
+    assert item_payload["creator_ref"] == "creator-0"
+    assert item_payload["creator_image_uri"] == "data:image/png;base64,abc"
 
 
 async def test_item_subgraph_runs_one_item_to_distribution(adapter, pipeline_cfg):

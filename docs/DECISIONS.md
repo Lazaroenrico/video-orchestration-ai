@@ -250,3 +250,21 @@ Datas absolutas. Apendar novas decisões ao final.
   ver o rosto enviado, identificar a voz ou ouvir preview quando existir, ler o script,
   inspecionar clips e QC, e aprovar creators antes do fan-out. Gates adicionais para
   script/mídia/final ficam como evolução futura, sem alterar esta decisão.
+
+### D23 — Vídeo Replicate LTX 2.3 Fast sem áudio
+- **Contexto:** o `ReplicateVideoAdapter` antigo usava um contrato HTTP fictício
+  (`/predictions`, `model`, `output`) enquanto os adapters reais de upscale/voz já usam
+  o SDK oficial `replicate.async_run`. O objetivo desta fatia é gerar vídeo real sem
+  áudio; voiceover e concatenação entram depois.
+- **Decisão:** `ReplicateVideoAdapter` passa a usar `replicate.async_run(ref, input=...)`
+  com runner injetável e `with_transport_retry`. O tier `ltx` aponta para
+  `lightricks/ltx-2.3-fast`, recebe `prompt`, `duration`, `image` opcional do creator,
+  `resolution`, `aspect_ratio`, `fps`, `camera_motion` e força `generate_audio: false`.
+  O fan-out carrega `creator_image_uri` a partir de `image_source_uri`/`upscaled_base`,
+  e os nodes de vídeo compõem um prompt com script + conceito + `video_prompt`.
+- **Fallback:** `kling` e `seedance` ainda não têm refs reais confirmadas no Replicate;
+  quando o QC escala para esses tiers, o adapter delega ao `MockAdapter` e marca
+  `fallback_reason: replicate_model_not_configured`.
+- **Consequência:** `config/providers.yaml` ativa `video: replicate` e o grafo não muda.
+  A suíte segue offline por runner injetável/mock fallback; áudio do script permanece
+  fora do escopo desta decisão.
