@@ -9,7 +9,8 @@ qc:
   fail_rate: 0.34           # fração determinística reprovada no mock (exercita o loop)
 
 # Roteamento + custo por tier (Step 4 / "The Cost at Scale" do Context.md).
-# Tentativas escalam o tier: 1ª LTX, 2ª Kling, 3ª Seedance (cheap -> premium).
+# No fluxo atual, tentativas de QC permanecem em LTX; tiers premium ficam listados
+# para configuração futura, mas não são escolhidos automaticamente pelo roteador.
 tiers:
   - name: ltx
     model: lightricks/ltx-2.3-fast

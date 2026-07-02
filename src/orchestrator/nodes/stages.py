@@ -32,7 +32,7 @@ async def _build_voice_preview(
 ) -> str | None:
     """Resolve um ``voice_preview_uri`` audível para o creator, quando possível.
 
-    - Voz já baixada como áudio (Replicate bark, ``voice_source_uri`` setado por
+    - Voz já baixada como áudio (ElevenLabs via Replicate, ``voice_source_uri`` setado por
       ``persist_creator_media``) -> o próprio caminho local já servível é o preview.
     - Voz opaca (ElevenLabs ``voice_id``) -> sintetiza uma amostra curta via
       ``adapter.voice.synthesize_preview`` (quando o sub-adapter existe) e persiste.
@@ -401,6 +401,15 @@ def make_gen_node(tier: str):
             ),
             reference_image_uri=item.creator_image_uri,
         )
+        # Surfaça se o clip veio do provider real (replicate) ou de fallback mock,
+        # + o modelo e a URI de saída — responde "está gerando o vídeo mesmo?".
+        add_trace_metadata(
+            step=4, stage="talking_head_done", item_id=item.id,
+            video_provider=clip.meta.get("provider"),
+            video_model=clip.meta.get("model"),
+            video_uri=clip.uri,
+            fallback_reason=clip.meta.get("fallback_reason"),
+        )
         cost_usd = round(item.cost_usd + clip.meta["cost_usd"], 4)
         run_id = config["configurable"].get("thread_id", "run")
         media_root = default_media_path()
@@ -431,6 +440,13 @@ async def node_product_demo(state: Any, config: RunnableConfig) -> dict[str, Any
         item_id=f"{item.id}:demo", tier="ltx", seconds=seconds, attempt=item.attempts,
         system_prompt=_video_prompt(item, run_cfg.get("video_prompt"), stage="product-demo"),
         reference_image_uri=item.creator_image_uri,
+    )
+    add_trace_metadata(
+        step=5, stage="product_demo_done", item_id=item.id,
+        video_provider=demo.meta.get("provider"),
+        video_model=demo.meta.get("model"),
+        video_uri=demo.uri,
+        fallback_reason=demo.meta.get("fallback_reason"),
     )
     cost_usd = round(item.cost_usd + demo.meta["cost_usd"], 4)
     run_id = config["configurable"].get("thread_id", "run")

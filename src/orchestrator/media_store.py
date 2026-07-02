@@ -1,6 +1,6 @@
 """Download e persistência local dos bytes de mídia do creator.
 
-Por que existe: imagem upscalada (Replicate/Topaz) e áudio (Replicate bark) vêm como
+Por que existe: imagem upscalada (Replicate/Topaz) e áudio remoto vêm como
 URLs voláteis — ``replicate.delivery`` expira em ~1h. Para não perder os artefatos,
 baixamos os bytes para ``ORCH_MEDIA`` (default ``.orchestrator/media``) e reescrevemos
 as URIs do creator para um caminho web servível (``/media/{run_id}/{creator_id}/...``),
@@ -214,7 +214,7 @@ async def persist_creator_media(
 
     - ``upscaled_base`` http(s)/data: -> baixado; URI vira caminho local e
       ``image_source_uri`` guarda a origem.
-    - ``voice_id`` http(s) (ex.: Replicate bark) -> baixado como áudio;
+    - ``voice_id`` http(s) (ex.: ElevenLabs via Replicate) -> baixado como áudio;
       ``voice_source_uri`` guarda a origem. Um ``voice_id`` que é só id (ElevenLabs)
       não é baixável -> permanece referência intacta.
     - Mock (``mock://``, ``voice-0``): no-op total, dict devolvido inalterado.

@@ -12,12 +12,17 @@ import pytest
 
 from orchestrator import media_store
 from orchestrator.adapters.base import VoiceProfile
-from orchestrator.adapters.creator_real import RealCreatorAdapter, build_real_creator_adapter
+from orchestrator.adapters.creator_real import (
+    RealCreatorAdapter,
+    build_real_creator_adapter,
+    build_real_creator_replicate_adapter,
+)
 from orchestrator.adapters.elevenlabs_voice import ElevenLabsVoiceAdapter
 from orchestrator.adapters.openai_image import (
     OpenAIImageAdapter,
     build_openai_image_vercel_adapter,
 )
+from orchestrator.adapters.replicate_voice import ReplicateVoiceAdapter
 from orchestrator.adapters.topaz_upscale import TopazUpscaleAdapter
 from orchestrator.graph.state import Artifact, Item
 
@@ -519,6 +524,21 @@ async def test_build_real_creator_adapter_factory() -> None:
     assert isinstance(adapter.image, OpenAIImageAdapter)
     assert isinstance(adapter.topaz, TopazUpscaleAdapter)
     assert isinstance(adapter.voice, ElevenLabsVoiceAdapter)
+
+
+def test_build_real_creator_replicate_adapter_uses_replicate_elevenlabs_voice(
+    monkeypatch,
+) -> None:
+    """Perfil live via Replicate deve usar modelo ElevenLabs configurado, não Bark/Suno."""
+    model = "acme/elevenlabs-tts:abc123"
+    monkeypatch.setenv("AI_GATEWAY_API_KEY", "vck_test")
+    monkeypatch.setenv("REPLICATE_API_TOKEN", "r8_test")
+    monkeypatch.setenv("REPLICATE_ELEVENLABS_MODEL", model)
+
+    adapter = build_real_creator_replicate_adapter({})
+
+    assert isinstance(adapter.voice, ReplicateVoiceAdapter)
+    assert adapter.voice.model == model
 
 
 # ---------------------------------------------------------------------------

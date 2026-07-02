@@ -3,7 +3,7 @@
 # Papéis ausentes ainda caem em "mock" no registry, sem mudar o grafo.
 adapters:
   llm: vercel_gateway_llm  # ✅ Claude via Vercel Gateway (AI_GATEWAY_API_KEY configurada)
-  creator: creator_real_replicate  # GPT Image 2 via Vercel Gateway + Replicate (upscale + voice)
+  creator: creator_real_replicate  # GPT Image 2 via Vercel Gateway + Replicate (upscale + ElevenLabs TTS)
   video: replicate              # LTX 2.3 Fast via Replicate; áudio fica para etapa posterior
   qc: mock
   assembly: mock

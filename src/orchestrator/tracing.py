@@ -3,8 +3,13 @@
 Import-safe: no-op completo se ``langsmith`` estiver ausente ou
 ``LANGSMITH_TRACING`` estiver off. Zero mudança de comportamento offline.
 
-Segurança: ``process_inputs=_drop_sensitive_inputs`` remove ``self``, ``config``,
-clients httpx e TOKENS/Authorization dos spans.
+Segurança em camadas:
+- ``_DROP_KEYS`` (segredos: ``self``, ``config``, clients httpx, ``token``,
+  ``authorization``, ``api_key``, ...) são **sempre** removidos dos spans.
+- Strings ``data:``/base64 são **sempre** elididas (não poluem o trace).
+- ``_REDACT_KEYS`` (prompts, scripts, URLs de conteúdo) são visíveis por
+  padrão — para debugar *qual* prompt gerou uma imagem/vídeo. Ative
+  ``LANGSMITH_REDACT_PROMPTS=1`` para redigi-los (perfil sensível/produção).
 """
 from __future__ import annotations
 
@@ -42,6 +47,9 @@ _DROP_KEYS = {
     "password",
     "secret",
 }
+# Conteúdo (prompts/scripts/URLs) — visível por padrão para debug; redigido só se
+# LANGSMITH_REDACT_PROMPTS estiver ligado. NÃO inclui segredos (esses estão em
+# _DROP_KEYS e são sempre removidos).
 _REDACT_KEYS = {
     "offer",
     "concept",
@@ -52,6 +60,7 @@ _REDACT_KEYS = {
     "system_prompt",
     "video_prompt",
     "creator_prompt",
+    "image_prompt",
     "messages",
     "image_url",
     "primary",
@@ -59,9 +68,13 @@ _REDACT_KEYS = {
     "url",
     "uri",
     "output_url",
+    "video_uri",
     "voice_id",
 }
-_MAX_TRACE_STRING = 256
+_BASE64_MARKER = "<base64 elided>"
+# Cap generoso: prompts reais (500-2000 chars) aparecem inteiros; só blobs enormes
+# são truncados (e base64/data-URI são sempre elididos, independente do tamanho).
+_MAX_TRACE_STRING = 2000
 
 
 def is_tracing_enabled() -> bool:
@@ -73,19 +86,33 @@ def is_tracing_enabled() -> bool:
     return os.environ.get("LANGSMITH_TRACING", "").strip().lower() in _TRUTHY
 
 
-def _is_sensitive_string(value: str) -> bool:
+def redact_prompts_enabled() -> bool:
+    """Se ``True``, prompts/scripts/URLs de conteúdo viram ``<redacted>`` no trace.
+
+    Default ``False`` (visível): o objetivo primário do trace aqui é debugar qual
+    prompt gerou cada imagem/vídeo. Segredos e base64 seguem sempre protegidos.
+    """
+    return os.environ.get("LANGSMITH_REDACT_PROMPTS", "").strip().lower() in _TRUTHY
+
+
+def _sanitize_string(value: str) -> str:
+    """Elide base64/data-URI sempre; trunca (sem descartar) strings gigantes."""
     lower = value.lower()
-    return (
-        lower.startswith("data:")
-        or "base64," in lower
-        or len(value) > _MAX_TRACE_STRING
-    )
+    if lower.startswith("data:") or "base64," in lower:
+        return _BASE64_MARKER
+    if len(value) > _MAX_TRACE_STRING:
+        return value[:_MAX_TRACE_STRING] + "…[truncated]"
+    return value
 
 
 def _sanitize_trace_payload(payload: Any, *, key: str = "") -> Any:
-    """Reduz payloads de trace para metadata segura e pequena."""
+    """Reduz payloads de trace para metadata segura.
+
+    Segredos (``_DROP_KEYS``) sempre removidos; base64/data-URI sempre elididos.
+    Conteúdo (``_REDACT_KEYS``) só é redigido com ``LANGSMITH_REDACT_PROMPTS`` on.
+    """
     key_l = key.lower()
-    if key_l in _REDACT_KEYS:
+    if key_l in _REDACT_KEYS and redact_prompts_enabled():
         return "<redacted>"
     if isinstance(payload, dict):
         return {
@@ -96,7 +123,7 @@ def _sanitize_trace_payload(payload: Any, *, key: str = "") -> Any:
     if isinstance(payload, (list, tuple)):
         return [_sanitize_trace_payload(v) for v in payload[:20]]
     if isinstance(payload, str):
-        return "<redacted>" if _is_sensitive_string(payload) else payload
+        return _sanitize_string(payload)
     return payload
 
 

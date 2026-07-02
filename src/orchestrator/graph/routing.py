@@ -1,10 +1,9 @@
 """Funções de roteamento usadas como conditional edges no subgrafo per-item.
 
 - ``select_tier`` / ``route_after_script``: roteamento de tier (Step 4). Tentativas
-  escalam o tier (LTX -> Kling -> Seedance), espelhando o Context.md (bulk barato,
-  vencedores no premium).
+  permanecem em LTX; ``attempts`` controla apenas o orçamento do loop de QC.
 - ``route_after_qc``: o QC gate (Step 7). Aprovado -> montagem; reprovado dentro do
-  orçamento -> regenera no tier escalado; esgotado -> descarta.
+  orçamento -> regenera em LTX; esgotado -> descarta.
 """
 from __future__ import annotations
 
@@ -12,9 +11,10 @@ from orchestrator.graph.state import Item
 
 
 def select_tier(attempts: int, tier_names: list[str]) -> str:
-    """Tier para a tentativa atual; escala com ``attempts`` e satura no último."""
-    idx = min(max(attempts, 0), len(tier_names) - 1)
-    return tier_names[idx]
+    """Tier para a tentativa atual; retries continuam no primeiro tier (LTX)."""
+    if not tier_names:
+        raise ValueError("select_tier chamado sem tiers configurados")
+    return tier_names[0]
 
 
 def route_after_script(item: Item, tier_names: list[str]) -> str:

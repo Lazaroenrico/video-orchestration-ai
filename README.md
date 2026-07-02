@@ -39,13 +39,14 @@ orchestrator loop --cycles 3 --feedback-store fb.json --config-dir config-mock  
 ```bash
 cp .env.example .env
 # preencha as chaves reais no .env:
-# AI_GATEWAY_API_KEY, REPLICATE_API_TOKEN
-# e as chaves usadas pelo creator configurado
+# AI_GATEWAY_API_KEY, REPLICATE_API_TOKEN, REPLICATE_ELEVENLABS_MODEL
+# e os campos/voice ids do modelo ElevenLabs hospedado no Replicate
 ```
 
 O perfil `config/` já ativa `llm: vercel_gateway_llm`, `creator:
 creator_real_replicate` e `video: replicate`. O vídeo usa LTX 2.3 Fast sem áudio
-(`generate_audio: false`); o áudio/voiceover entra em etapa posterior.
+(`generate_audio: false`); a voz do creator vem de ElevenLabs via Replicate, e o
+voiceover final entra em etapa posterior de montagem.
 
 ```bash
 orchestrator run --batch 3 --offer "serum X" --config-dir config

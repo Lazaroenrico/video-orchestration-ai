@@ -107,32 +107,63 @@ def test_drop_self_removes_config_and_headers_like_values():
     assert result == {"item_id": "abc"}
 
 
-def test_sanitizer_redacts_prompts_urls_and_large_blobs():
-    """Payloads de trace não devem carregar prompts, URLs assinadas ou base64."""
+def test_sanitizer_keeps_prompts_visible_by_default(monkeypatch):
+    """Por padrão, prompts/scripts aparecem no trace (debug); só base64 é elidido."""
+    monkeypatch.delenv("LANGSMITH_REDACT_PROMPTS", raising=False)
     from orchestrator.tracing import _sanitize_trace_payload
 
     payload = {
         "offer": "secret product",
         "system_prompt": "make a face",
-        "image_url": "data:image/png;base64," + ("a" * 300),
+        "image_url": "data:image/png;base64," + ("a" * 300),  # base64 sempre elidido
         "output": {"script": "HOOK: private script", "item_id": "item-1"},
         "tier": "ltx",
         "attempt": 1,
     }
 
     assert _sanitize_trace_payload(payload) == {
-        "offer": "<redacted>",
-        "system_prompt": "<redacted>",
-        "image_url": "<redacted>",
-        "output": {"script": "<redacted>", "item_id": "item-1"},
+        "offer": "secret product",
+        "system_prompt": "make a face",
+        "image_url": "<base64 elided>",
+        "output": {"script": "HOOK: private script", "item_id": "item-1"},
         "tier": "ltx",
         "attempt": 1,
     }
 
 
+def test_sanitizer_redacts_prompts_when_flag_enabled(monkeypatch):
+    """Com LANGSMITH_REDACT_PROMPTS on, conteúdo é redigido mas ids/tier permanecem."""
+    monkeypatch.setenv("LANGSMITH_REDACT_PROMPTS", "1")
+    from orchestrator.tracing import _sanitize_trace_payload
+
+    payload = {
+        "offer": "secret product",
+        "system_prompt": "make a face",
+        "output": {"script": "HOOK: private script", "item_id": "item-1"},
+        "tier": "ltx",
+    }
+
+    assert _sanitize_trace_payload(payload) == {
+        "offer": "<redacted>",
+        "system_prompt": "<redacted>",
+        "output": {"script": "<redacted>", "item_id": "item-1"},
+        "tier": "ltx",
+    }
+
+
+def test_sanitizer_always_drops_secrets_regardless_of_flag(monkeypatch):
+    """Segredos são removidos com ou sem a flag de redação de prompt."""
+    from orchestrator.tracing import _sanitize_trace_payload
+
+    payload = {"api_key": "sk-secret", "token": "abc", "item_id": "item-1"}
+    for flag in ("", "1"):
+        monkeypatch.setenv("LANGSMITH_REDACT_PROMPTS", flag)
+        assert _sanitize_trace_payload(payload) == {"item_id": "item-1"}
+
+
 @pytest.mark.asyncio
 async def test_traced_processes_inputs_and_outputs(monkeypatch):
-    """Quando tracing está on, inputs e outputs enviados ao LangSmith são saneados."""
+    """Com tracing on e redação off (default), prompts são visíveis mas segredos caem."""
     import orchestrator.tracing as tracing_mod
 
     captured = {}
@@ -153,18 +184,21 @@ async def test_traced_processes_inputs_and_outputs(monkeypatch):
         return deco
 
     monkeypatch.setenv("LANGSMITH_TRACING", "true")
+    monkeypatch.delenv("LANGSMITH_REDACT_PROMPTS", raising=False)
     monkeypatch.setattr(tracing_mod, "_HAS_LS", True)
     monkeypatch.setattr(tracing_mod, "_ls_traceable", fake_traceable)
 
     @tracing_mod.traced("secure.span")
-    async def sample(system_prompt: str) -> dict:
+    async def sample(system_prompt: str, token: str) -> dict:
         return {"script": "private script", "item_id": "item-1"}
 
-    result = await sample(system_prompt="private prompt")
+    result = await sample(system_prompt="private prompt", token="sk-secret")
 
     assert result["script"] == "private script"
-    assert captured["inputs"]["system_prompt"] == "<redacted>"
-    assert captured["outputs"] == {"script": "<redacted>", "item_id": "item-1"}
+    # prompt visível para debug; segredo (token) sempre removido do span
+    assert captured["inputs"]["system_prompt"] == "private prompt"
+    assert "token" not in captured["inputs"]
+    assert captured["outputs"] == {"script": "private script", "item_id": "item-1"}
     assert captured["kwargs"]["process_outputs"] is not None
 
 

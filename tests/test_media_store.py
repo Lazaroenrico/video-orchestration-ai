@@ -171,7 +171,7 @@ async def test_persist_creator_media_downloads_image_keeps_voice_id(tmp_path):
 
 @pytest.mark.asyncio
 async def test_persist_creator_media_downloads_voice_url(tmp_path):
-    """Voice como URL (ex.: Replicate bark) -> baixada como áudio."""
+    """Voice como URL (ex.: ElevenLabs via Replicate) -> baixada como áudio."""
     creator = {
         "id": "creator-2",
         "angles": ["front"],

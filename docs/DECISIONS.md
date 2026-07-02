@@ -66,11 +66,13 @@ Datas absolutas. Apendar novas decisões ao final.
   `nodes/stages.py` (um módulo) em vez de 10 arquivos `n01..n10`.
 - **Consequência:** menos boilerplate; tornar a topologia data-driven é evolução futura.
 
-### D11 — Tier routing escalonado e custo acumulado
-- **Decisão:** tentativas de QC escalam o tier (LTX→Kling→Seedance), espelhando o
-  Context (bulk barato, vencedores no premium); cada geração acumula custo.
-- **Consequência:** o loop de regeneração termina (qualidade sobe com o tier) e o
-  relatório mostra custo por tier — fiel ao "The Cost at Scale".
+### D11 — Tier routing LTX-only e custo acumulado
+- **Decisão:** tentativas de QC permanecem no primeiro tier configurado (`ltx` no
+  `pipeline.yaml` atual). `attempts` controla apenas o orçamento do loop de QC; cada
+  geração acumula custo.
+- **Consequência:** o loop de regeneração termina pelo teto de tentativas sem disparar
+  `kling`/`seedance` automaticamente. Tiers premium continuam no config para uso futuro
+  ou chamada explícita, mas não participam do roteamento automático.
 
 ### D12 — Orquestração da construção com subagentes (Opus coordena, Sonnet executa)
 - **Contexto:** pedido de usar "um orquestrador principal Opus + sub-agents Sonnet por
@@ -187,15 +189,17 @@ Datas absolutas. Apendar novas decisões ao final.
   5. `config/judge.yaml` — atualizar header Authorization para aceitar `AI_GATEWAY_API_KEY`.
      O judge ao vivo requer um proxy/Vercel Function intermediária (fora do escopo Python)
      que adapte a resposta Claude para `{"output": {"score": float, "verdict": str}}`.
-  6. `.env.example` — atualizar status de `TOPAZ_API_KEY` e `ELEVENLABS_API_KEY` para live.
-- **Env vars necessárias para MVP:**
+  6. `.env.example` — atualizar status de `TOPAZ_API_KEY` e `ELEVENLABS_API_KEY` para live
+     no caminho direto/legado `creator_real_vercel`.
+- **Env vars necessárias para este MVP original:**
 
   | Variável | Para quê | Obrigatória |
   |---|---|---|
   | `AI_GATEWAY_API_KEY` | Token único Vercel Gateway (LLM + imagem) | Sim |
   | `TOPAZ_API_KEY` | Upscale direto Topaz Labs | Sim |
-  | `ELEVENLABS_API_KEY` | Voz direto ElevenLabs | Sim |
+  | `ELEVENLABS_API_KEY` | Voz direto ElevenLabs (`creator_real_vercel`, legado) | Sim nesse caminho |
   | `REPLICATE_API_TOKEN` | Vídeo via Replicate | Sim |
+  | `REPLICATE_ELEVENLABS_MODEL` | Voz ElevenLabs hospedada no Replicate (`creator_real_replicate`, atual) | Sim no caminho atual |
   | `AI_GATEWAY_BASE_URL` | Override da URL base do gateway | Não (default: `https://ai-gateway.vercel.sh`) |
   | `AI_GATEWAY_LLM_MODEL` | Override do modelo Claude | Não (default: `anthropic/claude-opus-4.8`) |
   | `JUDGE_GATEWAY_URL` | URL do proxy wrapper do judge | Só para judge ao vivo |
@@ -263,8 +267,23 @@ Datas absolutas. Apendar novas decisões ao final.
   O fan-out carrega `creator_image_uri` a partir de `image_source_uri`/`upscaled_base`,
   e os nodes de vídeo compõem um prompt com script + conceito + `video_prompt`.
 - **Fallback:** `kling` e `seedance` ainda não têm refs reais confirmadas no Replicate;
-  quando o QC escala para esses tiers, o adapter delega ao `MockAdapter` e marca
-  `fallback_reason: replicate_model_not_configured`.
+  se forem chamados explicitamente, o adapter delega ao `MockAdapter` e marca
+  `fallback_reason: replicate_model_not_configured`. O QC automático permanece em LTX.
 - **Consequência:** `config/providers.yaml` ativa `video: replicate` e o grafo não muda.
   A suíte segue offline por runner injetável/mock fallback; áudio do script permanece
   fora do escopo desta decisão.
+
+### D24 — TTS live somente ElevenLabs hospedado no Replicate
+- **Contexto:** o perfil live `creator_real_replicate` usava Replicate para upscale e
+  voz, mas o sub-adapter de voz ainda apontava para `suno-ai/bark`. A regra de produto é
+  não usar outro TTS: somente ElevenLabs, com o modelo hospedado no Replicate.
+- **Decisão:** `ReplicateVoiceAdapter` passa a ser um wrapper de ElevenLabs via
+  Replicate. O ref do modelo é obrigatório por `REPLICATE_ELEVENLABS_MODEL` (ou
+  `model=` em teste), e o schema de input é configurável por envs (`*_TEXT_FIELD`,
+  `*_VOICE_FIELD`, `*_MODEL_ID_FIELD`, `*_INPUT_JSON`, voice ids por preset).
+  `creator_real_replicate` mantém GPT Image 2 via Vercel Gateway e Replicate para
+  upscale, mas a voz live deixa de usar Bark/Suno.
+- **Consequência:** falta configurar o ref real `owner/model:version` do modelo
+  ElevenLabs no `.env`. Sem ele, o perfil live falha cedo em vez de cair silenciosamente
+  para outro TTS. O caminho `ElevenLabsVoiceAdapter` direto permanece só para adapters
+  legados como `creator_real_vercel`.

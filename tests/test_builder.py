@@ -3,8 +3,48 @@ import asyncio
 
 import pytest
 
-from orchestrator.graph.builder import build_graph, build_item_graph, make_fan_out_node
+from orchestrator.graph.builder import (
+    _sub_config,
+    build_graph,
+    build_item_graph,
+    make_fan_out_node,
+)
 from orchestrator.graph.state import Item
+
+
+def test_sub_config_propagates_trace_lineage_and_drops_checkpoint_keys():
+    """O subgrafo per-item precisa herdar os callbacks do run pai para aninhar no
+    LangSmith; só as chaves de checkpoint do LangGraph devem ser removidas."""
+    sentinel_callbacks = object()
+    parent = {
+        "configurable": {
+            "adapter": "A",
+            "pipeline": {"x": 1},
+            "run": {"platform": "tiktok"},
+            "feedback_store": "fb.json",
+            "thread_id": "run-123",
+            "checkpoint_ns": "ns",
+            "checkpoint_id": "cid",
+        },
+        "callbacks": sentinel_callbacks,
+        "tags": ["ugc"],
+        "metadata": {"run_id": "run-123"},
+        "recursion_limit": 100,
+    }
+
+    sub = _sub_config(parent)
+
+    # linhagem de trace preservada → o item aninha sob o run do batch no LangSmith
+    assert sub["callbacks"] is sentinel_callbacks
+    assert sub["tags"] == ["ugc"]
+    assert sub["metadata"] == {"run_id": "run-123"}
+    # configurable essencial mantido
+    assert sub["configurable"]["adapter"] == "A"
+    assert sub["configurable"]["pipeline"] == {"x": 1}
+    assert sub["configurable"]["run"] == {"platform": "tiktok"}
+    # chaves de checkpoint NÃO vazam para o subgrafo (roda sem checkpointer próprio)
+    for k in ("thread_id", "checkpoint_ns", "checkpoint_id"):
+        assert k not in sub["configurable"]
 
 
 def test_item_graph_has_expected_nodes(pipeline_cfg):
@@ -88,6 +128,20 @@ async def test_qc_loop_is_exercised(run_config):
     init = {"run_id": "t-loop", "config": {"offer": "serum", "batch_size": 12}}
     out = await asyncio.wait_for(app.ainvoke(init, run_config), timeout=5)
     assert any(r.attempts >= 1 for r in out["results"])
-    # itens regenerados acumulam custo de mais de um tier (escalonamento)
+    # itens regenerados acumulam mais clips, mas continuam no tier LTX
     regen = [r for r in out["results"] if r.attempts >= 1]
     assert all(len(r.clips) >= 2 for r in regen)
+
+
+async def test_qc_loop_regenerates_only_on_ltx(run_config):
+    app = build_graph(run_config["configurable"]["pipeline"])
+    init = {"run_id": "t-loop-ltx-only", "config": {"offer": "serum", "batch_size": 12}}
+    out = await asyncio.wait_for(app.ainvoke(init, run_config), timeout=5)
+
+    regen = [r for r in out["results"] if r.attempts >= 1]
+    assert regen
+    assert all(
+        clip.meta.get("tier") == "ltx"
+        for item in regen
+        for clip in item.clips
+    )

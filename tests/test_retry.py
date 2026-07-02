@@ -68,3 +68,38 @@ async def test_transport_error_still_retried():
     result = await with_transport_retry(flaky, backoff_base=0)
     assert result == "ok"
     assert calls == 2
+
+
+def _http_status_error(status: int) -> httpx.HTTPStatusError:
+    request = httpx.Request("POST", "https://api.elevenlabs.io/v1/voices/add")
+    response = httpx.Response(status, request=request)
+    return httpx.HTTPStatusError("error", request=request, response=response)
+
+
+async def test_retries_on_http_429_then_succeeds():
+    """ElevenLabs (e outras APIs httpx puras) também throttlam com 429 via raise_for_status."""
+    calls = 0
+
+    async def flaky():
+        nonlocal calls
+        calls += 1
+        if calls < 3:
+            raise _http_status_error(429)
+        return "ok"
+
+    result = await with_transport_retry(flaky, backoff_base=0)
+    assert result == "ok"
+    assert calls == 3
+
+
+async def test_http_non_429_status_error_propagates_immediately():
+    calls = 0
+
+    async def unauthorized():
+        nonlocal calls
+        calls += 1
+        raise _http_status_error(401)
+
+    with pytest.raises(httpx.HTTPStatusError):
+        await with_transport_retry(unauthorized, backoff_base=0)
+    assert calls == 1

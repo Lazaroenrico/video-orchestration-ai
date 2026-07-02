@@ -1,11 +1,42 @@
 # PROGRESS — handoff
 
-Estado em **2026-07-02**. Suíte: **316 passando, 2 skips** (testes `--live` opt-in,
+Estado em **2026-07-02**. Suíte: **330 passando, 2 skips** (testes `--live` opt-in,
 pulados sem `JUDGE_GATEWAY_URL`) + 2 warnings conhecidos/benignos (LangSmith
 deprecation em import; LangGraph resume parcial — ver falha #5).
 Rodar: `rtk proxy python -m pytest`.
 
 > Nota: a falha que estava em aberto em `_SAFE_CREATOR_PROMPT` foi corrigida — ver falha #10.
+
+## ElevenLabs via Replicate no creator live (2026-07-02)
+
+Objetivo: garantir que o perfil live use **somente ElevenLabs** para TTS, mantendo o
+hosting/execução pelo Replicate. Antes, `creator_real_replicate` usava
+`ReplicateVoiceAdapter`, mas o modelo default era `suno-ai/bark`, contrariando a regra de
+produto.
+
+### Red → Green (TDD)
+- RED: `tests/test_replicate_voice.py` passou a exigir `REPLICATE_ELEVENLABS_MODEL`,
+  input `text` por padrão e campos configuráveis para schema/voice/model do ElevenLabs
+  no Replicate. `tests/test_creator_real.py` prova que `creator_real_replicate` injeta
+  esse adapter configurado. `tests/test_retry.py` já expunha retry faltante para
+  `httpx.HTTPStatusError` 429.
+- GREEN:
+  - `adapters/replicate_voice.py`: removido default Bark/Suno; modelo ElevenLabs via
+    Replicate agora é obrigatório por env ou `model=`, com input configurável por env.
+  - `adapters/creator_real.py`: factory `creator_real_replicate` mantém Replicate para
+    upscale e usa `ReplicateVoiceAdapter` configurado para ElevenLabs.
+  - `adapters/_retry.py`: 429 de `HTTPStatusError` agora é retentável como throttle
+    transitório; 401/422/etc. continuam propagando na primeira tentativa.
+  - `.env.example`, README, decisões e mindmap atualizados para documentar
+    `REPLICATE_ELEVENLABS_MODEL` e remover Bark/Suno do caminho live.
+
+### Falha investigada nesta fase
+- Sintoma: `rtk proxy python -m pytest` falhava em
+  `tests/test_retry.py::test_retries_on_http_429_then_succeeds`.
+  - Causa: `_retry.py` documentava retry para `httpx.HTTPStatusError` 429, mas
+    `_is_retryable` só tratava `httpx.TransportError` e `ReplicateError(status=429)`.
+  - Correção: incluir `HTTPStatusError` com `response.status_code == 429` como
+    retentável, preservando propagação imediata para status não-429.
 
 ## Paridade áudio↔imagem do creator + reroll com gênero travado (2026-07-02)
 
@@ -432,17 +463,19 @@ Suíte: **132 passed, 1 skipped**. Nenhum teste mudou nestas tasks.
       `video: replicate`
 - [x] **Task 5** `config/judge.yaml` — header Authorization aceita `AI_GATEWAY_API_KEY`
 - [x] **Task 6** `.env.example` — `TOPAZ_API_KEY` e `ELEVENLABS_API_KEY` marcados `[LIVE]`
+      no caminho direto/legado `creator_real_vercel`.
 
-**Env vars para MVP:** `AI_GATEWAY_API_KEY`, `TOPAZ_API_KEY`, `ELEVENLABS_API_KEY`,
-`REPLICATE_API_TOKEN`. Tabela completa em **D20**.
+**Env vars para o perfil live atual (`creator_real_replicate`):** `AI_GATEWAY_API_KEY`,
+`REPLICATE_API_TOKEN`, `REPLICATE_ELEVENLABS_MODEL` e, conforme o modelo hospedado,
+os campos `REPLICATE_ELEVENLABS_*`. Tabelas em **D20/D24**.
 
 **Smoke test pós-implementação:**
 ```bash
 # CI (sem chaves — deve passar 100%)
 rtk proxy python -m pytest
 
-# Instancia os adapters reais
-AI_GATEWAY_API_KEY=<chave> TOPAZ_API_KEY=<chave> ELEVENLABS_API_KEY=<chave> REPLICATE_API_TOKEN=<chave> \
+# Instancia os adapters reais do config/ atual
+AI_GATEWAY_API_KEY=<chave> REPLICATE_API_TOKEN=<chave> REPLICATE_ELEVENLABS_MODEL=<owner/model:version> \
 python -c "
 from orchestrator.config import load_pipeline, load_providers
 from orchestrator.registry import build_adapter_from_providers
@@ -464,12 +497,15 @@ orchestrator run --batch 2 --offer "test product" --platform tiktok
          + `AI_GATEWAY_API_KEY` ou `VERCEL_OIDC_TOKEN`.
    - [x] LLM direto Anthropic (`adapters/anthropic_llm.py`) — backward-compatible/legado;
          não é o caminho live recomendado do projeto.
-   - [x] Creator: GPT Image 2 + Topaz + ElevenLabs (`adapters/creator_real.py`) — `creator: creator_real`
-         + `OPENAI_API_KEY`/`TOPAZ_API_KEY`/`ELEVENLABS_API_KEY`.
+   - [x] Creator live atual: GPT Image 2 + Replicate upscale + ElevenLabs via Replicate
+         (`creator: creator_real_replicate`) + `AI_GATEWAY_API_KEY`/
+         `REPLICATE_API_TOKEN`/`REPLICATE_ELEVENLABS_MODEL`.
+   - [x] Creator direto/legado: GPT Image 2 + Topaz + ElevenLabs direto
+         (`creator: creator_real` ou `creator_real_vercel`) + respectivas chaves diretas.
    - [x] Vídeo Replicate (`adapters/replicate_video.py`, D14) — `video: replicate` + `REPLICATE_API_TOKEN`.
-   - **Pendente p/ rodar real:** (a) expor as chaves no ambiente; (b) contratos HTTP de
-     Topaz/ElevenLabs são assumidos (docstrings) — validar contra APIs reais com as chaves;
-     (c) Steps 8/9 seguem mock (sem API única). Ver MVP acima (D20).
+   - **Pendente p/ rodar real:** (a) expor as chaves/envs no ambiente; (b) configurar o
+     ref real `REPLICATE_ELEVENLABS_MODEL` e o schema `REPLICATE_ELEVENLABS_*` do modelo;
+     (c) Steps 8/9 seguem mock (sem API única). Ver D24.
 2. **Step 9 (distribuição) real** (cloud phones/proxies/scheduler) — hoje mock.
 3. **Topologia data-driven**: mover nodes/edges para o `pipeline.yaml` (hoje fixa no builder).
 4. **LangSmith**: setar `LANGSMITH_TRACING=true`/`LANGSMITH_API_KEY` p/ tracing; opcional
@@ -576,5 +612,16 @@ orchestrator run --batch 2 --offer "test product" --platform tiktok
       de segurança exigidas (todas como substrings contíguas e em minúsculas onde o teste
       espera) e corrigidos os espaços, **preservando** as adições de realismo do usuário
       (textura de pele/poros/imperfeições, "no over-styling", olhos engajados). A asserção
-      do teste NÃO foi afrouxada — os guardrails são o comportamento desejado.
+    do teste NÃO foi afrouxada — os guardrails são o comportamento desejado.
     - Suíte: **316 passando, 2 skips**.
+
+11. **Roteamento de retry ainda escalava talking-head para `kling`/`seedance`**
+    - Sintoma: após reprovação no QC, `select_tier(1, ["ltx", "kling", "seedance"])`
+      retornava `kling` e `route_after_qc` enviava a próxima geração para o tier premium.
+    - Causa raiz: a regra antiga usava `attempts` como índice do tier; o comportamento
+      desejado agora é manter todas as tentativas em LTX e usar `attempts` apenas como
+      orçamento do loop de QC.
+    - Correção: `select_tier` passou a retornar sempre o primeiro tier configurado
+      (`ltx` no config atual); testes de roteamento foram atualizados para a nova regra
+      e `tests/test_builder.py` ganhou cobertura garantindo que itens regenerados acumulam
+      somente clips `ltx`.

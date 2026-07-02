@@ -45,7 +45,7 @@ class RealCreatorAdapter:
     topaz:
         Instância de ``TopazUpscaleAdapter``. Se ``None``, instancia o real.
     voice:
-        Instância de ``ElevenLabsVoiceAdapter``. Se ``None``, instancia o real.
+        Instância de ``VoicePort`` compatível. Se ``None``, instancia ElevenLabs direto.
     """
 
     def __init__(
@@ -133,11 +133,11 @@ def build_real_creator_vercel_adapter(pipeline: dict[str, Any]) -> RealCreatorAd
 
 
 def build_real_creator_replicate_adapter(pipeline: dict[str, Any]) -> RealCreatorAdapter:
-    """Fábrica que monta RealCreatorAdapter usando Replicate para upscale e voz.
+    """Fábrica que monta RealCreatorAdapter usando Replicate para upscale e ElevenLabs.
 
     - OpenAI Image: roteado pelo Vercel Gateway (AI_GATEWAY_API_KEY).
     - Upscale: Replicate nightmareai/real-esrgan (REPLICATE_API_TOKEN).
-    - Voice: Replicate suno-ai/bark (REPLICATE_API_TOKEN).
+    - Voice: modelo ElevenLabs hospedado no Replicate (REPLICATE_ELEVENLABS_MODEL).
 
     Usa um ``replicate.Client`` com timeout generoso — o rosto do GPT Image 2 vem
     como data URI base64 (~2.7MB) e é enviado inline; com cold start do modelo, o

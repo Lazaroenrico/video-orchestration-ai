@@ -60,10 +60,9 @@ run demo-run
 | `custo mock`   | custo total + quebra por tier (`cost_by_tier`) — Step 4 / "The Cost at Scale" |
 | `hooks top`    | estilos de hook dos aprovados, ordenados por frequência — é isto que realimenta o Step 1 |
 
-O custo por tier reflete o **roteamento escalonado**: a 1ª tentativa roda no LTX barato
-($0.01/s), reprovas escalam para Kling ($0.10/s) e Seedance ($0.168/s). A maior parte do
-volume fica no tier barato; só o que precisa de retry sobe — exatamente o "blended rate"
-do `Context.md`.
+O custo por tier reflete o **roteamento LTX-only atual**: a 1ª tentativa e as reprovas
+de QC rodam no LTX barato ($0.01/s). Tiers premium seguem modelados no config para uso
+futuro/explicito, mas o loop automático não sobe para Kling ou Seedance.
 
 ### Mapa dos 10 passos → nodes
 

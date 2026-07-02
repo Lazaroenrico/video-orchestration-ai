@@ -146,6 +146,10 @@ class OpenAIImageAdapter:
         prompt = _build_creator_image_prompt(
             index, system_prompt=system_prompt, voice_profile=voice_profile
         )
+        # Registra o prompt EXATO enviado ao modelo no span (visível por padrão;
+        # redigido só com LANGSMITH_REDACT_PROMPTS). É o que responde "qual prompt
+        # gerou esta imagem" no LangSmith.
+        add_trace_metadata(image_prompt=prompt, image_model=self.model)
         body = {
             "model": self.model,
             "prompt": prompt,

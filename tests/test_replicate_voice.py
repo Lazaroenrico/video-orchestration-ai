@@ -9,6 +9,8 @@ import pytest
 from orchestrator.adapters.base import VoiceProfile
 from orchestrator.adapters.replicate_voice import ReplicateVoiceAdapter
 
+FAKE_ELEVENLABS_MODEL = "acme/elevenlabs-tts:abc123"
+
 
 def _make_adapter(output: Any = "https://cdn.replicate.com/voice.wav", **kwargs):
     captured: list[dict[str, Any]] = []
@@ -17,8 +19,24 @@ def _make_adapter(output: Any = "https://cdn.replicate.com/voice.wav", **kwargs)
         captured.append({"ref": ref, "input": input})
         return output
 
+    kwargs.setdefault("model", FAKE_ELEVENLABS_MODEL)
     adapter = ReplicateVoiceAdapter(runner=fake_runner, **kwargs)
     return adapter, captured
+
+
+def test_requires_replicate_elevenlabs_model_env(monkeypatch):
+    monkeypatch.delenv("REPLICATE_ELEVENLABS_MODEL", raising=False)
+
+    with pytest.raises(RuntimeError, match="REPLICATE_ELEVENLABS_MODEL"):
+        ReplicateVoiceAdapter()
+
+
+def test_uses_replicate_elevenlabs_model_from_env(monkeypatch):
+    monkeypatch.setenv("REPLICATE_ELEVENLABS_MODEL", FAKE_ELEVENLABS_MODEL)
+
+    adapter = ReplicateVoiceAdapter(runner=lambda *args, **kwargs: None)
+
+    assert adapter.model == FAKE_ELEVENLABS_MODEL
 
 
 async def test_create_voice_returns_string():
@@ -29,10 +47,10 @@ async def test_create_voice_returns_string():
 
 
 async def test_create_voice_parses_dict_audio_out():
-    """Bark devolve dict tipo {'audio_out': url}; o adapter deve extrair a URL."""
-    adapter, _ = _make_adapter(output={"audio_out": "https://cdn.replicate.com/bark.wav"})
+    """Modelos de áudio podem devolver {'audio_out': url}; o adapter extrai a URL."""
+    adapter, _ = _make_adapter(output={"audio_out": "https://cdn.replicate.com/voice.wav"})
     result = await adapter.create_voice(1)
-    assert result == "https://cdn.replicate.com/bark.wav"
+    assert result == "https://cdn.replicate.com/voice.wav"
 
 
 async def test_create_voice_parses_dict_first_value_fallback():
@@ -55,37 +73,60 @@ async def test_create_voice_coerces_file_output():
 async def test_create_voice_uses_correct_model_ref():
     adapter, captured = _make_adapter()
     await adapter.create_voice(0)
-    # Default ref pina o version hash (community model exige) → owner/name:version
-    assert captured[0]["ref"].startswith("suno-ai/bark:")
+    assert captured[0]["ref"] == FAKE_ELEVENLABS_MODEL
 
 
 async def test_create_voice_sends_prompt_with_index():
     adapter, captured = _make_adapter()
     await adapter.create_voice(3)
-    assert "3" in captured[0]["input"]["prompt"]
+    assert "3" in captured[0]["input"]["text"]
 
 
 async def test_create_voice_keeps_legacy_prompt_without_profile():
     adapter, captured = _make_adapter()
     await adapter.create_voice(4)
-    assert captured[0]["input"]["prompt"] == "creator voice 4"
+    assert captured[0]["input"]["text"] == "creator voice 4"
 
 
 async def test_create_voice_includes_profile_preset_and_prompt():
     adapter, captured = _make_adapter()
     profile = VoiceProfile(preset="female", prompt="Warm, friendly beauty creator voice.")
     await adapter.create_voice(4, voice_profile=profile)
-    prompt = captured[0]["input"]["prompt"]
-    assert "female" in prompt
-    assert "Warm, friendly beauty creator voice." in prompt
-    assert "creator voice 4" in prompt
+    text = captured[0]["input"]["text"]
+    assert "female" in text
+    assert "Warm, friendly beauty creator voice." in text
+    assert "creator voice 4" in text
+
+
+async def test_create_voice_uses_configurable_input_fields(monkeypatch):
+    monkeypatch.setenv("REPLICATE_ELEVENLABS_TEXT_FIELD", "script")
+    monkeypatch.setenv("REPLICATE_ELEVENLABS_VOICE_FIELD", "voice")
+    monkeypatch.setenv("REPLICATE_ELEVENLABS_MODEL_ID_FIELD", "model_id")
+    monkeypatch.setenv("REPLICATE_ELEVENLABS_VOICE_ID_FEMALE", "voice-female")
+    monkeypatch.setenv("REPLICATE_ELEVENLABS_MODEL_ID", "eleven_multilingual_v2")
+    monkeypatch.setenv(
+        "REPLICATE_ELEVENLABS_INPUT_JSON",
+        '{"output_format":"mp3_44100_128"}',
+    )
+    adapter, captured = _make_adapter()
+
+    await adapter.create_voice(
+        4,
+        voice_profile=VoiceProfile(preset="female", prompt="Warm UGC narration."),
+    )
+
+    body = captured[0]["input"]
+    assert body["script"].startswith("creator voice 4")
+    assert body["voice"] == "voice-female"
+    assert body["model_id"] == "eleven_multilingual_v2"
+    assert body["output_format"] == "mp3_44100_128"
 
 
 async def test_different_indices_produce_different_prompts():
     adapter, captured = _make_adapter()
     await adapter.create_voice(0)
     await adapter.create_voice(5)
-    assert captured[0]["input"]["prompt"] != captured[1]["input"]["prompt"]
+    assert captured[0]["input"]["text"] != captured[1]["input"]["text"]
 
 
 async def test_create_voice_propagates_runner_error():
@@ -96,7 +137,7 @@ async def test_create_voice_propagates_runner_error():
         calls += 1
         raise RuntimeError("voice boom")
 
-    adapter = ReplicateVoiceAdapter(runner=failing_runner)
+    adapter = ReplicateVoiceAdapter(model=FAKE_ELEVENLABS_MODEL, runner=failing_runner)
     with pytest.raises(RuntimeError, match="voice boom"):
         await adapter.create_voice(0)
     assert calls == 1  # RuntimeError não retenta
@@ -112,7 +153,9 @@ async def test_create_voice_retries_on_connect_timeout_then_succeeds():
             raise httpx.ConnectTimeout("connect failed")
         return "https://cdn.replicate.com/voice.wav"
 
-    adapter = ReplicateVoiceAdapter(runner=flaky_runner, backoff_base=0)
+    adapter = ReplicateVoiceAdapter(
+        model=FAKE_ELEVENLABS_MODEL, runner=flaky_runner, backoff_base=0
+    )
     result = await adapter.create_voice(0)
     assert result == "https://cdn.replicate.com/voice.wav"
     assert calls == 3
@@ -126,7 +169,12 @@ async def test_create_voice_raises_after_exhausting_retries():
         calls += 1
         raise httpx.ConnectTimeout("connect failed")
 
-    adapter = ReplicateVoiceAdapter(runner=always_timeout, max_retries=2, backoff_base=0)
+    adapter = ReplicateVoiceAdapter(
+        model=FAKE_ELEVENLABS_MODEL,
+        runner=always_timeout,
+        max_retries=2,
+        backoff_base=0,
+    )
     with pytest.raises(httpx.ConnectTimeout):
         await adapter.create_voice(0)
     assert calls == 3

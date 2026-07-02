@@ -2,7 +2,7 @@
 
 Usa ``replicate.async_run(ref, input=...)`` para deixar o SDK resolver versionamento,
 criação da prediction e polling. O tier ``ltx`` usa LTX 2.3 Fast sem áudio; tiers
-premium ainda não têm refs reais confirmadas e caem em mock para manter o QC loop vivo.
+premium ainda não têm refs reais confirmadas e caem em mock se chamados explicitamente.
 """
 from __future__ import annotations
 

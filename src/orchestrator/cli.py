@@ -8,12 +8,14 @@ from dotenv import load_dotenv
 
 from orchestrator import runner
 from orchestrator.config import default_db_path, load_pipeline, load_providers
+from orchestrator.logging_config import configure_logging
 
 
 @click.group()
 def cli() -> None:
     """Orquestrador da pipeline de AI UGC (v1 — mock/dry-run)."""
     load_dotenv(".env", override=False)
+    configure_logging()
 
 
 @cli.command()
@@ -126,6 +128,7 @@ def serve(host, port, reload):
             "uvicorn não instalado. Execute: uv pip install -e '.[web]'"
         )
     load_dotenv(".env", override=False)
+    configure_logging()
     click.echo(f"Dashboard disponível em: http://localhost:{port}/")
     uvicorn.run(
         "orchestrator.web.server:app",

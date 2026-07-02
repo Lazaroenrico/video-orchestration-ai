@@ -91,17 +91,32 @@ def make_script_route_node(tns: list[str]):
     return route_after_script_node
 
 
+# Chaves de checkpoint do LangGraph: não podem vazar para o subgrafo per-item (que é
+# compilado sem checkpointer próprio). Todo o resto — em especial os ``callbacks`` que
+# carregam o run tree do LangSmith — PRECISA ser propagado, senão cada item vira uma
+# root run solta e o grafo aparece fragmentado no LangSmith.
+_CHECKPOINT_CONFIGURABLE_KEYS = frozenset(
+    {"thread_id", "checkpoint_ns", "checkpoint_id", "checkpoint_map"}
+)
+# Chaves de topo que ligam o run do item ao run do batch no tracing. ``run_id`` é
+# deliberadamente omitido para não forçar/colidir o id da run do subgrafo.
+_PROPAGATED_TOP_KEYS = ("callbacks", "tags", "metadata", "max_concurrency")
+
+
 def _sub_config(config: dict[str, Any]) -> dict[str, Any]:
-    """Config enxuto p/ o subgrafo: só o configurable (sem chaves de checkpoint)."""
+    """Config p/ o subgrafo per-item: preserva a linhagem de trace (callbacks/tags/
+    metadata) e remove apenas as chaves de checkpoint do LangGraph."""
     cfg = config.get("configurable", {})
-    return {
+    sub: dict[str, Any] = {
         "configurable": {
-            "adapter": cfg["adapter"],
-            "pipeline": cfg["pipeline"],
-            "run": cfg.get("run", {}),
+            k: v for k, v in cfg.items() if k not in _CHECKPOINT_CONFIGURABLE_KEYS
         },
         "recursion_limit": config.get("recursion_limit", 50),
     }
+    for key in _PROPAGATED_TOP_KEYS:
+        if key in config:
+            sub[key] = config[key]
+    return sub
 
 
 def make_process_item_node(item_app: Any):

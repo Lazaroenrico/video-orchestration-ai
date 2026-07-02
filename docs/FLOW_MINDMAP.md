@@ -70,7 +70,7 @@ mindmap
       creator creator_real_replicate
         OpenAIImageAdapter via Vercel Gateway GPT Image 2
         ReplicateUpscaleAdapter real-esrgan
-        ReplicateVoiceAdapter suno bark
+        ReplicateVoiceAdapter ElevenLabs TTS via Replicate
       video replicate
         LTX 2.3 Fast sem audio
         Kling e Seedance fallback mock
@@ -90,7 +90,7 @@ sequenceDiagram
     participant G as LangGraph runner
     participant LLM as Vercel Gateway (Claude Opus 4.8)
     participant IMG as Vercel Gateway (GPT Image 2)
-    participant REP as Replicate (upscale + voice + video)
+    participant REP as Replicate (upscale + ElevenLabs TTS + video)
     participant MEDIA as media_store (disco local)
 
     U->>G: run(offer, batch, platform, creator_prompt, video_prompt)
@@ -98,7 +98,7 @@ sequenceDiagram
     IMG-->>G: primary (data URI) + angles
     G->>REP: upscale(primary) [real-esrgan]
     REP-->>G: upscaled_base URL
-    G->>REP: create_voice(index) [bark]
+    G->>REP: create_voice(index) [ElevenLabs TTS]
     REP-->>G: voice_id
     G->>MEDIA: persist_creator_media (baixa bytes, reescreve URIs locais)
     G->>LLM: generate_concepts(offer, n, seed, bias)
@@ -119,7 +119,7 @@ sequenceDiagram
 
 | Step | Node | Provider configurado | Requisição externa? |
 |------|------|----------------------|----------------------|
-| 3 | `node_roster` → `build_creator` | `creator_real_replicate` | Sim — Vercel Gateway (GPT Image 2), Replicate (upscale + voice) |
+| 3 | `node_roster` → `build_creator` | `creator_real_replicate` | Sim — Vercel Gateway (GPT Image 2), Replicate (upscale + ElevenLabs TTS) |
 | 3.5 | `node_approval` | — | `interrupt()` humano (opcional, `run.approve_creators`) |
 | 1 | `node_concepts` | `vercel_gateway_llm` | Sim — Claude Opus 4.8 via Vercel AI Gateway |
 | 2 | `node_script` | `vercel_gateway_llm` | Sim — Claude Opus 4.8 via Vercel AI Gateway |
@@ -136,8 +136,9 @@ sequenceDiagram
   muda entre mock e real — só `config/providers.yaml` troca o adapter por role
   (`registry.py` resolve provider → implementação).
 - **Retry**: chamadas HTTP passam por `adapters/_retry.py`
-  (`with_transport_retry`), que reten também `ReplicateError` 429 além de
-  `httpx.TransportError`; outros status (422/500) propagam na 1ª tentativa.
+  (`with_transport_retry`), que retenta `httpx.TransportError`, `ReplicateError`
+  429 e `httpx.HTTPStatusError` 429; outros status (401/422/500) propagam na 1ª
+  tentativa.
 - **Streaming para UI**: `stream_bus.emit_token` empurra eventos
   (`creator_start`, `creator_ready`, etc.) consumidos via SSE em
   `GET /api/stream/{run_id}` no `web/server.py`.
