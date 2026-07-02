@@ -46,11 +46,26 @@ def _make_thinking_block() -> types.SimpleNamespace:
     return types.SimpleNamespace(type="thinking", thinking="<thinking>...")
 
 
+def _make_usage(
+    input_tokens: int = 10,
+    output_tokens: int = 5,
+) -> types.SimpleNamespace:
+    """Cria um objeto usage como o SDK retorna em ``response.usage``."""
+    return types.SimpleNamespace(
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cache_read_input_tokens=0,
+        cache_creation_input_tokens=0,
+    )
+
+
 def _make_response(
     content: list[types.SimpleNamespace],
     stop_reason: str = "end_turn",
 ) -> types.SimpleNamespace:
-    return types.SimpleNamespace(content=content, stop_reason=stop_reason)
+    return types.SimpleNamespace(
+        content=content, stop_reason=stop_reason, usage=_make_usage()
+    )
 
 
 def _make_fake_client(response: types.SimpleNamespace) -> MagicMock:

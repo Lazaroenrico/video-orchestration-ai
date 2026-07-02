@@ -181,3 +181,21 @@ def test_load_creators_old_store_without_normalized_fields_still_loads(tmp_path)
     assert e["image_uri"] == "mock://img/0.png"
     assert e["voice_ref"] == "voice-0"
     assert e["voice_preview_uri"] is None
+
+
+def test_record_creators_overwrites_same_run_creator_with_updated_voice_metadata(tmp_path):
+    store = tmp_path / "creators.json"
+    record_creators(str(store), "run-001", [CREATOR_A], approved_ids=["creator-0"])
+    rerolled = {
+        "id": "creator-0",
+        "image_uri": "mock://img/0.png",
+        "voice_ref": "voice-reroll-0",
+        "voice_preview_uri": "data:audio/wav;base64,reroll-0",
+    }
+    record_creators(str(store), "run-001", [rerolled], approved_ids=["creator-0"])
+
+    entries = [e for e in load_creators(str(store)) if e["run_id"] == "run-001"]
+    assert len(entries) == 1
+    assert entries[0]["voice_ref"] == "voice-reroll-0"
+    assert entries[0]["voice"] == "voice-reroll-0"
+    assert entries[0]["voice_preview_uri"] == "data:audio/wav;base64,reroll-0"

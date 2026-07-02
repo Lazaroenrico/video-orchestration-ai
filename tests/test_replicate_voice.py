@@ -6,6 +6,7 @@ from typing import Any
 import httpx
 import pytest
 
+from orchestrator.adapters.base import VoiceProfile
 from orchestrator.adapters.replicate_voice import ReplicateVoiceAdapter
 
 
@@ -62,6 +63,22 @@ async def test_create_voice_sends_prompt_with_index():
     adapter, captured = _make_adapter()
     await adapter.create_voice(3)
     assert "3" in captured[0]["input"]["prompt"]
+
+
+async def test_create_voice_keeps_legacy_prompt_without_profile():
+    adapter, captured = _make_adapter()
+    await adapter.create_voice(4)
+    assert captured[0]["input"]["prompt"] == "creator voice 4"
+
+
+async def test_create_voice_includes_profile_preset_and_prompt():
+    adapter, captured = _make_adapter()
+    profile = VoiceProfile(preset="female", prompt="Warm, friendly beauty creator voice.")
+    await adapter.create_voice(4, voice_profile=profile)
+    prompt = captured[0]["input"]["prompt"]
+    assert "female" in prompt
+    assert "Warm, friendly beauty creator voice." in prompt
+    assert "creator voice 4" in prompt
 
 
 async def test_different_indices_produce_different_prompts():

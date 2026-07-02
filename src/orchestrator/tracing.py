@@ -23,6 +23,12 @@ except Exception:  # lib ausente ou falha de import → tudo vira no-op
     _HAS_LS = False
 
 
+_LLM_PRICES_PER_MTOK: dict[str, dict[str, float]] = {
+    "claude-opus-4-8":  {"input": 5.0, "output": 25.0, "cache_read": 0.50, "cache_write_5m": 6.25},
+    "claude-sonnet-5":  {"input": 3.0, "output": 15.0, "cache_read": 0.30, "cache_write_5m": 3.75},
+    "claude-haiku-4-5": {"input": 1.0, "output": 5.0,  "cache_read": 0.10, "cache_write_5m": 1.25},
+}
+
 _TRUTHY = {"1", "true", "yes", "on"}
 _DROP_KEYS = {
     "self",
@@ -166,6 +172,106 @@ def wrap_anthropic_client(client: Any) -> Any:
     if _HAS_LS and is_tracing_enabled():
         return _ls_wrap_anthropic(client)
     return client
+
+
+def _normalize_model(model: str) -> str:
+    """Normaliza um model id para a chave usada em ``_LLM_PRICES_PER_MTOK``.
+
+    - Corta prefixo de provider/gateway (ex.: ``"anthropic/claude-opus-4.8"``
+      -> ``"claude-opus-4.8"``), pegando a última parte após ``/``.
+    - Converte pontos em traços (ex.: ``"claude-opus-4.8"`` -> ``"claude-opus-4-8"``).
+    - Idempotente para ids já normalizados.
+    """
+    name = model.rsplit("/", 1)[-1]
+    return name.replace(".", "-")
+
+
+def compute_llm_cost(
+    model: str,
+    input_tokens: int,
+    output_tokens: int,
+    cache_read_tokens: int = 0,
+    cache_write_tokens: int = 0,
+) -> Optional[dict[str, float]]:
+    """Calcula custo USD a partir da tabela de preços local.
+
+    Retorna ``None`` se o modelo (normalizado) não estiver na tabela — nesse
+    caso o chamador simplesmente não anexa custo (sem levantar exceção).
+    """
+    prices = _LLM_PRICES_PER_MTOK.get(_normalize_model(model))
+    if prices is None:
+        return None
+
+    input_cost = (
+        input_tokens * prices["input"]
+        + cache_read_tokens * prices["cache_read"]
+        + cache_write_tokens * prices["cache_write_5m"]
+    ) / 1_000_000
+    output_cost = output_tokens * prices["output"] / 1_000_000
+
+    return {
+        "input_cost": input_cost,
+        "output_cost": output_cost,
+        "total_cost": input_cost + output_cost,
+    }
+
+
+def _usage_get(usage: Any, key: str) -> int:
+    """Lê um campo de ``usage`` (objeto do SDK ou dict), com default 0."""
+    if isinstance(usage, dict):
+        value = usage.get(key)
+    else:
+        value = getattr(usage, key, None)
+    return value if value is not None else 0
+
+
+def build_usage_metadata(usage: Any, model: str) -> dict[str, Any]:
+    """Monta ``usage_metadata`` (tokens + custo) a partir de ``response.usage``.
+
+    Tokens de cache são aditivos ao input (espelha o formato usado pelo
+    LangSmith): ``total_input = input_tokens + cache_read + cache_write``.
+    """
+    input_tokens = _usage_get(usage, "input_tokens")
+    output_tokens = _usage_get(usage, "output_tokens")
+    cache_read = _usage_get(usage, "cache_read_input_tokens")
+    cache_write = _usage_get(usage, "cache_creation_input_tokens")
+
+    total_input = input_tokens + cache_read + cache_write
+
+    metadata: dict[str, Any] = {
+        "input_tokens": total_input,
+        "output_tokens": output_tokens,
+        "total_tokens": total_input + output_tokens,
+    }
+
+    details = {k: v for k, v in (("cache_read", cache_read), ("cache_creation", cache_write)) if v}
+    if details:
+        metadata["input_token_details"] = details
+
+    cost = compute_llm_cost(model, input_tokens, output_tokens, cache_read, cache_write)
+    if cost is not None:
+        metadata["input_cost"] = cost["input_cost"]
+        metadata["output_cost"] = cost["output_cost"]
+        metadata["total_cost"] = cost["total_cost"]
+
+    return metadata
+
+
+def record_llm_usage(usage: Any, model: str) -> None:
+    """Anexa ``usage_metadata`` (tokens + custo) à run LangSmith atual.
+
+    No-op se LangSmith estiver ausente, tracing desligado, ou não houver run
+    ativa. Nunca lança exceção — é chamado no meio de chamadas de API reais.
+    """
+    if not _HAS_LS or not is_tracing_enabled():
+        return
+    try:
+        rt = get_current_run_tree()
+        if rt is not None:
+            rt.metadata["usage_metadata"] = build_usage_metadata(usage, model)
+            rt.metadata["ls_model_name"] = _normalize_model(model)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def add_trace_metadata(**kw: Any) -> None:

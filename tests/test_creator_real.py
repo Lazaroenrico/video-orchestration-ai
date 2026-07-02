@@ -11,6 +11,7 @@ import httpx
 import pytest
 
 from orchestrator import media_store
+from orchestrator.adapters.base import VoiceProfile
 from orchestrator.adapters.creator_real import RealCreatorAdapter, build_real_creator_adapter
 from orchestrator.adapters.elevenlabs_voice import ElevenLabsVoiceAdapter
 from orchestrator.adapters.openai_image import (
@@ -324,6 +325,27 @@ async def test_elevenlabs_raises_on_http_error() -> None:
         await adapter.create_voice(0)
 
 
+async def test_elevenlabs_create_voice_includes_profile_description() -> None:
+    calls: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        return httpx.Response(200, json={"voice_id": "v-profile"})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url=BASE_ELEVENLABS)
+    adapter = ElevenLabsVoiceAdapter(base_url=BASE_ELEVENLABS, token=FAKE_TOKEN, client=client)
+
+    await adapter.create_voice(
+        2,
+        voice_profile=VoiceProfile(preset="neutral", prompt="Calm and clear UGC narration."),
+    )
+
+    body = json.loads(calls[0].content)
+    assert body["name"] == "creator-2"
+    assert "Calm and clear UGC narration." in body["description"]
+    assert body["labels"]["preset"] == "neutral"
+
+
 # ---------------------------------------------------------------------------
 # Testes de integração: RealCreatorAdapter
 # ---------------------------------------------------------------------------
@@ -404,6 +426,59 @@ async def test_real_creator_composes_sub_adapters_correctly() -> None:
     assert primary_received_by_topaz == ["https://openai.example.com/face.png"]
 
 
+async def test_real_creator_infers_voice_profile_from_system_prompt() -> None:
+    captured: list[VoiceProfile | None] = []
+    image = _FakeImage()
+
+    class _VoiceSpy:
+        async def create_voice(self, index: int, voice_profile: VoiceProfile | None = None) -> str:
+            captured.append(voice_profile)
+            return "voice-inferred"
+
+    creator = RealCreatorAdapter(image=image, topaz=_OkUpscale(), voice=_VoiceSpy())
+
+    result = await creator.build_creator(
+        0, system_prompt="Criadora UGC feminina, tom caloroso e amigavel."
+    )
+
+    assert captured[0] is not None
+    assert captured[0].preset == "female"
+    assert "Criadora UGC feminina" in captured[0].prompt
+    # Paridade: a imagem recebe o MESMO perfil que a voz.
+    assert image.voice_profile_seen is captured[0]
+    assert result["voice_profile"] == {
+        "preset": "female",
+        "prompt": "Criadora UGC feminina, tom caloroso e amigavel.",
+    }
+
+
+async def test_real_creator_explicit_voice_profile_overrides_inference() -> None:
+    captured: list[VoiceProfile | None] = []
+
+    class _VoiceSpy:
+        async def create_voice(self, index: int, voice_profile: VoiceProfile | None = None) -> str:
+            captured.append(voice_profile)
+            return "voice-override"
+
+    image = _FakeImage()
+    creator = RealCreatorAdapter(image=image, topaz=_OkUpscale(), voice=_VoiceSpy())
+    override = VoiceProfile(preset="male", prompt="Deep and grounded delivery.")
+
+    result = await creator.build_creator(
+        1,
+        system_prompt="Criadora feminina para skincare.",
+        voice_profile=override,
+    )
+
+    assert captured[0] == override
+    # Paridade: override também vai para a imagem (não a inferência do texto).
+    assert image.voice_profile_seen == override
+    assert result["voice_profile"] == {
+        "preset": "male",
+        "prompt": "Deep and grounded delivery.",
+    }
+
+
 async def test_real_creator_implements_creator_port_protocol() -> None:
     """RealCreatorAdapter deve satisfazer o Protocol CreatorPort em runtime."""
     from orchestrator.adapters.base import CreatorPort
@@ -455,7 +530,8 @@ class _FakeImage:
     def __init__(self, primary: str = "data:image/png;base64,AAAA") -> None:
         self.primary = primary
 
-    async def generate_face(self, index: int, system_prompt=None) -> dict:
+    async def generate_face(self, index: int, system_prompt=None, voice_profile=None) -> dict:
+        self.voice_profile_seen = voice_profile
         return {"primary": self.primary, "angles": ["front", "3/4", "profile", "smile", "neutral"]}
 
 
@@ -470,12 +546,12 @@ class _OkUpscale:
 
 
 class _BoomVoice:
-    async def create_voice(self, index: int) -> str:
+    async def create_voice(self, index: int, voice_profile: VoiceProfile | None = None) -> str:
         raise RuntimeError("voz indisponível")
 
 
 class _OkVoice:
-    async def create_voice(self, index: int) -> str:
+    async def create_voice(self, index: int, voice_profile: VoiceProfile | None = None) -> str:
         return "voice-xyz"
 
 
@@ -499,7 +575,7 @@ async def test_build_creator_propagates_when_face_generation_fails() -> None:
     """Sem face não há o que salvar → generate_face falhar deve propagar."""
 
     class _BoomImage:
-        async def generate_face(self, index: int, system_prompt=None) -> dict:
+        async def generate_face(self, index: int, system_prompt=None, voice_profile=None) -> dict:
             raise RuntimeError("image indisponível")
 
     creator = RealCreatorAdapter(image=_BoomImage(), topaz=_OkUpscale(), voice=_OkVoice())
@@ -748,7 +824,7 @@ async def test_persist_item_media_accepts_dict_input(tmp_path) -> None:
 
 
 class _StubVoiceWithPreview:
-    async def create_voice(self, index: int) -> str:
+    async def create_voice(self, index: int, voice_profile: VoiceProfile | None = None) -> str:
         return "voice-opaque-id"
 
     async def synthesize_preview(self, voice_id: str) -> bytes:

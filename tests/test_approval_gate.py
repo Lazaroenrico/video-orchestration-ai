@@ -143,6 +143,47 @@ async def test_approval_gate_on_resume_empty_approved(tmp_path, adapter, pipelin
     assert roster == []
 
 
+async def test_approval_gate_on_resume_uses_updated_roster_state(tmp_path, adapter, pipeline_cfg):
+    """Resume pode substituir metadados do roster pendente antes de confirmar aprovados."""
+    db = tmp_path / "runs.sqlite"
+    thread_id = "on-voice-reroll"
+    cfg = _make_cfg(adapter, pipeline_cfg, run_extras={"approve_creators": True}, thread_id=thread_id)
+    init = {"run_id": thread_id, "config": {"offer": "serum", "batch_size": 2}}
+
+    async with open_checkpointer(str(db)) as cp:
+        graph = build_graph(pipeline_cfg, checkpointer=cp)
+        await graph.ainvoke(init, cfg)
+
+        snap = await graph.aget_state(cfg)
+        all_interrupts = [i for t in snap.tasks for i in getattr(t, "interrupts", ())]
+        payload = all_interrupts[0].value
+        creators = payload["creators"]
+        updated_creators = [
+            {
+                **creator,
+                "voice_ref": f"voice-reroll-{idx}",
+                "voice_preview_uri": f"data:audio/wav;base64,reroll-{idx}",
+            }
+            for idx, creator in enumerate(creators)
+        ]
+
+        result = await graph.ainvoke(
+            Command(
+                resume={
+                    "approved": [updated_creators[0]["id"]],
+                    "creators": updated_creators,
+                }
+            ),
+            cfg,
+        )
+
+    roster = result.get("roster", [])
+    assert len(roster) == 1
+    assert roster[0]["id"] == updated_creators[0]["id"]
+    assert roster[0]["voice_id"] == "voice-reroll-0"
+    assert roster[0]["voice_preview_uri"] == "data:audio/wav;base64,reroll-0"
+
+
 async def test_approval_gate_interrupt_value_structure(tmp_path, adapter, pipeline_cfg):
     """Confirma atributo exato do interrupt no LangGraph instalado."""
     db = tmp_path / "runs.sqlite"

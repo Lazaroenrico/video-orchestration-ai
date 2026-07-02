@@ -24,6 +24,7 @@ from typing import Any, Optional
 import httpx
 import replicate
 
+from orchestrator.adapters.base import VoicePort, VoiceProfile, resolve_voice_profile
 from orchestrator.adapters.elevenlabs_voice import ElevenLabsVoiceAdapter
 from orchestrator.adapters.openai_image import OpenAIImageAdapter, build_openai_image_vercel_adapter
 from orchestrator.adapters.replicate_upscale import ReplicateUpscaleAdapter
@@ -51,22 +52,34 @@ class RealCreatorAdapter:
         self,
         image: Optional[OpenAIImageAdapter] = None,
         topaz: Optional[TopazUpscaleAdapter] = None,
-        voice: Optional[ElevenLabsVoiceAdapter] = None,
+        voice: Optional[VoicePort] = None,
     ) -> None:
         self.image = image if image is not None else OpenAIImageAdapter()
         self.topaz = topaz if topaz is not None else TopazUpscaleAdapter()
         self.voice = voice if voice is not None else ElevenLabsVoiceAdapter()
 
     @traced("adapter.creator_real.build_creator", run_type="chain", step=3, provider="creator_real")
-    async def build_creator(self, index: int, system_prompt: Optional[str] = None) -> dict[str, Any]:
+    async def build_creator(
+        self,
+        index: int,
+        system_prompt: Optional[str] = None,
+        voice_profile: Optional[VoiceProfile] = None,
+    ) -> dict[str, Any]:
         """Constrói o creator reutilizável combinando imagem, upscale e voz.
 
         Retorna o mesmo shape que ``MockAdapter.build_creator``.
         """
+        # Resolve o perfil de voz ANTES da imagem: o mesmo preset alimenta o prompt
+        # de imagem (token de gênero brand-safe) e a criação de voz, garantindo que
+        # a voz do creator case com a aparência gerada.
+        resolved_voice = resolve_voice_profile(system_prompt, voice_profile)
+
         # A face gerada é o artefato mínimo: se generate_face falhar, não há o que
         # salvar e o erro propaga. Upscale e voz são best-effort — uma falha neles
         # (ConnectTimeout, indisponibilidade) NÃO pode descartar a face já gerada.
-        face = await self.image.generate_face(index, system_prompt=system_prompt)
+        face = await self.image.generate_face(
+            index, system_prompt=system_prompt, voice_profile=resolved_voice
+        )
         primary = face["primary"]
 
         try:
@@ -76,17 +89,20 @@ class RealCreatorAdapter:
             upscaled = primary
 
         try:
-            voice_id = await self.voice.create_voice(index)
+            voice_id = await self.voice.create_voice(index, voice_profile=resolved_voice)
         except Exception as exc:  # noqa: BLE001 — voz é opcional; imagem preservada
             _log.error("voz falhou (creator-%d): %s", index, exc)
             voice_id = ""
 
-        return {
+        creator = {
             "id": f"creator-{index}",
             "angles": face["angles"],
             "upscaled_base": upscaled,
             "voice_id": voice_id,
         }
+        if resolved_voice is not None:
+            creator["voice_profile"] = resolved_voice.as_dict()
+        return creator
 
 
 def build_real_creator_adapter(pipeline: dict[str, Any]) -> RealCreatorAdapter:

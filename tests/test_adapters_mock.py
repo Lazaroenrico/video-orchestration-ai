@@ -1,6 +1,7 @@
 """Testes do MockAdapter — fixtures determinísticos, custo por tier, QC determinístico."""
 import pytest
 
+from orchestrator.adapters.base import VoiceProfile
 from orchestrator.adapters.mock import MockAdapter
 from orchestrator.graph.state import Artifact, QCResult
 from orchestrator.web.server import _normalize_artifact, _normalize_creator
@@ -81,6 +82,53 @@ async def test_build_creator_is_deterministic(adapter):
     c = await adapter.build_creator(index=1)
     assert c["upscaled_base"] != a["upscaled_base"]
     assert c["voice_preview_uri"] != a["voice_preview_uri"]
+
+
+async def test_build_creator_infers_voice_profile_from_system_prompt(adapter):
+    creator = await adapter.build_creator(
+        index=0, system_prompt="Criadora UGC feminina, tom amigavel e cotidiano."
+    )
+    assert creator["voice_profile"] == {
+        "preset": "female",
+        "prompt": "Criadora UGC feminina, tom amigavel e cotidiano.",
+    }
+
+
+async def test_build_creator_voice_profile_override_changes_voice_deterministically(adapter):
+    override = VoiceProfile(preset="male", prompt="Deep and grounded skincare narrator.")
+    a = await adapter.build_creator(
+        index=0,
+        system_prompt="Criadora UGC feminina, tom amigavel e cotidiano.",
+        voice_profile=override,
+    )
+    b = await adapter.build_creator(
+        index=0,
+        system_prompt="Criadora UGC feminina, tom amigavel e cotidiano.",
+        voice_profile=override,
+    )
+    plain = await adapter.build_creator(
+        index=0,
+        system_prompt="Criadora UGC feminina, tom amigavel e cotidiano.",
+    )
+    assert a == b
+    assert a["voice_profile"] == {
+        "preset": "male",
+        "prompt": "Deep and grounded skincare narrator.",
+    }
+    assert a["voice_id"] != plain["voice_id"]
+    assert a["voice_preview_uri"] != plain["voice_preview_uri"]
+    # Paridade imagem↔voz: o preset também altera o seed da imagem.
+    assert a["upscaled_base"] != plain["upscaled_base"]
+
+
+async def test_build_creator_image_seed_varies_by_preset(adapter):
+    """Presets diferentes -> imagens diferentes (determinístico), casando com a voz."""
+    male = VoiceProfile(preset="male", prompt="grounded")
+    female = VoiceProfile(preset="female", prompt="grounded")
+    a = await adapter.build_creator(index=0, voice_profile=male)
+    b = await adapter.build_creator(index=0, voice_profile=female)
+    assert a["upscaled_base"] != b["upscaled_base"]
+    assert a["voice_preview_uri"] != b["voice_preview_uri"]
 
 
 # --- video (Steps 4/5): custo por tier ---

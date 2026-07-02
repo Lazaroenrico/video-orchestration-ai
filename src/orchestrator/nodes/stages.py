@@ -7,7 +7,10 @@ subgrafo per-item opera sobre ``Item``.
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +21,7 @@ from langgraph.types import interrupt
 
 import orchestrator.feedback_store as _feedback_store
 from orchestrator import media_store, stream_bus
+from orchestrator.adapters.base import VoiceProfile, assign_voice_profile
 from orchestrator.config import default_media_path
 from orchestrator.graph.state import Item, new_item
 from orchestrator.nodes.base import as_item, get_adapter, get_pipeline
@@ -65,6 +69,140 @@ async def _build_voice_preview(
     return await media_store.persist_bytes(audio, dest_dir, "voice_preview", web_prefix=web_prefix)
 
 
+def _wav_data_uri(*seed_parts: Any) -> str:
+    """WAV PCM 8-bit mono minúsculo e determinístico para preview offline."""
+    sample_rate = 4000
+    n_samples = 400
+    digest = hashlib.sha256("|".join(str(p) for p in seed_parts).encode()).digest()
+    samples = bytes(digest[i % len(digest)] for i in range(n_samples))
+    data_size = len(samples)
+    header = (
+        b"RIFF"
+        + (36 + data_size).to_bytes(4, "little")
+        + b"WAVEfmt "
+        + (16).to_bytes(4, "little")
+        + (1).to_bytes(2, "little")
+        + (1).to_bytes(2, "little")
+        + sample_rate.to_bytes(4, "little")
+        + sample_rate.to_bytes(4, "little")
+        + (1).to_bytes(2, "little")
+        + (8).to_bytes(2, "little")
+        + b"data"
+        + data_size.to_bytes(4, "little")
+    )
+    return "data:audio/wav;base64," + base64.b64encode(header + samples).decode()
+
+
+def _creator_index(creator: dict[str, Any]) -> int:
+    creator_id = str(creator.get("id") or "")
+    match = re.search(r"(\d+)$", creator_id)
+    return int(match.group(1)) if match else 0
+
+
+def _creator_voice_profile(creator: dict[str, Any]) -> VoiceProfile | None:
+    """Reconstrói o ``VoiceProfile`` persistido no creator, quando presente."""
+    raw = creator.get("voice_profile")
+    if not isinstance(raw, dict) or not raw.get("preset"):
+        return None
+    try:
+        return VoiceProfile(preset=raw["preset"], prompt=raw.get("prompt", ""))
+    except ValueError:
+        return None
+
+
+async def reroll_creator_voice(
+    adapter: Any, creator: dict[str, Any], *, run_id: str, media_root: Any,
+) -> dict[str, Any]:
+    """Regenera só os metadados de voz do creator, preservando a imagem.
+
+    O gênero (``voice_profile.preset``) é preservado: só a amostra de voz muda, então
+    a voz continua casando com a imagem inalterada.
+    """
+    reroll_count = int(creator.get("voice_reroll_count") or 0) + 1
+    profile = _creator_voice_profile(creator)
+    reroll = getattr(adapter, "reroll_creator_voice", None)
+
+    if callable(reroll):
+        updated = await reroll(
+            creator_id=creator.get("id"),
+            index=_creator_index(creator),
+            reroll_count=reroll_count,
+            creator=creator,
+            voice_profile=profile,
+        )
+        next_creator = {**creator, **updated}
+    else:
+        base_voice = (
+            creator.get("voice_ref")
+            or creator.get("voice")
+            or creator.get("voice_id")
+            or f"voice-{_creator_index(creator)}"
+        )
+        voice_ref = f"{base_voice}::reroll-{reroll_count}"
+        next_creator = {
+            **creator,
+            "voice_id": voice_ref,
+            "voice_ref": voice_ref,
+            "voice": voice_ref,
+            "voice_source_uri": None,
+            "voice_preview_uri": _wav_data_uri(
+                run_id, creator.get("id"), reroll_count,
+                profile.preset if profile is not None else "",
+            ),
+        }
+    # Trava o gênero da imagem: reroll nunca altera o preset resolvido.
+    if profile is not None:
+        next_creator["voice_profile"] = profile.as_dict()
+
+    next_creator["voice_reroll_count"] = reroll_count
+    next_creator["voice_preview_uri"] = await _build_voice_preview(
+        adapter, next_creator, run_id=run_id, media_root=media_root,
+    ) or next_creator.get("voice_preview_uri")
+    return next_creator
+
+
+def apply_roster_updates(
+    roster: list[dict[str, Any]], updates: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    """Mescla updates vindos do approval resume no roster atual do grafo."""
+    if not updates:
+        return roster
+
+    by_id = {
+        str(update.get("id")): update
+        for update in updates
+        if update.get("id") is not None
+    }
+    merged: list[dict[str, Any]] = []
+    for creator in roster:
+        creator_id = str(creator.get("id") or "")
+        update = by_id.get(creator_id)
+        if update is None:
+            merged.append(creator)
+            continue
+
+        voice_ref = update.get("voice_ref") or update.get("voice") or update.get("voice_id")
+        image_uri = update.get("image_uri") or update.get("image") or update.get("upscaled_base")
+        preview = (
+            update.get("voice_preview_uri")
+            or update.get("voice_preview")
+            or update.get("preview_uri")
+        )
+        merged_creator = {**creator, **update}
+        if voice_ref is not None:
+            merged_creator["voice_id"] = voice_ref
+            merged_creator["voice_ref"] = voice_ref
+            merged_creator["voice"] = voice_ref
+        if image_uri is not None:
+            merged_creator["upscaled_base"] = image_uri
+            merged_creator["image_uri"] = image_uri
+            merged_creator["image"] = image_uri
+        if preview is not None:
+            merged_creator["voice_preview_uri"] = preview
+        merged.append(merged_creator)
+    return merged
+
+
 # ===================== Top-graph (BatchState) =====================
 
 @traced("node.roster", run_type="chain", step=3)
@@ -84,7 +222,12 @@ async def node_roster(state: dict[str, Any], config: RunnableConfig) -> dict[str
             "type": "creator_start",
             "creator_id": f"creator-{i}",
         })
-        creator = await adapter.build_creator(index=i, system_prompt=creator_prompt)
+        # Perfil concreto por índice: garante paridade imagem↔voz e variedade de
+        # gênero no roster mesmo quando o briefing não cita gênero.
+        profile = assign_voice_profile(creator_prompt, None, index=i)
+        creator = await adapter.build_creator(
+            index=i, system_prompt=creator_prompt, voice_profile=profile,
+        )
         # Baixa e persiste os bytes (imagem/voz) e reescreve as URIs para caminhos
         # locais servíveis. No-op para mock:// / voice_id (sem rede, sem disco).
         creator = await media_store.persist_creator_media(
@@ -147,6 +290,7 @@ async def node_approval(state: dict[str, Any], config: RunnableConfig) -> dict[s
         ],
     }
     decision = interrupt(payload)  # re-roda no resume; tudo acima é side-effect free
+    roster = apply_roster_updates(roster, (decision or {}).get("creators"))
     approved_list = (decision or {}).get("approved")
     # None = nenhuma decisão → aprova todos; [] = seleção explicitamente vazia → rejeita todos
     if approved_list is None:

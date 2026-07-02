@@ -29,6 +29,7 @@ from typing import Optional
 
 import httpx
 
+from orchestrator.adapters.base import VoiceProfile
 from orchestrator.tracing import traced
 
 # Texto fixo curto para o preview de voz (~2s de áudio) — não precisa refletir o
@@ -62,7 +63,9 @@ class ElevenLabsVoiceAdapter:
         self._client = client
 
     @traced("adapter.elevenlabs.create_voice", run_type="tool", step=3, provider="elevenlabs")
-    async def create_voice(self, index: int) -> str:
+    async def create_voice(
+        self, index: int, voice_profile: Optional[VoiceProfile] = None
+    ) -> str:
         """Cria voz de creator via POST ``{base_url}/voices/add``.
 
         Retorna o ``voice_id`` (string).
@@ -74,6 +77,10 @@ class ElevenLabsVoiceAdapter:
         body = {
             "name": f"creator-{index}",
         }
+        if voice_profile is not None:
+            description = voice_profile.prompt or f"{voice_profile.preset} creator voice"
+            body["description"] = description
+            body["labels"] = {"preset": voice_profile.preset}
 
         if self._client is not None:
             resp = await self._client.post(

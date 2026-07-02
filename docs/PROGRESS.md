@@ -1,9 +1,81 @@
 # PROGRESS — handoff
 
-Estado em **2026-07-01**. Suíte: **276 passando, 2 skips** (testes `--live` opt-in,
+Estado em **2026-07-02**. Suíte: **316 passando, 2 skips** (testes `--live` opt-in,
 pulados sem `JUDGE_GATEWAY_URL`) + 2 warnings conhecidos/benignos (LangSmith
 deprecation em import; LangGraph resume parcial — ver falha #5).
 Rodar: `rtk proxy python -m pytest`.
+
+> Nota: a falha que estava em aberto em `_SAFE_CREATOR_PROMPT` foi corrigida — ver falha #10.
+
+## Paridade áudio↔imagem do creator + reroll com gênero travado (2026-07-02)
+
+Objetivo: garantir que a **voz** do creator case com a **imagem** gerada. Antes, imagem
+(GPT Image, texto livre) e voz (preset inferido por keyword) não compartilhavam nenhuma
+decisão de gênero — podiam divergir; e o roster reusava um `creator_prompt` único para os
+N creators (vozes uniformes, imagens variando). Também fechamos a lacuna de teste do reroll.
+
+### Red → Green (TDD)
+- `adapters/base.py`: `assign_voice_profile(system_prompt, voice_profile, *, index)` —
+  perfil **concreto** (nunca `None`): override > inferência > gênero determinístico por
+  índice (alterna `female`/`male`). `image_gender_clause(profile)` — frase brand-safe de
+  gênero para o prompt de imagem. Testes: `tests/test_voice_profile.py`.
+- `adapters/openai_image.py`: `generate_face`/`_build_creator_image_prompt` aceitam
+  `voice_profile` e injetam a cláusula de gênero (só male/female; neutral/None → sem cláusula).
+- `adapters/creator_real.py`: `build_creator` resolve o perfil **antes** da imagem e passa
+  o mesmo perfil a `generate_face` e a `create_voice` → paridade por construção. Testes
+  em `test_creator_real.py` provam que imagem e voz recebem o mesmo perfil.
+- `adapters/mock.py`: o preset resolvido também entra no seed do SVG (paridade em nível de
+  metadado, offline/determinístico). Testes em `test_adapters_mock.py`.
+- `nodes/stages.py`: `node_roster` chama `assign_voice_profile(creator_prompt, None, index=i)`
+  por creator e repassa a `build_creator`. `reroll_creator_voice` reconstrói o `VoiceProfile`
+  persistido (`_creator_voice_profile`), passa-o ao método do adapter (quando existe) e
+  **trava o gênero** no reroll (só a amostra muda); preview fallback é seedado com o preset.
+- Lacuna fechada: `tests/test_stages_reroll.py` (novo, 6 casos) cobre os dois branches
+  (adapter com método vs. fallback), preservação de imagem e de gênero, incremento do
+  contador, determinismo e sensibilidade do preview ao preset.
+
+### Falha investigada nesta fase
+- Sintoma: spies de `build_creator`/`generate_face` em `test_system_prompt.py` e
+  `test_creator_real.py` quebraram com `unexpected keyword argument 'voice_profile'`.
+  - Causa: a nova assinatura (contrato) passou a repassar `voice_profile` do roster ao
+    adapter e deste à imagem; os fakes seguiam a assinatura antiga.
+  - Correção: fakes atualizados para aceitar `voice_profile` (mudança **intencional** de
+    contrato, não afrouxamento) — asserções de `system_prompt` mantidas e reforçadas com
+    a paridade imagem↔voz.
+
+## Voice persona em adapters de creator/voice (2026-07-01)
+
+Objetivo: suportar reroll determinístico de voz do creator com preset
+`male|female|neutral` e briefing humano curto, mantendo compatibilidade quando nenhum
+perfil for informado.
+
+### Red → Green (TDD)
+
+- RED: `tests/test_replicate_voice.py`, `tests/test_creator_real.py` e
+  `tests/test_adapters_mock.py` passaram a exigir um contrato `VoiceProfile`,
+  inferência determinística a partir de `system_prompt`, override explícito com
+  precedência e repasse do perfil pelo `RealCreatorAdapter` até o sub-adapter de voz.
+- GREEN:
+  - `adapters/base.py`: novo `VoiceProfile`, helpers `infer_voice_profile` /
+    `resolve_voice_profile`, `CreatorPort.build_creator(..., voice_profile=None)` e
+    `VoicePort.create_voice(..., voice_profile=None)`.
+  - `adapters/mock.py`: `voice_id` / `voice_preview_uri` passam a derivar também do
+    perfil resolvido; mock segue offline e determinístico.
+  - `adapters/replicate_voice.py`: prompt legado (`creator voice {index}`) preservado
+    quando não há perfil; com perfil, inclui preset + briefing humano.
+  - `adapters/elevenlabs_voice.py`: request opcionalmente inclui `description` e
+    `labels.preset`.
+  - `adapters/creator_real.py`: resolve o perfil de voz a partir de texto ou override,
+    repassa ao sub-adapter e expõe `voice_profile` no payload do creator.
+
+### Falha investigada nesta fase
+
+- Sintoma: os testes novos nem coletavam, com `ImportError: cannot import name
+  'VoiceProfile' from orchestrator.adapters.base`.
+  - Causa: o slice de contratos ainda não expunha nenhum tipo/helper comum para voz,
+    então cada adapter seguia com assinatura antiga (`create_voice(index)`).
+  - Correção: centralizar o contrato em `adapters/base.py` e propagar a assinatura
+    opcional de `voice_profile` só pelo slice de adapters.
 
 ## Correção — histórico recupera creators quando `creators.json` está vazio (2026-07-01)
 
@@ -463,3 +535,46 @@ orchestrator run --batch 2 --offer "test product" --platform tiktok
    - Correção: `/api/creators` agora retorna `store_path` e `exists`; `node_roster`
      emite `creator_start` antes de cada geração; a UI registra progresso não-LLM no
      painel de streaming, mantendo tokens LLM quando existirem.
+
+9. **Custo do LLM nunca aparecia no LangSmith, e tokens dependiam de dois caminhos
+   duplicados (run externa `@traced` + run-filha `wrap_anthropic`)**
+   - Sintoma: runs `llm` no LangSmith sem `total_cost`, e por vezes DUAS runs `llm`
+     aninhadas para uma única chamada (a de fora, do `@traced`, sem tokens).
+   - Causa raiz: `AnthropicLLMAdapter.__init__` envolvia o client com
+     `wrap_anthropic_client` (langsmith `wrappers.wrap_anthropic`), que cria uma run-filha
+     "ChatAnthropic" e tenta anexar `usage_metadata`/custo usando o price-map SERVER-SIDE
+     do LangSmith. Esse price-map não reconhece `claude-opus-4-8` (modelo novo) nem
+     `anthropic/claude-opus-4.8` (alias do Vercel AI Gateway, com prefixo de provider e
+     ponto em vez de traço) — logo custo ficava ausente/zero, e a run-filha duplicava a
+     contagem de tokens em paralelo à run externa do método decorado.
+   - Correção: `src/orchestrator/tracing.py` ganhou uma tabela de preços local
+     (`_LLM_PRICES_PER_MTOK`, USD/1M tokens) e as funções puras `_normalize_model`
+     (normaliza alias de gateway/ponto para traço), `compute_llm_cost`,
+     `build_usage_metadata` (tokens + custo, aditivo de cache) e `record_llm_usage`
+     (anexa `usage_metadata`/`ls_model_name` na run atual via `get_current_run_tree()`,
+     no-op seguro offline/sem tracing). `AnthropicLLMAdapter` parou de envolver o client
+     com `wrap_anthropic_client` (fonte única = chamada manual de `record_llm_usage(
+     response.usage, self.model)` logo após obter a resposta, nos dois ramos streaming/
+     `create`, em `generate_concepts` e `write_script`) — elimina a run-filha duplicada e
+     o custo passa a ser calculado localmente, independente do price-map do LangSmith.
+   - Testes: `tests/test_llm_usage_cost.py` (13 casos, tracing.py + integração com o
+     adapter). Ajustado `tests/test_tracing_coverage.py::test_anthropic_client_is_used_
+     directly_without_wrapping` (antes `..._is_passed_through_tracing_wrapper`, que
+     asserava explicitamente o wrapping — comportamento intencionalmente removido).
+     Ajustado `tests/test_anthropic_llm.py::_make_response` para incluir `usage` (o
+     fake de resposta não tinha esse campo; toda resposta real do SDK tem).
+
+10. **`test_openai_image_wraps_custom_prompt_with_safety_guardrails` falhando**
+    - Sintoma: `assert "modest everyday clothing" in prompt` (e depois
+      `head-and-shoulders portrait` / `brand-safe product review context`) falhavam.
+    - Causa raiz: edição manual em andamento no `_SAFE_CREATOR_PROMPT` (openai_image.py)
+      tinha (a) removido as frases de guardrail "modest everyday clothing" e
+      "head-and-shoulders portrait", (b) quebrado "brand-safe product review context"
+      ao intercalar a frase dos olhos entre "product" e "review context", e (c) colado
+      strings sem espaço (`(camera-ready).marketing`, `over-styling.portrait`).
+    - Correção: `_SAFE_CREATOR_PROMPT` reescrito de forma coerente — restauradas as frases
+      de segurança exigidas (todas como substrings contíguas e em minúsculas onde o teste
+      espera) e corrigidos os espaços, **preservando** as adições de realismo do usuário
+      (textura de pele/poros/imperfeições, "no over-styling", olhos engajados). A asserção
+      do teste NÃO foi afrouxada — os guardrails são o comportamento desejado.
+    - Suíte: **316 passando, 2 skips**.

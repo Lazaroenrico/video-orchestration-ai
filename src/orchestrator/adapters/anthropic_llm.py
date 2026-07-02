@@ -22,7 +22,7 @@ from typing import Any, Optional
 from anthropic import AsyncAnthropic
 
 from orchestrator import stream_bus
-from orchestrator.tracing import traced, wrap_anthropic_client
+from orchestrator.tracing import record_llm_usage, traced
 
 _HOOK_STYLES = ["problem", "curiosity", "bold_claim", "emotional", "social_proof"]
 _FORMATS = ["talking_head", "demo", "reaction"]
@@ -79,8 +79,7 @@ class AnthropicLLMAdapter:
         client: Optional[AsyncAnthropic] = None,
     ) -> None:
         self.model = model
-        raw_client = client if client is not None else AsyncAnthropic()
-        self._client: AsyncAnthropic = wrap_anthropic_client(raw_client)
+        self._client: AsyncAnthropic = client if client is not None else AsyncAnthropic()
 
     # ------------------------------------------------------------------ #
     # Step 1 — Conceitos                                                   #
@@ -146,6 +145,8 @@ class AnthropicLLMAdapter:
             stream_bus.emit_token({"type": "llm_end", "stage": "concepts"})
         else:
             response = await self._client.messages.create(**api_kwargs)
+
+        record_llm_usage(response.usage, self.model)
 
         if response.stop_reason == "refusal":
             raise RuntimeError(
@@ -238,6 +239,8 @@ class AnthropicLLMAdapter:
             stream_bus.emit_token({"type": "llm_end", "stage": stage_label})
         else:
             response = await self._client.messages.create(**api_kwargs)
+
+        record_llm_usage(response.usage, self.model)
 
         if response.stop_reason == "refusal":
             raise RuntimeError(

@@ -11,6 +11,7 @@ import base64
 import hashlib
 from typing import Any, Optional
 
+from orchestrator.adapters.base import VoiceProfile, resolve_voice_profile
 from orchestrator.graph.state import Artifact, QCResult
 from orchestrator.tracing import traced
 
@@ -175,18 +176,43 @@ class MockAdapter:
 
     # --- Step 3: creator reutilizável ---
     @traced("adapter.mock.build_creator", run_type="tool", step=3, provider="mock")
-    async def build_creator(self, index: int, system_prompt: Optional[str] = None) -> dict[str, Any]:
+    async def build_creator(
+        self,
+        index: int,
+        system_prompt: Optional[str] = None,
+        voice_profile: Optional[VoiceProfile] = None,
+    ) -> dict[str, Any]:
         await self._tick()
         sfx = ""
         if system_prompt:
             sfx = "-" + hashlib.sha256(system_prompt.encode()).hexdigest()[:8]
-        return {
+        resolved_voice = resolve_voice_profile(system_prompt, voice_profile)
+        voice_seed = sfx
+        if resolved_voice is not None:
+            voice_seed += "-" + hashlib.sha256(
+                f"{resolved_voice.preset}|{resolved_voice.prompt}".encode()
+            ).hexdigest()[:8]
+        # A imagem também codifica o preset resolvido: mesmo sem rosto real, o mock
+        # mantém paridade imagem↔voz em nível de metadado/determinismo.
+        image_preset = resolved_voice.preset if resolved_voice is not None else ""
+        creator = {
             "id": f"creator-{index}",
             "angles": ["front", "3/4", "profile", "smile", "neutral"],
-            "upscaled_base": _svg_data_uri(f"C{index}{sfx}", "creator", index, sfx),
-            "voice_id": f"voice-{index}{sfx}",
-            "voice_preview_uri": _wav_data_uri("creator", index, sfx),
+            "upscaled_base": _svg_data_uri(
+                f"C{index}{sfx}", "creator", index, sfx, image_preset
+            ),
+            "voice_id": f"voice-{index}{voice_seed}",
+            "voice_preview_uri": _wav_data_uri(
+                "creator",
+                index,
+                voice_seed,
+                resolved_voice.preset if resolved_voice is not None else "",
+                resolved_voice.prompt if resolved_voice is not None else "",
+            ),
         }
+        if resolved_voice is not None:
+            creator["voice_profile"] = resolved_voice.as_dict()
+        return creator
 
     # --- Steps 4/5: vídeo (talking-head / demo) ---
     @traced("adapter.mock.generate_clip", run_type="tool", step="video", provider="mock")

@@ -17,6 +17,7 @@ from typing import Any, Awaitable, Callable, Optional
 
 import replicate
 
+from orchestrator.adapters.base import VoiceProfile
 from orchestrator.adapters._retry import with_transport_retry
 from orchestrator.tracing import traced
 
@@ -55,19 +56,32 @@ class ReplicateVoiceAdapter:
         self.backoff_base = backoff_base
 
     @traced("adapter.replicate_voice.create_voice", run_type="tool", step=3, provider="replicate")
-    async def create_voice(self, index: int) -> str:
+    async def create_voice(
+        self, index: int, voice_profile: Optional[VoiceProfile] = None
+    ) -> str:
         """Gera a referência de voz do creator ``index``. Retorna uma string (URL).
 
         Retenta em blips de conexão (``httpx.ConnectTimeout`` etc.); erros HTTP e de
         lógica propagam na hora.
         """
         output = await with_transport_retry(
-            lambda: self._runner(self.model, input={"prompt": f"creator voice {index}"}),
+            lambda: self._runner(
+                self.model, input={"prompt": self._build_prompt(index, voice_profile)}
+            ),
             max_retries=self.max_retries,
             backoff_base=self.backoff_base,
             label="replicate.voice",
         )
         return self._coerce_output(output)
+
+    @staticmethod
+    def _build_prompt(index: int, voice_profile: Optional[VoiceProfile]) -> str:
+        base_prompt = f"creator voice {index}"
+        if voice_profile is None:
+            return base_prompt
+        if voice_profile.prompt:
+            return f"{base_prompt} | preset={voice_profile.preset} | {voice_profile.prompt}"
+        return f"{base_prompt} | preset={voice_profile.preset}"
 
     @staticmethod
     def _coerce_output(output: Any) -> str:

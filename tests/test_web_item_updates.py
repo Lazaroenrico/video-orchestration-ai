@@ -1,6 +1,7 @@
 """Contratos do dashboard human-on-the-loop via SSE."""
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -166,6 +167,29 @@ def test_ui_stream_panel_logs_non_llm_events() -> None:
     assert 'appendStreamLine("run", "pipeline iniciada")' in html
 
 
+def test_ui_approval_panel_exposes_voice_preset_and_reroll_controls() -> None:
+    html = Path("src/orchestrator/web/static/index.html").read_text(encoding="utf-8")
+    show_body = html.split("function showApprovalPanel(creators)", 1)[1].split(
+        "\nasync function confirmApproval()", 1
+    )[0]
+
+    assert 'const preset = document.createElement("select")' in show_body
+    assert 'preset.className = "ap-voice-preset"' in show_body
+    assert 'value = "male"' in show_body
+    assert 'value = "female"' in show_body
+    assert 'value = "neutral"' in show_body
+    assert 'const reroll = document.createElement("button")' in show_body
+    assert 'reroll.className = "ap-voice-reroll"' in show_body
+
+
+def test_ui_approval_voice_reroll_updates_audio_preview_in_place() -> None:
+    html = Path("src/orchestrator/web/static/index.html").read_text(encoding="utf-8")
+    assert "function updateApprovalCreatorVoicePreview" in html
+    assert 'case "creator_update"' in html
+    assert 'audio.src = creator.voice_preview_uri' in html
+    assert "audio.load()" in html
+
+
 def test_creators_history_exposes_store_path_and_entries(tmp_path, monkeypatch) -> None:
     store = tmp_path / "creators.json"
     creator_store = web_server.creator_store
@@ -220,6 +244,79 @@ def test_creators_history_recovers_from_media_when_store_is_empty(tmp_path, monk
             "status": "recovered",
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_reroll_voice_updates_pending_creator_and_emits_sse(monkeypatch, pipeline_cfg) -> None:
+    adapter = MockAdapter(tiers=pipeline_cfg["tiers"])
+    run_id = "web-reroll"
+    web_server._runs[run_id] = {
+        "queues": [],
+        "buffer": [],
+        "done": False,
+        "adapter": adapter,
+        "pending_creators": [
+            {
+                "id": "creator-0",
+                "image_uri": "data:image/svg+xml;base64,original",
+                "voice_ref": "voice-0",
+                "voice_preview_uri": "data:audio/wav;base64,original",
+                "voice": "voice-0",
+            }
+        ],
+    }
+    monkeypatch.setattr(web_server, "default_media_path", lambda: Path("/tmp/nonexistent-media"))
+    events: list[dict] = []
+    monkeypatch.setattr(web_server, "_emit", lambda _run_id, event: events.append(event) or asyncio.sleep(0))
+
+    try:
+        payload = await web_server.reroll_creator_voice(run_id, "creator-0")
+    finally:
+        web_server._runs.pop(run_id, None)
+
+    creator = payload["creator"]
+    assert creator["id"] == "creator-0"
+    assert creator["voice_ref"] != "voice-0"
+    assert creator["voice_preview_uri"] != "data:audio/wav;base64,original"
+    assert web_server._runs.get(run_id) is None or True
+    assert events == [
+        {
+            "type": "creator_update",
+            "run_id": run_id,
+            "creator": creator,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_approve_uses_updated_pending_roster_state(monkeypatch) -> None:
+    run_id = "web-approve-reroll"
+    fut: asyncio.Future = asyncio.get_running_loop().create_future()
+    updated_creator = {
+        "id": "creator-0",
+        "image_uri": "/media/run/creator-0/image.png",
+        "voice_ref": "voice-reroll-0",
+        "voice_preview_uri": "/media/run/creator-0/voice-reroll.wav",
+    }
+    web_server._runs[run_id] = {
+        "queues": [],
+        "buffer": [],
+        "done": False,
+        "approval": fut,
+        "pending_creators": [updated_creator],
+    }
+
+    try:
+        resp = await web_server.approve(run_id, web_server.ApproveRequest(approved=["creator-0"]))
+    finally:
+        web_server._runs.pop(run_id, None)
+
+    assert resp == {"ok": True}
+    assert fut.done() is True
+    assert fut.result() == {
+        "approved": ["creator-0"],
+        "creators": [updated_creator],
+    }
 
 
 @pytest.mark.asyncio

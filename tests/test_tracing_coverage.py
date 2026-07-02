@@ -102,20 +102,18 @@ def test_concrete_adapter_methods_have_trace_markers():
     assert ReplicateVideoAdapter.generate_clip.__trace_metadata__["step"] == "video"
 
 
-def test_anthropic_client_is_passed_through_tracing_wrapper(monkeypatch):
+def test_anthropic_client_is_used_directly_without_wrapping(monkeypatch):
+    """AnthropicLLMAdapter usa o client injetado diretamente.
+
+    Fonte única de tokens/custo: ``record_llm_usage`` (chamado manualmente
+    pelo adapter a partir de ``response.usage``) — não mais
+    ``wrap_anthropic_client``, que criava uma run-filha duplicada e não
+    reconhecia modelos novos/aliases de gateway no price-map do LangSmith.
+    Ver docs/PROGRESS.md.
+    """
     import orchestrator.adapters.anthropic_llm as anthropic_mod
 
     client = MagicMock()
-    wrapped = MagicMock()
-    seen = {}
-
-    def fake_wrap(obj):
-        seen["client"] = obj
-        return wrapped
-
-    monkeypatch.setattr(anthropic_mod, "wrap_anthropic_client", fake_wrap)
-
     adapter = anthropic_mod.AnthropicLLMAdapter(client=client)
 
-    assert seen["client"] is client
-    assert adapter._client is wrapped
+    assert adapter._client is client

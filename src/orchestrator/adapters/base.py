@@ -6,9 +6,93 @@ plugados via ``registry.py`` — sem mexer no grafo.
 """
 from __future__ import annotations
 
-from typing import Any, Optional, Protocol, runtime_checkable
+from dataclasses import dataclass
+from typing import Any, Literal, Optional, Protocol, runtime_checkable
 
 from orchestrator.graph.state import Artifact, JudgeVerdict, QCResult
+
+VoicePreset = Literal["male", "female", "neutral"]
+
+_FEMALE_HINTS = ("female", "feminina", "woman", "mulher", "girl")
+_MALE_HINTS = ("male", "masculino", "masculina", "man", "homem", "boy")
+
+
+@dataclass(frozen=True)
+class VoiceProfile:
+    """Perfil leve de voz para criação/reroll de creators."""
+
+    preset: VoicePreset = "neutral"
+    prompt: str = ""
+
+    def __post_init__(self) -> None:
+        prompt = self.prompt.strip()
+        if self.preset not in ("male", "female", "neutral"):
+            raise ValueError(f"unsupported voice preset: {self.preset}")
+        object.__setattr__(self, "prompt", prompt)
+
+    def as_dict(self) -> dict[str, str]:
+        return {"preset": self.preset, "prompt": self.prompt}
+
+
+def infer_voice_profile(text: Optional[str]) -> Optional[VoiceProfile]:
+    """Infere preset de voz a partir de um briefing humano opcional."""
+    prompt = (text or "").strip()
+    if not prompt:
+        return None
+    lowered = prompt.casefold()
+    if any(token in lowered for token in _FEMALE_HINTS):
+        preset: VoicePreset = "female"
+    elif any(token in lowered for token in _MALE_HINTS):
+        preset = "male"
+    else:
+        preset = "neutral"
+    return VoiceProfile(preset=preset, prompt=prompt)
+
+
+def resolve_voice_profile(
+    system_prompt: Optional[str],
+    voice_profile: Optional[VoiceProfile] = None,
+) -> Optional[VoiceProfile]:
+    """Override explícito vence; senão, tenta inferir do texto existente."""
+    if voice_profile is not None:
+        return voice_profile
+    return infer_voice_profile(system_prompt)
+
+
+def assign_voice_profile(
+    system_prompt: Optional[str],
+    voice_profile: Optional[VoiceProfile] = None,
+    *,
+    index: int,
+) -> VoiceProfile:
+    """Perfil de voz **concreto** (nunca ``None``) para um creator do roster.
+
+    Precedência: override explícito → gênero inferido do texto → gênero concreto
+    determinístico por índice (alterna ``female``/``male``). Isso garante paridade
+    imagem↔voz: o mesmo preset alimenta o prompt de imagem e a criação de voz, e o
+    roster ganha variedade mesmo quando o briefing não cita gênero.
+    """
+    if voice_profile is not None:
+        return voice_profile
+    inferred = infer_voice_profile(system_prompt)
+    if inferred is not None and inferred.preset != "neutral":
+        return inferred
+    prompt = inferred.prompt if inferred is not None else (system_prompt or "").strip()
+    preset: VoicePreset = "female" if index % 2 == 0 else "male"
+    return VoiceProfile(preset=preset, prompt=prompt)
+
+
+_GENDER_CLAUSE: dict[VoicePreset, str] = {
+    "female": "The creator is an adult woman.",
+    "male": "The creator is an adult man.",
+}
+
+
+def image_gender_clause(profile: Optional[VoiceProfile]) -> str:
+    """Frase brand-safe de gênero para o prompt de imagem (``""`` p/ neutral/None)."""
+    if profile is None:
+        return ""
+    return _GENDER_CLAUSE.get(profile.preset, "")
 
 
 @runtime_checkable
@@ -27,7 +111,21 @@ class LLMPort(Protocol):
 class CreatorPort(Protocol):
     """GPT Image 2 + Topaz + ElevenLabs — creator reutilizável (Step 3)."""
 
-    async def build_creator(self, index: int, system_prompt: Optional[str] = None) -> dict[str, Any]: ...
+    async def build_creator(
+        self,
+        index: int,
+        system_prompt: Optional[str] = None,
+        voice_profile: Optional[VoiceProfile] = None,
+    ) -> dict[str, Any]: ...
+
+
+@runtime_checkable
+class VoicePort(Protocol):
+    """Sub-adapter de voz do creator."""
+
+    async def create_voice(
+        self, index: int, voice_profile: Optional[VoiceProfile] = None
+    ) -> str: ...
 
 
 @runtime_checkable

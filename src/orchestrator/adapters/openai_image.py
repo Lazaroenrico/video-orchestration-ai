@@ -26,6 +26,7 @@ Quando vem ``b64_json``, a imagem é convertida num data URI
 ``generate_face`` retorna os ângulos canônicos (front, 3/4, profile, smile,
 neutral) junto com a imagem primária.
 """
+
 from __future__ import annotations
 
 import logging
@@ -34,6 +35,7 @@ from typing import Any, Optional
 
 import httpx
 
+from orchestrator.adapters.base import VoiceProfile, image_gender_clause
 from orchestrator.tracing import add_trace_metadata, traced
 
 _log = logging.getLogger(__name__)
@@ -43,11 +45,17 @@ _log = logging.getLogger(__name__)
 _VERCEL_GATEWAY_OPENAI_BASE_URL = "https://ai-gateway.vercel.sh/v1"
 _VERCEL_GATEWAY_IMAGE_MODEL = "openai/gpt-image-2"
 _SAFE_CREATOR_PROMPT = (
-    "Create a realistic image of one adult professional UGC creator for a product "
-    "marketing video. The person must wear modest everyday clothing. Show a head-and-shoulders "
-    "portrait, front view, natural smartphone-style lighting, neutral background, "
-    "friendly expression, conservative commercial profile portrait, brand-safe product "
-    "review context, clearly adult, original non-famous person."
+    "Create a realistic image of one adult professional UGC creator for a "
+    "marketing video, wearing modest everyday clothing. "
+    "Skin with natural texture, visible pores, slight redness, and small "
+    "imperfections (camera-ready)—a slightly imperfect look, no over-styling. "
+    "Framed as a head-and-shoulders portrait, front view, natural "
+    "smartphone-style lighting, neutral background, friendly expression, "
+    "conservative commercial profile portrait. "
+    "Eyes engaged with the camera, a friendly, subtle smile, and a lively, "
+    "focused expression. "
+    "Set in a brand-safe product review context, clearly adult, original "
+    "non-famous person."
 )
 
 
@@ -64,16 +72,24 @@ def _raise_for_status_verbose(resp: httpx.Response, *, label: str = "") -> None:
     raise httpx.HTTPStatusError(message, request=resp.request, response=resp)
 
 
-def _build_creator_image_prompt(index: int, system_prompt: Optional[str] = None) -> str:
+def _build_creator_image_prompt(
+    index: int,
+    system_prompt: Optional[str] = None,
+    voice_profile: Optional[VoiceProfile] = None,
+) -> str:
     creator_ref = f"creator-{index}"
+    # Token de gênero explícito (brand-safe) para casar a imagem com a voz resolvida.
+    gender_clause = image_gender_clause(voice_profile)
+    lines = [_SAFE_CREATOR_PROMPT]
+    if gender_clause:
+        lines.append(gender_clause)
+    lines.append(f"Creator reference: {creator_ref}.")
     if system_prompt:
-        return (
-            f"{_SAFE_CREATOR_PROMPT}\n"
-            f"Creator reference: {creator_ref}.\n"
+        lines.append(
             f"User appearance brief, to be interpreted only within the safe commercial "
             f"portrait constraints above: {system_prompt.strip()}"
         )
-    return f"{_SAFE_CREATOR_PROMPT}\nCreator reference: {creator_ref}."
+    return "\n".join(lines)
 
 
 class OpenAIImageAdapter:
@@ -107,9 +123,19 @@ class OpenAIImageAdapter:
         self.timeout = timeout
         self._client = client
 
-    @traced("adapter.openai_image.generate_face", run_type="tool", step=3, provider="openai")
-    async def generate_face(self, index: int, system_prompt: Optional[str] = None) -> dict[str, Any]:
+    @traced(
+        "adapter.openai_image.generate_face", run_type="tool", step=3, provider="openai"
+    )
+    async def generate_face(
+        self,
+        index: int,
+        system_prompt: Optional[str] = None,
+        voice_profile: Optional[VoiceProfile] = None,
+    ) -> dict[str, Any]:
         """Gera imagem de rosto via POST ``{base_url}/images/generations``.
+
+        ``voice_profile`` (quando concreto) injeta um token de gênero brand-safe no
+        prompt para casar a aparência com a voz resolvida do creator.
 
         Retorna ``{"primary": <url ou data URI>, "angles": [...]}``.
         """
@@ -117,7 +143,9 @@ class OpenAIImageAdapter:
             "Authorization": f"Bearer {self.token}",
             "Content-Type": "application/json",
         }
-        prompt = _build_creator_image_prompt(index, system_prompt=system_prompt)
+        prompt = _build_creator_image_prompt(
+            index, system_prompt=system_prompt, voice_profile=voice_profile
+        )
         body = {
             "model": self.model,
             "prompt": prompt,
@@ -145,7 +173,10 @@ class OpenAIImageAdapter:
             body = resp.text[:2000]
             _log.error(
                 "GPT Image 2 falhou: status=%s model=%s url=%s body=%s",
-                resp.status_code, self.model, str(resp.url), body,
+                resp.status_code,
+                self.model,
+                str(resp.url),
+                body,
             )
             add_trace_metadata(
                 image_error_status=resp.status_code,
@@ -189,9 +220,13 @@ def build_openai_image_vercel_adapter(pipeline: dict[str, Any]) -> "OpenAIImageA
         raise RuntimeError(
             "AI_GATEWAY_API_KEY ou VERCEL_OIDC_TOKEN é obrigatório para openai_image_vercel"
         )
-    base_url = os.environ.get("AI_GATEWAY_OPENAI_BASE_URL", _VERCEL_GATEWAY_OPENAI_BASE_URL)
+    base_url = os.environ.get(
+        "AI_GATEWAY_OPENAI_BASE_URL", _VERCEL_GATEWAY_OPENAI_BASE_URL
+    )
     model = os.environ.get("AI_GATEWAY_OPENAI_MODEL", _VERCEL_GATEWAY_IMAGE_MODEL)
     # GPT Image 2 pode levar 60-120 s (cold start); 180 s é mais seguro.
     # Sobrescrevível via AI_GATEWAY_IMAGE_TIMEOUT (segundos, float).
     timeout = float(os.environ.get("AI_GATEWAY_IMAGE_TIMEOUT", "180"))
-    return OpenAIImageAdapter(base_url=base_url, token=token, model=model, timeout=timeout)
+    return OpenAIImageAdapter(
+        base_url=base_url, token=token, model=model, timeout=timeout
+    )

@@ -105,9 +105,11 @@ async def test_node_roster_passes_creator_prompt(pipeline_cfg, adapter):
     received: list = []
 
     class SpyAdapter(MockAdapter):
-        async def build_creator(self, index: int, system_prompt=None):
+        async def build_creator(self, index: int, system_prompt=None, voice_profile=None):
             received.append(system_prompt)
-            return await super().build_creator(index, system_prompt=system_prompt)
+            return await super().build_creator(
+                index, system_prompt=system_prompt, voice_profile=voice_profile
+            )
 
     spy = SpyAdapter(tiers=TIERS)
 
@@ -132,7 +134,7 @@ async def test_node_roster_no_prompt_passes_none(pipeline_cfg, adapter):
     received: list = []
 
     class SpyAdapter(MockAdapter):
-        async def build_creator(self, index: int, system_prompt=None):
+        async def build_creator(self, index: int, system_prompt=None, voice_profile=None):
             received.append(system_prompt)
             return await super().build_creator(index)
 

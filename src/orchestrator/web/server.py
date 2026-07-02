@@ -35,6 +35,7 @@ from orchestrator.config import (
 from orchestrator.tracing import run_trace_config
 from orchestrator.graph.builder import build_graph
 from orchestrator.graph.checkpoint import open_checkpointer
+from orchestrator.nodes.stages import reroll_creator_voice as reroll_creator_voice_in_stage
 from orchestrator.registry import build_adapter_from_providers
 
 app = FastAPI(title="UGC Orchestrator")
@@ -183,6 +184,16 @@ def _normalize_creator(creator: dict[str, Any]) -> dict[str, Any]:
         "voice": voice_ref,
         "angles": list(creator.get("angles") or []),
     }
+
+
+def _pending_creators_for(run_id: str) -> list[dict[str, Any]]:
+    state = _runs.get(run_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail=f"run {run_id!r} not found")
+    creators = state.get("pending_creators")
+    if not isinstance(creators, list) or not creators:
+        raise HTTPException(status_code=409, detail="nenhum creator pendente para aprovação")
+    return creators
 
 
 def _pick_first_existing(directory: Path, names: tuple[str, ...]) -> Optional[Path]:
@@ -438,6 +449,7 @@ async def _execute_run(
         pipeline = load_pipeline(config_dir)
         providers = load_providers(config_dir)
         adapter = build_adapter_from_providers(providers, pipeline)
+        run_state["adapter"] = adapter
 
         cfg: dict[str, Any] = {
             "configurable": {
@@ -541,11 +553,16 @@ async def _execute_run(
                     run_state_ref = _runs.get(run_id)
                     if run_state_ref is not None:
                         run_state_ref["approval"] = fut
+                        run_state_ref["pending_creators"] = [
+                            _normalize_creator(c)
+                            for c in intr_payload.get("creators", [])
+                        ]
                     decision = await fut
                     # Persiste creators no store
                     creator_store.record_creators(
                         store_path, run_id,
-                        [_normalize_creator(c) for c in intr_payload.get("creators", [])],
+                        decision.get("creators")
+                        or [_normalize_creator(c) for c in intr_payload.get("creators", [])],
                         approved_ids=decision.get("approved", []),
                         creator_prompt=creator_prompt,
                         video_prompt=video_prompt,
@@ -607,13 +624,42 @@ class ApproveRequest(BaseModel):
     approved: list[str] = []
 
 
+@app.post("/api/approve/{run_id}/creators/{creator_id}/reroll-voice")
+async def reroll_creator_voice(run_id: str, creator_id: str) -> dict[str, Any]:
+    state = _runs.get(run_id)
+    creators = _pending_creators_for(run_id)
+    adapter = (state or {}).get("adapter")
+    if adapter is None:
+        raise HTTPException(status_code=409, detail="adapter indisponível para reroll")
+
+    for index, creator in enumerate(creators):
+        if creator.get("id") != creator_id:
+            continue
+        updated = _normalize_creator(
+            await reroll_creator_voice_in_stage(
+                adapter,
+                creator,
+                run_id=run_id,
+                media_root=default_media_path(),
+            )
+        )
+        creators[index] = updated
+        await _emit(run_id, {"type": "creator_update", "run_id": run_id, "creator": updated})
+        return {"ok": True, "creator": updated}
+
+    raise HTTPException(status_code=404, detail=f"creator {creator_id!r} not found")
+
+
 @app.post("/api/approve/{run_id}")
 async def approve(run_id: str, req: ApproveRequest) -> dict[str, Any]:
     st = _runs.get(run_id)
     fut = (st or {}).get("approval")
     if not fut or fut.done():
         raise HTTPException(409, "nenhuma aprovação pendente")
-    fut.set_result({"approved": req.approved})
+    fut.set_result({
+        "approved": req.approved,
+        "creators": list((st or {}).get("pending_creators") or []),
+    })
     return {"ok": True}
 
 

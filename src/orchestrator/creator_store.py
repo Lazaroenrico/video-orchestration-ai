@@ -73,6 +73,7 @@ def _normalize_creator_fields(creator: dict[str, Any]) -> dict[str, Any]:
         "image": image_uri,
         "voice": voice_ref,
         "angles": list(creator.get("angles") or []),
+        "voice_reroll_count": creator.get("voice_reroll_count"),
     }
 
 
