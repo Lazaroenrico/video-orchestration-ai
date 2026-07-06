@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mapa rapido: UGC Orchestrator</title>
+  <style>
+    :root {
+      --ink: #1d1b16;
+      --muted: #6b6255;
+      --paper: #fbfaf6;
+      --line: #d8d0c2;
+      --accent: #0b6b5d;
+      --warn: #9b4c1d;
+      --code: #f0ece3;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--paper);
+      color: var(--ink);
+      font-family: Georgia, "Times New Roman", serif;
+      line-height: 1.48;
+    }
+    main {
+      width: min(980px, calc(100% - 32px));
+      margin: 32px auto 48px;
+    }
+    h1, h2 { line-height: 1.08; margin: 0; }
+    h1 { font-size: clamp(32px, 5vw, 54px); letter-spacing: 0; }
+    h2 { font-size: 20px; margin-top: 28px; padding-top: 18px; border-top: 1px solid var(--line); }
+    p { margin: 10px 0; }
+    a { color: var(--accent); }
+    .deck {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      gap: 12px;
+      margin-top: 20px;
+    }
+    .card {
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 14px;
+      background: rgba(255,255,255,.45);
+      min-height: 150px;
+    }
+    .card strong { display: block; font-size: 15px; margin-bottom: 8px; }
+    code {
+      font-family: "SFMono-Regular", Consolas, monospace;
+      background: var(--code);
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      padding: 1px 4px;
+      font-size: .92em;
+    }
+    ul { margin: 8px 0 0 20px; padding: 0; }
+    li { margin: 5px 0; }
+    .flow {
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      gap: 8px;
+      margin: 16px 0;
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 12px;
+    }
+    .step {
+      border: 1px solid var(--line);
+      border-left: 4px solid var(--accent);
+      border-radius: 4px;
+      padding: 9px;
+      background: white;
+      min-height: 58px;
+    }
+    .note {
+      border-left: 4px solid var(--warn);
+      padding: 8px 12px;
+      background: #fff3e8;
+      color: #4a2a17;
+    }
+    @media (max-width: 760px) {
+      .flow { grid-template-columns: 1fr; }
+    }
+    @media print {
+      body { background: white; }
+      main { width: auto; margin: 0; }
+      .card, .step { break-inside: avoid; }
+    }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Mapa rapido do UGC Orchestrator</h1>
+  <p>Referencia curta para revisar o motor atual: grafo, adapters, imagem, voz, video e padroes de engenharia.</p>
+
+  <h2>Fluxo em uma linha</h2>
+  <div class="flow">
+    <div class="step">1. roster<br>gera creators</div>
+    <div class="step">2. approval<br>humano escolhe</div>
+    <div class="step">3. concepts<br>LLM gera ideias</div>
+    <div class="step">4. fan-out<br>um item por conceito</div>
+    <div class="step">5. item graph<br>script, video, QC</div>
+    <div class="step">6. assembly<br>mock hoje</div>
+    <div class="step">7. feedback<br>hooks vencedores</div>
+  </div>
+
+  <h2>Perfil atual</h2>
+  <div class="deck">
+    <div class="card">
+      <strong>LLM</strong>
+      <code>vercel_gateway_llm</code>: conceitos e scripts via Vercel AI Gateway.
+    </div>
+    <div class="card">
+      <strong>Creator</strong>
+      <code>creator_real_replicate</code>: GPT Image 2 via gateway, upscale Replicate, ElevenLabs via Replicate.
+    </div>
+    <div class="card">
+      <strong>Video</strong>
+      <code>replicate</code>: LTX 2.3 Fast sem audio, image-to-video quando ha imagem do creator.
+    </div>
+    <div class="card">
+      <strong>Mock ainda ativo</strong>
+      QC e assembly continuam mock para manter v1 operavel.
+    </div>
+  </div>
+
+  <h2>Como nasce a imagem</h2>
+  <ul>
+    <li><code>assign_voice_profile</code> resolve o perfil do creator antes da imagem.</li>
+    <li><code>openai_image.py</code> monta um prompt seguro de retrato comercial.</li>
+    <li>O genero do <code>VoiceProfile</code> injeta uma clausula brand-safe: adulto homem ou adulta mulher.</li>
+    <li>GPT Image 2 retorna URL ou <code>b64_json</code>; o adapter normaliza para URI.</li>
+    <li>O upscale roda no Replicate Real-ESRGAN e a midia e persistida localmente.</li>
+  </ul>
+
+  <h2>Como nasce a voz</h2>
+  <ul>
+    <li><code>ReplicateVoiceAdapter</code> chama ElevenLabs hospedado no Replicate.</li>
+    <li>O texto do TTS usa <code>creator voice {index}</code> mais preset e briefing humano.</li>
+    <li>Os campos do modelo sao configuraveis por env: texto, voz, model id e JSON base.</li>
+    <li>Vozes podem ser pools CSV por genero; o indice escolhe de forma deterministica.</li>
+    <li>Reroll avanca no pool do mesmo genero, preservando a imagem.</li>
+  </ul>
+
+  <h2>Padroes que governam tudo</h2>
+  <ul>
+    <li><strong>Ports/Protocols:</strong> cada provider implementa contratos em <code>adapters/base.py</code>.</li>
+    <li><strong>CompositeAdapter:</strong> o grafo fala com um objeto, mas cada papel roteia para um adapter.</li>
+    <li><strong>Config-driven:</strong> YAML troca providers sem alterar a topologia.</li>
+    <li><strong>Determinismo:</strong> mock sem <code>random</code>, ids por hash e testes offline.</li>
+    <li><strong>Human-in-the-loop:</strong> approval pausa o grafo e retoma via <code>Command(resume=...)</code>.</li>
+    <li><strong>Rate-limit consciente:</strong> retry trata 429 e throttle global espaça chamadas Replicate.</li>
+  </ul>
+
+  <p class="note">Regra pratica: se voce esta mudando provider, mexa em adapter/registry/config. Se esta mudando fluxo, mexa no grafo/nodes. Se esta mudando operacao da UI, mexa no server web e no contrato SSE.</p>
+
+  <p>Fonte principal: <a href="../docs/PROGRESS.md">docs/PROGRESS.md</a>, <a href="../docs/DECISIONS.md">docs/DECISIONS.md</a> e os arquivos de codigo citados acima.</p>
+</main>
+</body>
+</html>

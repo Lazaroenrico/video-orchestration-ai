@@ -191,7 +191,7 @@ async def test_resume_partial_batch(tmp_path):
 
     # 4b. Todos os itens têm estado terminal
     for item in results_final:
-        assert item.distributed or item.dropped, (
+        assert item.assembled is not None or item.dropped, (
             f"Item {getattr(item, 'id', '?')} não tem estado terminal após resume."
         )
 

@@ -25,10 +25,13 @@ from langgraph.types import Command
 
 from orchestrator import runner, stream_bus
 import orchestrator.creator_store as creator_store
+import orchestrator.prompt_store as prompt_store
 from orchestrator.config import (
     default_creator_store_path,
     default_db_path,
     default_media_path,
+    default_prompt_store_path,
+    default_videos_path,
     load_pipeline,
     load_providers,
 )
@@ -46,18 +49,22 @@ _media_root = default_media_path()
 _media_root.mkdir(parents=True, exist_ok=True)
 app.mount("/media", StaticFiles(directory=str(_media_root)), name="media")
 
+_videos_root = default_videos_path()
+_videos_root.mkdir(parents=True, exist_ok=True)
+app.mount("/videos", StaticFiles(directory=str(_videos_root)), name="videos")
+
 # run_id → {queues: list[Queue], buffer: list[dict], done: bool}
 _runs: dict[str, dict[str, Any]] = {}
 
 PIPELINE_NODES = {
     "roster", "approval", "concepts", "process_item", "feedback",
     "script", "ltx", "kling", "seedance",
-    "product_demo", "qc", "assembly", "distribution", "drop",
+    "product_demo", "qc", "assembly", "drop",
 }
 
 ITEM_UPDATE_NODES = {
     "script", "ltx", "kling", "seedance",
-    "product_demo", "qc", "assembly", "distribution", "drop",
+    "product_demo", "qc", "assembly", "drop",
     "process_item",
 }
 
@@ -74,7 +81,6 @@ NODE_LABELS: dict[str, str] = {
     "product_demo": "Product Demo",
     "qc": "QC",
     "assembly": "Montagem",
-    "distribution": "Distribuição",
     "drop": "Descartado",
 }
 
@@ -186,6 +192,42 @@ def _normalize_creator(creator: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _playable_voice_uri(creator: dict[str, Any]) -> Optional[str]:
+    """URI de voz que o browser consegue tocar (path local /media, http(s) ou data:audio).
+
+    Refs opacas (``voice_id`` do ElevenLabs, ``voice-0`` do mock) não tocam na web.
+    """
+    for key in ("voice_preview_uri", "voice_preview", "preview_uri", "voice_ref", "voice", "voice_id"):
+        uri = creator.get(key)
+        if (
+            isinstance(uri, str)
+            and uri
+            and _is_renderable_uri(uri)
+            and _media_type_for_uri(uri) == "audio"
+        ):
+            return uri
+    return None
+
+
+def _has_complete_media(creator: dict[str, Any]) -> bool:
+    """True só para uma pessoa completa: imagem renderizável + voz tocável.
+
+    Entradas que só têm prompt/metadata (a "inspiração") ficam fora da galeria.
+    """
+    image = (
+        creator.get("image_uri")
+        or creator.get("image")
+        or creator.get("upscaled_base")
+    )
+    has_image = (
+        isinstance(image, str)
+        and bool(image)
+        and _is_renderable_uri(image)
+        and _media_type_for_uri(image) == "image"
+    )
+    return has_image and _playable_voice_uri(creator) is not None
+
+
 def _pending_creators_for(run_id: str) -> list[dict[str, Any]]:
     state = _runs.get(run_id)
     if state is None:
@@ -221,16 +263,11 @@ def _recover_creators_from_media(media_root: Path) -> list[dict[str, Any]]:
         for creator_dir in sorted(creator_dirs):
             image_path = _pick_first_existing(creator_dir, image_names)
             voice_path = _pick_first_existing(creator_dir, voice_names)
-            if image_path is None and voice_path is None:
+            # Só pessoas completas entram na galeria: imagem E voz em disco.
+            if image_path is None or voice_path is None:
                 continue
-            image_uri = (
-                f"/media/{run_dir.name}/{creator_dir.name}/{image_path.name}"
-                if image_path else None
-            )
-            voice_uri = (
-                f"/media/{run_dir.name}/{creator_dir.name}/{voice_path.name}"
-                if voice_path else None
-            )
+            image_uri = f"/media/{run_dir.name}/{creator_dir.name}/{image_path.name}"
+            voice_uri = f"/media/{run_dir.name}/{creator_dir.name}/{voice_path.name}"
             recovered.append({
                 "run_id": run_dir.name,
                 "creator_id": creator_dir.name,
@@ -288,7 +325,7 @@ def _snapshot_from_item(item: Any) -> dict[str, Any]:
     snap: dict[str, Any] = {}
     for key in (
         "id", "creator_ref", "concept", "script", "tier",
-        "attempts", "cost_usd", "distributed", "dropped",
+        "attempts", "cost_usd", "dropped",
     ):
         if key in item:
             snap[key] = _safe_serialize(item[key])
@@ -351,7 +388,6 @@ def _complete_item_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
         "qc": snapshot.get("qc"),
         "artifacts": snapshot.get("artifacts") or [],
         "assembled": snapshot.get("assembled"),
-        "distributed": snapshot.get("distributed", False),
         "dropped": snapshot.get("dropped", False),
     }
 
@@ -422,6 +458,7 @@ async def _execute_run(
     db_path: str,
     creator_prompt: Optional[str] = None,
     video_prompt: Optional[str] = None,
+    approve_creators: bool = True,
 ) -> None:
     """Roda a pipeline completa, emitindo eventos para os subscribers SSE.
 
@@ -459,7 +496,10 @@ async def _execute_run(
                     "platform": platform,
                     "creator_prompt": creator_prompt,
                     "video_prompt": video_prompt,
-                    "approve_creators": True,
+                    # Default: pausa no gate humano para o usuário escolher quais
+                    # creators (imagem + voz) estrelam os vídeos; opt-out via
+                    # approve_creators=False no POST /api/run.
+                    "approve_creators": approve_creators,
                 },
                 "thread_id": run_id,
             },
@@ -511,7 +551,6 @@ async def _execute_run(
                                     payload["item"] = _safe_serialize({
                                         "id": item.get("id"),
                                         "concept": item.get("concept", {}),
-                                        "distributed": item.get("distributed"),
                                         "dropped": item.get("dropped"),
                                         "attempts": item.get("attempts"),
                                         "cost_usd": item.get("cost_usd"),
@@ -599,6 +638,7 @@ class RunRequest(BaseModel):
     db: Optional[str] = None
     creator_prompt: Optional[str] = None
     video_prompt: Optional[str] = None
+    approve_creators: bool = True
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -612,10 +652,17 @@ async def start_run(req: RunRequest, background_tasks: BackgroundTasks) -> dict[
     run_id = f"web-{uuid.uuid4().hex[:8]}"
     _runs[run_id] = {"queues": [], "buffer": [], "done": False}
     db_path = req.db or str(default_db_path())
+    # Todo run registra o "último prompt usado" por tipo — independente do gate de
+    # aprovação (creators.json só persiste prompts quando o gate roda).
+    prompt_store.record_last_used(
+        default_prompt_store_path(),
+        creator_prompt=req.creator_prompt,
+        video_prompt=req.video_prompt,
+    )
     background_tasks.add_task(
         _execute_run,
         run_id, req.offer, req.batch, req.platform, req.config_dir, db_path,
-        req.creator_prompt, req.video_prompt,
+        req.creator_prompt, req.video_prompt, req.approve_creators,
     )
     return {"run_id": run_id}
 
@@ -663,10 +710,51 @@ async def approve(run_id: str, req: ApproveRequest) -> dict[str, Any]:
     return {"ok": True}
 
 
+class PromptTemplateRequest(BaseModel):
+    kind: str
+    title: str
+    text: str
+    desc: str = ""
+
+
+@app.get("/api/prompts")
+async def prompts_index() -> dict[str, Any]:
+    """Templates salvos + último prompt usado por tipo (fonte: prompts.json)."""
+    store_path = default_prompt_store_path()
+    return {
+        "templates": prompt_store.list_templates(store_path),
+        "last_used": prompt_store.get_last_used(store_path),
+        "store_path": str(store_path),
+        "exists": store_path.exists(),
+    }
+
+
+@app.post("/api/prompts")
+async def save_prompt_template(req: PromptTemplateRequest) -> dict[str, Any]:
+    try:
+        saved = prompt_store.save_template(
+            default_prompt_store_path(),
+            kind=req.kind, title=req.title, text=req.text, desc=req.desc,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    return {"ok": True, "template": saved}
+
+
+@app.delete("/api/prompts/{template_id}")
+async def delete_prompt_template(template_id: str) -> dict[str, Any]:
+    if not prompt_store.delete_template(default_prompt_store_path(), template_id):
+        raise HTTPException(status_code=404, detail=f"template {template_id!r} not found")
+    return {"ok": True}
+
+
 @app.get("/api/creators")
 async def creators_history() -> dict[str, Any]:
     store_path = default_creator_store_path()
-    creators = creator_store.load_creators(str(store_path))
+    creators = [
+        c for c in creator_store.load_creators(str(store_path))
+        if _has_complete_media(c)
+    ]
     if not creators:
         creators = _recover_creators_from_media(default_media_path())
     return {

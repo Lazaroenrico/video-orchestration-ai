@@ -2,9 +2,9 @@
 
 Guia para rodar e **ver** a pipeline de AI UGC em modo **mock/dry-run** usando
 `--config-dir config-mock` (sem rede, custo zero, determinístico). É a prova de
-conceito do motor: os 10 passos do `Context.md` rodam como nodes do LangGraph e
+conceito do motor: a pipeline atual roda como nodes do LangGraph e
 produzem um batch de vídeos fictícios/renderizáveis com custo por tier, QC,
-montagem, distribuição e loop de feedback.
+montagem e loop de feedback.
 
 > Nada aqui chama API externa. As mídias mock usam `data:` renderizável quando possível,
 > e os custos são calculados a partir das tabelas de tier do `config-mock/pipeline.yaml`.
@@ -53,8 +53,8 @@ run demo-run
 | Campo          | Significado |
 |----------------|-------------|
 | `produzidos`   | itens que entraram no batch (= `--batch`) |
-| `aprovados`    | passaram no QC e foram **distribuídos** (Step 9) |
-| `descartados`  | esgotaram as tentativas de QC e nunca foram publicados (Step 7) |
+| `aprovados`    | passaram no QC e geraram vídeo final em `assembly` |
+| `descartados`  | esgotaram as tentativas de QC e nunca chegaram ao vídeo final |
 | `em andamento` | não terminados (>0 só num run interrompido, antes de `resume`) |
 | `tentativas`   | total de regenerações de QC somadas no batch (Step 7 loop) |
 | `custo mock`   | custo total + quebra por tier (`cost_by_tier`) — Step 4 / "The Cost at Scale" |
@@ -64,11 +64,11 @@ O custo por tier reflete o **roteamento LTX-only atual**: a 1ª tentativa e as r
 de QC rodam no LTX barato ($0.01/s). Tiers premium seguem modelados no config para uso
 futuro/explicito, mas o loop automático não sobe para Kling ou Seedance.
 
-### Mapa dos 10 passos → nodes
+### Mapa dos 9 passos → nodes
 
 `concepts` (1) → `script` (2) → `roster`/creator (3) → talking-head `gen_<tier>` (4) →
 `product_demo` (5) → fan-out paralelo via `Send` (6) → `qc` (7) → `assembly` (8) →
-`distribution` (9) → `feedback` (10). Tudo em `src/orchestrator/nodes/stages.py`.
+`feedback` (9). Tudo em `src/orchestrator/nodes/stages.py`.
 
 ## 3. Inspecionar, listar e retomar
 
@@ -156,8 +156,8 @@ O foco do v1 é o **motor**; a saída hoje é **agregada**. Ao testar, tenha em 
 - O relatório **não lista o conteúdo por item** — os conceitos, scripts e URIs de clip
   por tier existem no estado (`Item.concept/script/clips/assembled`), mas não são
   expostos na CLI. Um relatório detalhado/export JSON seria o próximo incremento natural.
-- `node_distribution` (Step 9) calcula um agendamento (conta + horário) no mock, mas só
-  guarda `distributed: True` no estado — a agenda em si não é exibida.
+- Não há etapa de distribuição/postagem no motor atual; o item aprovado termina em
+  `node_assembly`, com `assembled` preenchido.
 
 Esses pontos são candidatos a um próximo passo, fora do escopo desta prova de conceito.
 Ver `docs/PROGRESS.md` (próximos passos do v2) e `docs/DECISIONS.md`.

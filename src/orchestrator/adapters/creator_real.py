@@ -24,6 +24,7 @@ from typing import Any, Optional
 import httpx
 import replicate
 
+from orchestrator.adapters._throttle import get_replicate_throttle
 from orchestrator.adapters.base import VoicePort, VoiceProfile, resolve_voice_profile
 from orchestrator.adapters.elevenlabs_voice import ElevenLabsVoiceAdapter
 from orchestrator.adapters.openai_image import OpenAIImageAdapter, build_openai_image_vercel_adapter
@@ -80,6 +81,14 @@ class RealCreatorAdapter:
         face = await self.image.generate_face(
             index, system_prompt=system_prompt, voice_profile=resolved_voice
         )
+        if "primary" not in face:
+            raise RuntimeError(
+                f"Image adapter response is missing 'primary'. Keys present: {sorted(face)}"
+            )
+        if "angles" not in face:
+            raise RuntimeError(
+                f"Image adapter response is missing 'angles'. Keys present: {sorted(face)}"
+            )
         primary = face["primary"]
 
         try:
@@ -103,6 +112,35 @@ class RealCreatorAdapter:
         if resolved_voice is not None:
             creator["voice_profile"] = resolved_voice.as_dict()
         return creator
+
+    @traced("adapter.creator_real.reroll_voice", run_type="chain", step=3, provider="creator_real")
+    async def reroll_creator_voice(
+        self,
+        *,
+        creator_id: Any,
+        index: int,
+        reroll_count: int,
+        creator: dict[str, Any],
+        voice_profile: Optional[VoiceProfile] = None,
+    ) -> dict[str, Any]:
+        """Gera uma voz NOVA para o creator, preservando a imagem e o gênero.
+
+        O índice efetivo é ``index + reroll_count``: no pool de vozes do
+        ``ReplicateVoiceAdapter`` (seleção por ``index % len(pool)``) isso avança
+        para a próxima voz do gênero a cada reroll, sem repetir enquanto o pool
+        comportar. ``voice_source_uri``/``voice_preview_uri`` são zerados para o
+        caller re-persistir o áudio novo.
+        """
+        voice_id = await self.voice.create_voice(
+            index + reroll_count, voice_profile=voice_profile
+        )
+        return {
+            "voice_id": voice_id,
+            "voice_ref": voice_id,
+            "voice": voice_id,
+            "voice_source_uri": None,
+            "voice_preview_uri": None,
+        }
 
 
 def build_real_creator_adapter(pipeline: dict[str, Any]) -> RealCreatorAdapter:
@@ -147,8 +185,11 @@ def build_real_creator_replicate_adapter(pipeline: dict[str, Any]) -> RealCreato
         api_token=os.environ.get("REPLICATE_API_TOKEN"),
         timeout=httpx.Timeout(600.0, connect=15.0),
     )
+    # Throttle global: upscale e voz dividem o orçamento de rate limit da conta
+    # com o adapter de vídeo (contas com crédito baixo têm burst 1).
+    throttle = get_replicate_throttle()
     return RealCreatorAdapter(
         image=build_openai_image_vercel_adapter(pipeline),
-        topaz=ReplicateUpscaleAdapter(runner=rep_client.async_run),
-        voice=ReplicateVoiceAdapter(runner=rep_client.async_run),
+        topaz=ReplicateUpscaleAdapter(runner=rep_client.async_run, throttle=throttle),
+        voice=ReplicateVoiceAdapter(runner=rep_client.async_run, throttle=throttle),
     )

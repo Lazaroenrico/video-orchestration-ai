@@ -22,7 +22,6 @@ def test_new_item_defaults():
     assert item.script is None
     assert item.qc is None
     assert item.assembled is None
-    assert item.distributed is False
     assert item.dropped is False
     assert item.cost_usd == 0.0
     # id é estável/único e não vazio

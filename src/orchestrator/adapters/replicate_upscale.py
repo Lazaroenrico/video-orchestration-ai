@@ -19,6 +19,7 @@ from typing import Any, Awaitable, Callable, Optional
 import replicate
 
 from orchestrator.adapters._retry import with_transport_retry
+from orchestrator.adapters._throttle import AsyncThrottle
 from orchestrator.tracing import traced
 
 _DEFAULT_MODEL = (
@@ -51,10 +52,12 @@ class ReplicateUpscaleAdapter:
         runner: Optional[Runner] = None,
         max_retries: int = 3,
         backoff_base: float = 1.0,
+        throttle: Optional[AsyncThrottle] = None,
     ) -> None:
         self.model = model
         self.scale = scale
         self._runner: Runner = runner or replicate.async_run
+        self._throttle = throttle
         self.max_retries = max_retries
         self.backoff_base = backoff_base
 
@@ -66,9 +69,24 @@ class ReplicateUpscaleAdapter:
         lógica propagam na hora.
         """
         output = await with_transport_retry(
-            lambda: self._runner(self.model, input={"image": image_url, "scale": self.scale}),
+            lambda: self._throttled_run(
+                self.model, input={"image": image_url, "scale": self.scale}
+            ),
             max_retries=self.max_retries,
             backoff_base=self.backoff_base,
             label="replicate.upscale",
         )
-        return str(output)
+        # Output nulo/vazio não pode virar a string "None" como URL (falha
+        # silenciosa que só estoura no consumo da imagem) — é erro aqui.
+        if output is None:
+            raise RuntimeError("Replicate upscale output is empty")
+        uri = str(output).strip()
+        if not uri:
+            raise RuntimeError("Replicate upscale output is empty")
+        return uri
+
+    async def _throttled_run(self, ref: str, **kwargs: Any) -> Any:
+        """Passa cada tentativa pelo throttle global (quando configurado)."""
+        if self._throttle is None:
+            return await self._runner(ref, **kwargs)
+        return await self._throttle.run(lambda: self._runner(ref, **kwargs))

@@ -122,6 +122,31 @@ async def test_create_voice_uses_configurable_input_fields(monkeypatch):
     assert body["output_format"] == "mp3_44100_128"
 
 
+async def test_turbo_v25_sends_script_under_prompt(monkeypatch):
+    """Regressão do 422 `input: prompt is required`: com TEXT_FIELD=prompt o script vai
+    sob `prompt` e nunca sob `text` (o campo que causava a falha no turbo-v2.5)."""
+    monkeypatch.setenv("REPLICATE_ELEVENLABS_TEXT_FIELD", "prompt")
+    adapter, captured = _make_adapter()
+    await adapter.create_voice(3)
+    body = captured[0]["input"]
+    assert "prompt" in body
+    assert "3" in body["prompt"]
+    assert "text" not in body
+
+
+async def test_voice_pool_no_repeat_across_creators(monkeypatch):
+    """Pool de vozes por gênero: creators do mesmo preset recebem vozes distintas."""
+    monkeypatch.setenv("REPLICATE_ELEVENLABS_VOICE_FIELD", "voice")
+    monkeypatch.setenv("REPLICATE_ELEVENLABS_VOICE_ID_FEMALE", "v1,v2,v3")
+    adapter, captured = _make_adapter()
+    profile = VoiceProfile(preset="female", prompt="Warm UGC narration.")
+    for i in range(3):
+        await adapter.create_voice(i, voice_profile=profile)
+    voices = [c["input"]["voice"] for c in captured]
+    assert voices == ["v1", "v2", "v3"]
+    assert len(set(voices)) == 3
+
+
 async def test_different_indices_produce_different_prompts():
     adapter, captured = _make_adapter()
     await adapter.create_voice(0)
@@ -178,3 +203,23 @@ async def test_create_voice_raises_after_exhausting_retries():
     with pytest.raises(httpx.ConnectTimeout):
         await adapter.create_voice(0)
     assert calls == 3
+
+
+async def test_create_voice_raises_on_none_output():
+    """Output nulo do SDK não pode virar voice_id "None" — tem que ser erro."""
+    adapter, _ = _make_adapter(output=None)
+    with pytest.raises(RuntimeError, match="output.*empty"):
+        await adapter.create_voice(0)
+
+
+async def test_create_voice_raises_on_empty_string_output():
+    adapter, _ = _make_adapter(output="   ")
+    with pytest.raises(RuntimeError, match="output.*empty"):
+        await adapter.create_voice(0)
+
+
+async def test_create_voice_raises_on_empty_dict_output():
+    """Dict vazio não pode virar StopIteration nem voice_id lixo."""
+    adapter, _ = _make_adapter(output={})
+    with pytest.raises(RuntimeError, match="output.*empty"):
+        await adapter.create_voice(0)

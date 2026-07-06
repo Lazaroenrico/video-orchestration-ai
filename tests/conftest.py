@@ -1,4 +1,6 @@
 """Fixtures compartilhadas dos testes."""
+import os
+
 import pytest
 
 from orchestrator.adapters.mock import MockAdapter
@@ -6,7 +8,7 @@ from orchestrator.adapters.mock import MockAdapter
 # providers.yaml pode ter adapters reais (MVP). Garantir que todos os testes
 # usem mock — testes que precisam de adapters reais optam via --live.
 _MOCK_PROVIDERS = {
-    "adapters": {r: "mock" for r in ("llm", "creator", "video", "qc", "assembly", "distribution")},
+    "adapters": {r: "mock" for r in ("llm", "creator", "video", "qc", "assembly")},
 }
 
 
@@ -17,6 +19,14 @@ def _force_mock_providers(monkeypatch):
     # Testes são offline por padrão; casos que exercitam tracing live optam
     # explicitamente via monkeypatch dentro do próprio teste.
     monkeypatch.setenv("LANGSMITH_TRACING", "false")
+    # Hermeticidade: o `.env` real do dev pode vazar para o processo de teste porque a
+    # CLI chama `load_dotenv(".env", override=False)` — qualquer teste que invoca a CLI
+    # injeta essas vars em os.environ pelo resto da sessão. Limpamos a família de config
+    # do ElevenLabs-no-Replicate antes de cada teste para que os testes que exercitam os
+    # *defaults* (campo `text`/`voice_id`) não dependam do `.env` local. Testes que
+    # precisam dessas vars as setam explicitamente via monkeypatch.
+    for key in [k for k in os.environ if k.startswith("REPLICATE_ELEVENLABS_")]:
+        monkeypatch.delenv(key, raising=False)
 
 
 def pytest_addoption(parser):

@@ -269,7 +269,7 @@
   .item-card .item-assets a:hover { border-color: var(--primary); }
 
   .item-card.running     { border-color: var(--primary); }
-  .item-card.distributed { border-color: var(--success); }
+  .item-card.assembled { border-color: var(--success); }
   .item-card.dropped     { border-color: var(--error); opacity: .6; }
   .item-card { cursor: pointer; }
   .item-card:hover { border-color: var(--primary); }
@@ -612,6 +612,29 @@
     transition: all 0.2s;
   }
   #btn-build-prompts:hover { border-color: var(--primary); background: linear-gradient(135deg, #2d3748, #1a202c); box-shadow: 0 4px 12px rgba(88,166,255,0.1); }
+
+  /* ── Fluxo do form: seções numeradas + status dos prompts ativos ── */
+  .cfg-step {
+    font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .08em;
+    color: var(--muted); padding: 12px 14px 2px; display: flex; align-items: center; gap: 8px;
+  }
+  .cfg-step::after { content: ""; flex: 1; border-top: 1px solid var(--border); }
+  #prompt-status { padding: 4px 14px 10px; display: flex; flex-direction: column; gap: 6px; }
+  .prompt-chip {
+    display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--muted);
+    background: var(--bg); border: 1px dashed var(--border); border-radius: 6px;
+    padding: 5px 8px; cursor: pointer; min-width: 0; transition: border-color .2s;
+  }
+  .prompt-chip:hover { border-color: var(--primary); }
+  .prompt-chip .chip-label { flex-shrink: 0; }
+  .prompt-chip .chip-text { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; }
+  .prompt-chip.active { border-style: solid; border-color: rgba(88,166,255,.45); color: var(--text); }
+  .prompt-chip.active .chip-label { color: var(--primary); }
+  .hist-reuse {
+    margin-top: 6px; width: 100%; background: transparent; border: 1px solid var(--border);
+    border-radius: 6px; color: var(--primary); padding: 4px 8px; cursor: pointer; font-size: 11px;
+  }
+  .hist-reuse:hover { border-color: var(--primary); background: rgba(88,166,255,.08); }
 </style>
 </head>
 <body>
@@ -655,7 +678,8 @@
 
   <!-- Controls -->
   <div class="panel" id="controls">
-    <div class="panel-title">Configuração</div>
+    <div class="panel-title">Novo Run</div>
+    <div class="cfg-step">1 · Produto</div>
     <div class="form-group">
       <label>Oferta / Produto</label>
       <input id="inp-offer" type="text" value="Serum anti-aging X" placeholder="ex: serum anti-aging">
@@ -672,7 +696,24 @@
         <option value="youtube">YouTube Shorts</option>
       </select>
     </div>
-    <button id="btn-build-prompts" onclick="openPromptBuilder()">✨ Construir Prompts</button>
+    <div class="cfg-step">2 · Prompts</div>
+    <button id="btn-build-prompts" onclick="openPromptBuilder()">✨ Editar Prompts</button>
+    <!-- O que será enviado com o run — clique para editar no builder. -->
+    <div id="prompt-status">
+      <div class="prompt-chip" id="chip-creator" onclick="openPromptBuilder()" title="clique para editar">
+        <span class="chip-label">👤 Creator</span><span class="chip-text">não definido</span>
+      </div>
+      <div class="prompt-chip" id="chip-video" onclick="openPromptBuilder()" title="clique para editar">
+        <span class="chip-label">🎬 Vídeo</span><span class="chip-text">não definido</span>
+      </div>
+    </div>
+    <div class="cfg-step">3 · Executar</div>
+    <div class="form-group">
+      <label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
+        <input id="inp-approve-creators" type="checkbox" checked style="width:auto;margin:0;">
+        <span>Escolher creators antes de gerar os vídeos</span>
+      </label>
+    </div>
     <button id="btn-start" onclick="startRun()">▶ Iniciar Pipeline</button>
 
     <!-- Painel de aceite humano (aparece ao receber awaiting_approval) -->
@@ -730,7 +771,6 @@ const STEPS = [
   { id:"process_item", num:6,  icon:"⚡", label:"Exec. Paralela" },
   { id:"qc",           num:7,  icon:"✅", label:"QC"             },
   { id:"assembly",     num:8,  icon:"🎞️", label:"Montagem"       },
-  { id:"distribution", num:9,  icon:"📲", label:"Distribuição"   },
   { id:"feedback",     num:10, icon:"📊", label:"Feedback"       },
 ];
 
@@ -817,7 +857,7 @@ function updateGlobalProgress() {
   const bar = document.getElementById("batch-progress-bar");
   if (!label || !bar) return;
   const items = Object.values(itemsMap);
-  const completed = items.filter(i => i.distributed || i.dropped).length;
+  const completed = items.filter(i => i.assembled || i.dropped).length;
   const total = batchSize || items.length;
   label.textContent = `${completed} / ${total}`;
   const pct = total ? Math.min(100, Math.round((completed / total) * 100)) : 0;
@@ -1165,10 +1205,10 @@ function renderItem(item) {
     document.getElementById("items-grid").appendChild(card);
     updateItemsCount();
   }
-  const status = item.distributed ? "✓ aprovado"
+  const status = item.assembled ? "✓ montado"
                : item.dropped     ? "✗ descartado"
                : `tentativa ${item.attempts ?? 0}`;
-  const cls = item.distributed ? "distributed"
+  const cls = item.assembled ? "assembled"
             : item.dropped     ? "dropped"
             : "running";
   card.className = `item-card ${cls}`;
@@ -1223,11 +1263,11 @@ function renderItem(item) {
     appendSection(timeline, "QC", qcText);
   }
 
-  if (item.assembled || item.distributed || item.dropped || (item.artifacts || []).some(a => a.media_type === "video")) {
+  if (item.assembled || item.dropped || (item.artifacts || []).some(a => a.media_type === "video")) {
     const finalWrap = el("div");
     finalWrap.appendChild(buildFinalMedia(item, creator));
     const captionParts = [];
-    if (item.distributed) captionParts.push("Distribuição agendada.");
+    if (item.assembled) captionParts.push("Vídeo final montado.");
     if (item.dropped) captionParts.push("Item descartado.");
     if (captionParts.length) finalWrap.appendChild(el("div", "item-text", captionParts.join(" ")));
     appendSection(timeline, "Final", finalWrap);
@@ -1458,14 +1498,63 @@ let eventSource = null;
 let currentRunId = null;
 let pendingApprovalCreators = [];
 
+// ── Prompts: templates persistidos no SERVIDOR (/api/prompts → .orchestrator/
+// prompts.json) + rascunho local nas textareas. O clique num template aplica o
+// texto via listener DOM — a injeção antiga em onclick inline quebrava com
+// aspas duplas no prompt (o template "salvo" não aplicava nada).
+const PROMPT_TYPES = ["creator", "video"];
+const DRAFT_KEYS = { creator: "draft_creator_prompt", video: "draft_video_prompt" };
+let lastUsedPrompts = {};
+
+const BUILTIN_TEMPLATES = {
+  creator: {
+    heading: "Templates Rápidos (UGC Realista)",
+    items: [
+      { icon: "👩", title: "Autêntica & Casual",
+        desc: 'Foco na "textura real" e conexão no olhar, quebrando o aspecto de IA.',
+        text: "Influencer feminina, 25 anos. Pele com textura natural, poros visíveis, leves vermelhidões e pequenas imperfeições (câmera de celular). Olhos engajados com a câmera, leve sorriso amigável, expressão viva e focada. Look levemente imperfeito, sem superprodução." },
+      { icon: "🏃", title: "Review Honesto / Vlog",
+        desc: 'Evita "olhar morto" e prioriza micro-expressões naturais.',
+        text: "Homem jovem, 30 anos. Textura de pele realista, poros aparentes e linhas finas de expressão. Olhar intenso e conectado com a lente, transmitindo empolgação real. Movimentos corporais simples e naturais." },
+      { icon: "👩‍⚕️", title: "Especialista Real",
+        desc: 'Transmite autoridade sem o "polimento excessivo" (anti-polish).',
+        text: "Médica dermatologista, 40 anos, jaleco branco. Pele natural de celular (poros e textura reais). Olhar profundo e didático, sorriso focado, olhos transmitindo presença. Câmera casual, iluminação levemente imperfeita." },
+    ],
+  },
+  video: {
+    heading: "Ângulos Virais Comprovados",
+    items: [
+      { icon: "🛑", title: "Ângulo: Contrariano",
+        desc: "Interrompe o padrão da indústria. Exige fundo 100% em foco (UGC raiz).",
+        text: "Gancho: 'O que a indústria não te conta sobre...'\nÂngulo Contrariano. Câmera casual de celular na mão. Fundo 100% em foco, sem desfoque (deep focus). Foco emocional e engajamento visual direto. Movimentação simples." },
+      { icon: "⚠️", title: "Ângulo: Alerta/Erro",
+        desc: "Retém pela dor/medo de errar. Foge de iluminação de cinema.",
+        text: "Gancho focado no erro comum que o usuário comete (ex: a rotina que destrói a pele).\nÂngulo Mistake/Warning. Estética autêntica: sem polimento. Fundo totalmente nítido e em foco. O personagem mantém contato visual forte com a lente." },
+      { icon: "⚖️", title: "Ângulo: Objeções/Review",
+        desc: "Combate fricções de venda com empatia e estética anti-polish.",
+        text: "Vídeo de review focado em objeções do cliente (ex: 'se não funcionou pra você, eis o porquê').\nVisual cru, iluminação não produzida. Fundo do quarto em foco total, sem efeito de retrato. Expressão facial calorosa e conectada durante a fala." },
+    ],
+  },
+};
+
+function promptTextarea(type) {
+  return document.getElementById(`modal-${type}-prompt`);
+}
+
 function openPromptBuilder() {
-  loadCustomTemplates('creator');
-  loadCustomTemplates('video');
+  renderTemplatesPane("creator");
+  renderTemplatesPane("video");
   document.getElementById("prompt-overlay").classList.add("visible");
 }
 
 function closePromptBuilder() {
   document.getElementById("prompt-overlay").classList.remove("visible");
+}
+
+// "Salvar Prompts": persiste o rascunho e reflete no form principal (chips).
+function applyPrompts() {
+  saveDraftPrompts();
+  closePromptBuilder();
 }
 
 function switchPromptTab(tabId) {
@@ -1480,60 +1569,151 @@ function toggleSaveForm(type) {
   form.style.display = form.style.display === 'none' ? 'flex' : 'none';
 }
 
-function saveCustomTemplate(type) {
+async function renderTemplatesPane(type) {
+  const pane = document.getElementById(`templates-pane-${type}`);
+  if (!pane) return;
+  clearElement(pane);
+
+  let saved = [];
+  try {
+    const resp = await fetch("/api/prompts");
+    const data = await resp.json();
+    lastUsedPrompts = data.last_used || {};
+    saved = (data.templates || []).filter(t => t.kind === type);
+  } catch (e) { /* servidor indisponível: segue só com os builtin */ }
+
+  if (saved.length) {
+    pane.appendChild(el("h3", null, "Meus Templates Salvos"));
+    saved.forEach(t => pane.appendChild(
+      buildTemplateCard(type, t, () => deleteCustomTemplate(type, t.id))
+    ));
+    pane.appendChild(el("hr", "template-divider"));
+  }
+  const builtin = BUILTIN_TEMPLATES[type];
+  pane.appendChild(el("h3", null, builtin.heading));
+  builtin.items.forEach(t => pane.appendChild(buildTemplateCard(type, t)));
+}
+
+function buildTemplateCard(type, tpl, onDelete) {
+  const card = el("div", "template-card");
+  if (onDelete) {
+    const del = el("button", "delete-template-btn", "🗑️");
+    del.title = "excluir template";
+    del.addEventListener("click", (e) => { e.stopPropagation(); onDelete(); });
+    card.appendChild(del);
+  }
+  card.appendChild(el("span", "icon", tpl.icon || (type === "creator" ? "👤" : "🎬")));
+  card.appendChild(el("div", "title", tpl.title));
+  if (tpl.desc) card.appendChild(el("div", "desc", tpl.desc));
+  card.title = "clique para aplicar no editor";
+  card.addEventListener("click", () => {
+    promptTextarea(type).value = tpl.text;
+    saveDraftPrompts();
+  });
+  return card;
+}
+
+async function saveCustomTemplate(type) {
   const title = document.getElementById(`save-title-${type}`).value.trim();
   const desc = document.getElementById(`save-desc-${type}`).value.trim();
-  const prompt = document.getElementById(`modal-${type}-prompt`).value.trim();
-  
-  if (!title || !prompt) {
+  const text = promptTextarea(type).value.trim();
+
+  if (!title || !text) {
     alert("Preencha o título e o prompt para salvar.");
     return;
   }
-  
-  const key = `custom_${type}_prompts`;
-  let templates = JSON.parse(localStorage.getItem(key) || "[]");
-  templates.push({ id: Date.now(), title, desc, prompt });
-  localStorage.setItem(key, JSON.stringify(templates));
-  
+
+  try {
+    const resp = await fetch("/api/prompts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ kind: type, title, desc, text }),
+    });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  } catch (e) {
+    alert(`Não consegui salvar o template no servidor: ${e.message}`);
+    return;
+  }
+
   document.getElementById(`save-title-${type}`).value = "";
   document.getElementById(`save-desc-${type}`).value = "";
   toggleSaveForm(type);
-  
-  loadCustomTemplates(type);
+  renderTemplatesPane(type);
 }
 
-function deleteCustomTemplate(type, id) {
-  const key = `custom_${type}_prompts`;
-  let templates = JSON.parse(localStorage.getItem(key) || "[]");
-  templates = templates.filter(t => t.id !== id);
-  localStorage.setItem(key, JSON.stringify(templates));
-  loadCustomTemplates(type);
+async function deleteCustomTemplate(type, id) {
+  try {
+    await fetch(`/api/prompts/${encodeURIComponent(id)}`, { method: "DELETE" });
+  } catch (e) { /* mantém o card; próxima carga tenta de novo */ }
+  renderTemplatesPane(type);
 }
 
-function loadCustomTemplates(type) {
-  const container = document.getElementById(`custom-${type}-templates`);
-  if (!container) return;
-  container.innerHTML = "";
-  
-  const key = `custom_${type}_prompts`;
-  const templates = JSON.parse(localStorage.getItem(key) || "[]");
-  
-  if (templates.length > 0) {
-    let html = `<h3>Meus Templates Salvos</h3>`;
-    const icon = type === 'creator' ? '👤' : '🎬';
-    templates.forEach(t => {
-      const escapePrompt = t.prompt.replace(/'/g, "\\'").replace(/\n/g, "\\n");
-      html += `
-        <div class="template-card" onclick="document.getElementById('modal-${type}-prompt').value='${escapePrompt}'">
-          <button class="delete-template-btn" onclick="event.stopPropagation(); deleteCustomTemplate('${type}', ${t.id})">🗑️</button>
-          <span class="icon">${icon}</span>
-          <div class="title">${t.title}</div>
-          <div class="desc">${t.desc}</div>
-        </div>
-      `;
-    });
-    html += `<hr class="template-divider">`;
-    container.innerHTML = html;
+// Migração única: templates antigos do localStorage sobem para o servidor.
+async function migrateLocalTemplates() {
+  for (const type of PROMPT_TYPES) {
+    const key = `custom_${type}_prompts`;
+    const raw = localStorage.getItem(key);
+    if (!raw) continue;
+    let legacy = [];
+    try { legacy = JSON.parse(raw) || []; } catch { legacy = []; }
+    for (const t of legacy) {
+      if (!t || !t.prompt) continue;
+      try {
+        const resp = await fetch("/api/prompts", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            kind: type, title: t.title || "Sem título", desc: t.desc || "", text: t.prompt,
+          }),
+        });
+        if (!resp.ok) return; // servidor recusou: preserva o legado, tenta depois
+      } catch { return; }     // offline: preserva o legado, tenta na próxima carga
+    }
+    localStorage.removeItem(key);
+  }
+}
+
+// ── Rascunho persistente: os prompts sobrevivem a F5 e aparecem no form. ──
+function saveDraftPrompts() {
+  for (const type of PROMPT_TYPES) {
+    localStorage.setItem(DRAFT_KEYS[type], promptTextarea(type).value);
+  }
+  updatePromptStatus();
+}
+
+function restorePromptDrafts() {
+  for (const type of PROMPT_TYPES) {
+    const draft = localStorage.getItem(DRAFT_KEYS[type]);
+    if (draft) promptTextarea(type).value = draft;
+  }
+  updatePromptStatus();
+}
+
+// Sem rascunho local, começa do último prompt usado num run (persistido no servidor).
+async function restoreLastUsedPrompts() {
+  try {
+    const resp = await fetch("/api/prompts");
+    lastUsedPrompts = (await resp.json()).last_used || {};
+  } catch (e) { return; }
+  let changed = false;
+  for (const type of PROMPT_TYPES) {
+    const area = promptTextarea(type);
+    if (!area.value.trim() && lastUsedPrompts[type]) {
+      area.value = lastUsedPrompts[type];
+      changed = true;
+    }
+  }
+  if (changed) saveDraftPrompts(); else updatePromptStatus();
+}
+
+function updatePromptStatus() {
+  for (const type of PROMPT_TYPES) {
+    const chip = document.getElementById(`chip-${type}`);
+    if (!chip) continue;
+    const text = promptTextarea(type).value.trim();
+    chip.classList.toggle("active", Boolean(text));
+    chip.querySelector(".chip-text").textContent =
+      text || "não definido — usa o padrão do sistema";
   }
 }
 
@@ -1542,7 +1722,8 @@ async function startRun() {
   const offer  = document.getElementById("inp-offer").value.trim() || "demo offer";
   const batch  = parseInt(document.getElementById("inp-batch").value, 10) || 6;
   const platform = document.getElementById("inp-platform").value;
-  
+  const approveCreators = document.getElementById("inp-approve-creators").checked;
+
   // Lê valores diretamente do modal
   const creatorPrompt = document.getElementById("modal-creator-prompt").value.trim() || null;
   const videoPrompt   = document.getElementById("modal-video-prompt").value.trim() || null;
@@ -1572,7 +1753,7 @@ async function startRun() {
     const resp = await fetch("/api/run", {
       method: "POST",
       headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({offer, batch, platform, creator_prompt: creatorPrompt, video_prompt: videoPrompt}),
+      body: JSON.stringify({offer, batch, platform, creator_prompt: creatorPrompt, video_prompt: videoPrompt, approve_creators: approveCreators}),
     });
     const data = await resp.json();
     runId = data.run_id;
@@ -1749,7 +1930,10 @@ function showApprovalPanel(creators) {
     reroll.type = "button";
     reroll.className = "ap-voice-reroll";
     reroll.textContent = "↻ Reroll";
-    reroll.onclick = () => updateApprovalCreatorVoicePreview(c.id || "", preset.value, true);
+    // Reroll de verdade: pede uma voz NOVA ao servidor (próxima voz do pool,
+    // mesmo gênero). O update local imediato é só feedback enquanto o servidor
+    // responde com o áudio real.
+    reroll.onclick = () => rerollApprovalCreatorVoice(c.id || "");
     controls.appendChild(reroll);
 
     const imageUri = c.image_uri || c.image;
@@ -1899,8 +2083,25 @@ function renderHistory(creators, storePath, storeExists) {
     addRef("Run", c.run_id, true);
     if (refs.childNodes.length) card.appendChild(refs);
     card.appendChild(el("div", "hist-status", c.status === "approved" ? "✓ aprovado" : "✗ rejeitado"));
+    // Reaproveita os prompts deste creator num novo run (preenche o builder).
+    if (c.creator_prompt || c.video_prompt) {
+      const reuse = el("button", "hist-reuse", "↩ Reusar prompts");
+      reuse.addEventListener("click", (e) => {
+        e.stopPropagation();
+        reusePromptsFromHistory(c);
+      });
+      card.appendChild(reuse);
+    }
     grid.appendChild(card);
   });
+}
+
+function reusePromptsFromHistory(creator) {
+  if (creator.creator_prompt) promptTextarea("creator").value = creator.creator_prompt;
+  if (creator.video_prompt) promptTextarea("video").value = creator.video_prompt;
+  saveDraftPrompts();
+  closeHistory();
+  openPromptBuilder();
 }
 
 // Esc fecha o lightbox de imagem (se aberto).
@@ -1913,6 +2114,12 @@ document.addEventListener("keydown", (e) => {
 
 // Inicializar steps no load
 initSteps();
+
+// Prompts: rascunho local primeiro; sem rascunho, cai no último usado (servidor).
+// A migração sobe templates legados do localStorage para /api/prompts uma vez.
+PROMPT_TYPES.forEach(type => promptTextarea(type).addEventListener("input", saveDraftPrompts));
+restorePromptDrafts();
+migrateLocalTemplates().then(restoreLastUsedPrompts);
 </script>
 
 <!-- Prompt Builder Modal -->
@@ -1941,28 +2148,8 @@ initSteps();
           </div>
         </div>
       </div>
-      <div class="prompt-templates-pane">
-        <div id="custom-creator-templates"></div>
-        <h3>Templates Rápidos (UGC Realista)</h3>
-        
-        <div class="template-card" onclick="document.getElementById('modal-creator-prompt').value='Influencer feminina, 25 anos. Pele com textura natural, poros visíveis, leves vermelhidões e pequenas imperfeições (câmera de celular). Olhos engajados com a câmera, leve sorriso amigável, expressão viva e focada. Look levemente imperfeito, sem superprodução.'">
-          <span class="icon">👩</span>
-          <div class="title">Autêntica & Casual</div>
-          <div class="desc">Foco na "textura real" e conexão no olhar, quebrando o aspecto de IA.</div>
-        </div>
-        
-        <div class="template-card" onclick="document.getElementById('modal-creator-prompt').value='Homem jovem, 30 anos. Textura de pele realista, poros aparentes e linhas finas de expressão. Olhar intenso e conectado com a lente, transmitindo empolgação real. Movimentos corporais simples e naturais.'">
-          <span class="icon">🏃</span>
-          <div class="title">Review Honesto / Vlog</div>
-          <div class="desc">Evita "olhar morto" e prioriza micro-expressões naturais.</div>
-        </div>
-
-        <div class="template-card" onclick="document.getElementById('modal-creator-prompt').value='Médica dermatologista, 40 anos, jaleco branco. Pele natural de celular (poros e textura reais). Olhar profundo e didático, sorriso focado, olhos transmitindo presença. Câmera casual, iluminação levemente imperfeita.'">
-          <span class="icon">👩‍⚕️</span>
-          <div class="title">Especialista Real</div>
-          <div class="desc">Transmite autoridade sem o "polimento excessivo" (anti-polish).</div>
-        </div>
-      </div>
+      <!-- Renderizado por renderTemplatesPane('creator'): templates salvos (servidor) + builtin. -->
+      <div class="prompt-templates-pane" id="templates-pane-creator"></div>
     </div>
 
     <!-- Tab Video -->
@@ -1979,33 +2166,13 @@ initSteps();
           </div>
         </div>
       </div>
-      <div class="prompt-templates-pane">
-        <div id="custom-video-templates"></div>
-        <h3>Ângulos Virais Comprovados</h3>
-        
-        <div class="template-card" onclick="document.getElementById('modal-video-prompt').value='Gancho: \'O que a indústria não te conta sobre...\'\nÂngulo Contrariano. Câmera casual de celular na mão. Fundo 100% em foco, sem desfoque (deep focus). Foco emocional e engajamento visual direto. Movimentação simples.'">
-          <span class="icon">🛑</span>
-          <div class="title">Ângulo: Contrariano</div>
-          <div class="desc">Interrompe o padrão da indústria. Exige fundo 100% em foco (UGC raiz).</div>
-        </div>
-        
-        <div class="template-card" onclick="document.getElementById('modal-video-prompt').value='Gancho focado no erro comum que o usuário comete (ex: a rotina que destrói a pele).\nÂngulo Mistake/Warning. Estética autêntica: sem polimento. Fundo totalmente nítido e em foco. O personagem mantém contato visual forte com a lente.'">
-          <span class="icon">⚠️</span>
-          <div class="title">Ângulo: Alerta/Erro</div>
-          <div class="desc">Retém pela dor/medo de errar. Foge de iluminação de cinema.</div>
-        </div>
-
-        <div class="template-card" onclick="document.getElementById('modal-video-prompt').value='Vídeo de review focado em objeções do cliente (ex: \'se não funcionou pra você, eis o porquê\').\nVisual cru, iluminação não produzida. Fundo do quarto em foco total, sem efeito de retrato. Expressão facial calorosa e conectada durante a fala.'">
-          <span class="icon">⚖️</span>
-          <div class="title">Ângulo: Objeções/Review</div>
-          <div class="desc">Combate fricções de venda com empatia e estética anti-polish.</div>
-        </div>
-      </div>
+      <!-- Renderizado por renderTemplatesPane('video'): templates salvos (servidor) + builtin. -->
+      <div class="prompt-templates-pane" id="templates-pane-video"></div>
     </div>
 
     <div class="modal-footer">
-      <button class="btn-secondary" onclick="closePromptBuilder()">Cancelar</button>
-      <button class="btn-primary" onclick="closePromptBuilder()">Salvar Prompts</button>
+      <button class="btn-secondary" onclick="closePromptBuilder()">Fechar</button>
+      <button class="btn-primary" onclick="applyPrompts()">Salvar Prompts</button>
     </div>
   </div>
 </div>

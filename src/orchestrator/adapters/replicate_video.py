@@ -11,6 +11,7 @@ from typing import Any, Awaitable, Callable, Optional
 import replicate
 
 from orchestrator.adapters._retry import with_transport_retry
+from orchestrator.adapters._throttle import AsyncThrottle
 from orchestrator.adapters.mock import MockAdapter
 from orchestrator.graph.state import Artifact
 from orchestrator.tracing import traced
@@ -30,9 +31,12 @@ class ReplicateVideoAdapter:
         clip: Optional[dict[str, Any]] = None,
         max_retries: int = 3,
         backoff_base: float = 1.0,
+        throttle: Optional[AsyncThrottle] = None,
+        allow_mock_fallback: bool = True,
     ) -> None:
         self.tiers: dict[str, dict[str, Any]] = {t["name"]: t for t in tiers}
         self._runner: Runner = runner or replicate.async_run
+        self._throttle = throttle
         self._mock = MockAdapter(tiers=tiers)
         clip = clip or {}
         self.resolution = str(clip.get("resolution", "1080p"))
@@ -41,6 +45,7 @@ class ReplicateVideoAdapter:
         self.camera_motion = str(clip.get("camera_motion", "static"))
         self.max_retries = max_retries
         self.backoff_base = backoff_base
+        self.allow_mock_fallback = allow_mock_fallback
 
     @traced("adapter.replicate_video.generate_clip", run_type="tool", step="video", provider="replicate")
     async def generate_clip(
@@ -55,6 +60,11 @@ class ReplicateVideoAdapter:
         """Gera um clip LTX silencioso ou delega tiers ainda não plugados ao mock."""
         spec = self.tiers[tier]  # KeyError em tier desconhecido (contratual)
         if tier != "ltx":
+            if not self.allow_mock_fallback:
+                raise RuntimeError(
+                    "Replicate video mock fallback disabled for "
+                    f"tier={tier!r}; configure a real model adapter before live run"
+                )
             artifact = await self._mock.generate_clip(
                 item_id,
                 tier,
@@ -84,7 +94,7 @@ class ReplicateVideoAdapter:
             inp["image"] = reference_image_uri
 
         output = await with_transport_retry(
-            lambda: self._runner(model, input=inp),
+            lambda: self._throttled_run(model, input=inp),
             max_retries=self.max_retries,
             backoff_base=self.backoff_base,
             label="replicate.video",
@@ -106,9 +116,21 @@ class ReplicateVideoAdapter:
             },
         )
 
+    async def _throttled_run(self, ref: str, **kwargs: Any) -> Any:
+        """Passa cada tentativa pelo throttle global (quando configurado)."""
+        if self._throttle is None:
+            return await self._runner(ref, **kwargs)
+        return await self._throttle.run(lambda: self._runner(ref, **kwargs))
+
     @staticmethod
     def _coerce_output(output: Any) -> str:
-        """Normaliza outputs comuns do SDK para uma URI de vídeo."""
+        """Normaliza outputs comuns do SDK para uma URI de vídeo.
+
+        Output nulo/vazio é erro: coagir para ``str`` produziria a URI literal
+        ``"None"``, que segue adiante como clip válido e só estoura no QC.
+        """
+        if output is None:
+            raise RuntimeError("Replicate video output is empty")
         if isinstance(output, list):
             if not output:
                 raise RuntimeError("Replicate video output list is empty")
@@ -130,4 +152,7 @@ class ReplicateVideoAdapter:
                     raise RuntimeError("Replicate video output fallback list is empty")
                 return str(first[0])
             return str(first)
-        return str(output)
+        uri = str(output).strip()
+        if not uri:
+            raise RuntimeError("Replicate video output is empty")
+        return uri

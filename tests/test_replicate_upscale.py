@@ -108,3 +108,16 @@ async def test_upscale_raises_after_exhausting_retries():
     with pytest.raises(httpx.ConnectTimeout):
         await adapter.upscale("https://example.com/img.png")
     assert calls == 3  # tentativa inicial + 2 retries
+
+
+async def test_upscale_raises_on_none_output():
+    """Output nulo do SDK não pode virar a string "None" — tem que ser erro."""
+    adapter, _ = _make_adapter(output=None)
+    with pytest.raises(RuntimeError, match="output.*empty"):
+        await adapter.upscale("https://example.com/img.png")
+
+
+async def test_upscale_raises_on_empty_string_output():
+    adapter, _ = _make_adapter(output="   ")
+    with pytest.raises(RuntimeError, match="output.*empty"):
+        await adapter.upscale("https://example.com/img.png")

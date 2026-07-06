@@ -24,8 +24,7 @@ def _mock_config_dir(tmp_path):
         "  creator: mock\n"
         "  video: mock\n"
         "  qc: mock\n"
-        "  assembly: mock\n"
-        "  distribution: mock\n",
+        "  assembly: mock\n",
         encoding="utf-8",
     )
     return str(cfg)

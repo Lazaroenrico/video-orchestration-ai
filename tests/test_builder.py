@@ -50,8 +50,9 @@ def test_sub_config_propagates_trace_lineage_and_drops_checkpoint_keys():
 def test_item_graph_has_expected_nodes(pipeline_cfg):
     app = build_item_graph(pipeline_cfg)
     nodes = set(app.get_graph().nodes)
-    for n in ("script", "ltx", "kling", "seedance", "product_demo", "qc", "assembly", "distribution", "drop"):
+    for n in ("script", "ltx", "kling", "seedance", "product_demo", "qc", "assembly", "drop"):
         assert n in nodes
+    assert "distribution" not in nodes
 
 
 def test_top_graph_has_expected_nodes(pipeline_cfg):
@@ -81,6 +82,7 @@ async def test_fan_out_attaches_creator_image_uri_from_roster():
                 {
                     "id": "creator-0",
                     "upscaled_base": "/media/run/creator-0/image.png",
+                    "image_local_path": "/tmp/run/creator-0/image.png",
                     "image_source_uri": "data:image/png;base64,abc",
                 }
             ],
@@ -91,16 +93,17 @@ async def test_fan_out_attaches_creator_image_uri_from_roster():
     item_payload = sends[0].arg
     assert item_payload["creator_ref"] == "creator-0"
     assert item_payload["creator_image_uri"] == "data:image/png;base64,abc"
+    assert item_payload["creator_image_local_path"] == "/tmp/run/creator-0/image.png"
 
 
-async def test_item_subgraph_runs_one_item_to_distribution(adapter, pipeline_cfg):
+async def test_item_subgraph_runs_one_item_to_assembly(adapter, pipeline_cfg):
     app = build_item_graph(pipeline_cfg)
     cfg = {"configurable": {"adapter": adapter, "pipeline": pipeline_cfg, "run": {"platform": "tiktok"}}}
     item = Item(concept={"hook": "h", "hook_style": "problem", "offer": "x"}, creator_ref="creator-0")
     out = await asyncio.wait_for(app.ainvoke(item.model_dump(), cfg), timeout=5)
     result = Item.model_validate(out)
-    # terminou OU publicado OU descartado (nunca preso no meio)
-    assert result.distributed or result.dropped
+    # terminou montado OU descartado (nunca preso no meio)
+    assert result.assembled is not None or result.dropped
     assert result.script is not None
     assert result.cost_usd > 0
 
@@ -111,8 +114,8 @@ async def test_top_graph_fans_out_and_aggregates(run_config):
     out = await asyncio.wait_for(app.ainvoke(init, run_config), timeout=5)
     results = out["results"]
     assert len(results) == 6                       # fan-out de 6 conceitos
-    # cada item termina publicado ou descartado
-    assert all(r.distributed or r.dropped for r in results)
+    # cada item termina montado ou descartado
+    assert all(r.assembled is not None or r.dropped for r in results)
     # custo total = soma dos itens, > 0
     assert out["total_cost_usd"] == pytest.approx(sum(r.cost_usd for r in results))
     assert out["total_cost_usd"] > 0

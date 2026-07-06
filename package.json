@@ -1,0 +1,11 @@
+{
+  "name": "ugc-orchestrator-video-bridge",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check:video-bridge": "node --check scripts/vercel_generate_video.mjs"
+  },
+  "dependencies": {
+    "ai": "^6.0.0"
+  }
+}

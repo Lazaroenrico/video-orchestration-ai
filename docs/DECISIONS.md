@@ -287,3 +287,34 @@ Datas absolutas. Apendar novas decisões ao final.
   ElevenLabs no `.env`. Sem ele, o perfil live falha cedo em vez de cair silenciosamente
   para outro TTS. O caminho `ElevenLabsVoiceAdapter` direto permanece só para adapters
   legados como `creator_real_vercel`.
+
+## 2026-07-02
+
+### D25 — Remover distribuição do escopo do motor
+- **Contexto:** o produto não deve mais orquestrar postagem/agendamento. O motor deve
+  parar quando o vídeo final estiver montado, deixando qualquer publicação fora deste
+  repo.
+- **Decisão:** remover o Step 9 de distribuição do grafo, do estado, dos adapters, da UI,
+  dos providers e dos testes. O subgrafo per-item agora termina em `assembly` ou `drop`.
+  Item aprovado/finalizado passa a significar `assembled is not None and not dropped`.
+- **Consequência:** `DistributionPort`, `MockAdapter.distribute`, role `distribution`,
+  node `node_distribution`, campo `Item.distributed` e card de UI "Distribuição" deixam
+  de existir. Feedback e summaries contam aprovados por vídeo montado.
+
+### D26 — Perfil live sem mock e assembly final via Seedance 2.0
+- **Contexto:** o perfil `config/` ainda era híbrido: LLM/creator/vídeo reais, mas QC e
+  assembly em `mock`. Isso impedia validar que o vídeo final era realmente gerado pelo
+  modelo desejado.
+- **Decisão:** `config/` passa a ser o perfil live sem mock nos papéis runtime:
+  `llm: vercel_gateway_llm`, `creator: creator_real_replicate`, `video: replicate`,
+  `qc: integrity_qc` e `assembly: vercel_seedance_assembly`. O dry-run fica em
+  `config-mock/`. O QC live é uma checagem de integridade de artefatos (sem VLM): bloqueia
+  clips mock, fallback e URIs não-vídeo. A montagem final usa Seedance 2.0 via Vercel AI
+  Gateway (`bytedance/seedance-2.0`) por um bridge Node com AI SDK
+  `experimental_generateVideo`.
+- **Consequência:** o grafo segue igual, mas os contratos de `QCPort` e `AssemblyPort`
+  passam a receber o `Item` completo. `MockAdapter` mantém compatibilidade com chamadas
+  antigas por `item_id`. `ReplicateVideoAdapter` mantém fallback mock como default para
+  testes/compatibilidade, porém `config/pipeline.yaml` define
+  `video.allow_mock_fallback=false`, fazendo tiers sem adapter real falharem
+  explicitamente no live em vez de mascarar o problema.

@@ -7,6 +7,10 @@ batch:
 qc:
   max_attempts: 3           # tentativas antes de descartar um item (Step 7 regen loop)
   fail_rate: 0.34           # fração determinística reprovada no mock (exercita o loop)
+  required_clip_count: 2    # live: talking-head + product demo precisam existir antes da montagem
+
+video:
+  allow_mock_fallback: false # live: tiers sem adapter real falham explicitamente em vez de gerar mock
 
 # Roteamento + custo por tier (Step 4 / "The Cost at Scale" do Context.md).
 # No fluxo atual, tentativas de QC permanecem em LTX; tiers premium ficam listados
@@ -32,6 +36,14 @@ clip:
   fps: 25
   camera_motion: static
   generate_audio: false
+
+assembly:
+  model: bytedance/seedance-2.0
+  duration_seconds: 8
+  resolution: 1080x1920
+  aspect_ratio: "9:16"
+  generate_audio: false
+  timeout_ms: 900000
 
 roster:
   creators: 2               # quantos creators reutilizáveis no roster (Step 3)

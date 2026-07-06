@@ -148,9 +148,9 @@ def as_items(results: Any) -> list[Item]:
 def summarize(out: dict[str, Any]) -> dict[str, Any]:
     """Relatório a partir do estado final (ou de um snapshot de status)."""
     results = as_items(out.get("results"))
-    approved = [r for r in results if r.distributed]
+    approved = [r for r in results if r.assembled is not None and not r.dropped]
     dropped = [r for r in results if r.dropped]
-    in_flight = [r for r in results if not r.distributed and not r.dropped]
+    in_flight = [r for r in results if r.assembled is None and not r.dropped]
     tier_cost: dict[str, float] = {}
     for r in results:
         for clip in r.clips:

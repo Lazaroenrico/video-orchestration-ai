@@ -1,11 +1,11 @@
-# Perfil live/híbrido: papéis abaixo apontam para adapters reais onde já existem
-# integrações estáveis. Para dry-run sem rede/custo, use --config-dir config-mock.
-# Papéis ausentes ainda caem em "mock" no registry, sem mudar o grafo.
+# Perfil live: papéis runtime apontam para adapters reais/sem mock. Para dry-run
+# sem rede/custo, use --config-dir config-mock.
+# Papéis ausentes ainda caem em "mock" no registry, mas este arquivo não deixa
+# nenhum papel runtime ausente.
 adapters:
   llm: vercel_gateway_llm  # ✅ Claude via Vercel Gateway (AI_GATEWAY_API_KEY configurada)
   creator: creator_real_replicate  # GPT Image 2 via Vercel Gateway + Replicate (upscale + ElevenLabs TTS)
   video: replicate              # LTX 2.3 Fast via Replicate; áudio fica para etapa posterior
-  qc: mock
-  assembly: mock
-  distribution: mock
+  qc: integrity_qc              # checa mídia real e bloqueia mock/fallback antes da montagem
+  assembly: vercel_seedance_assembly  # vídeo final via Vercel AI Gateway / Seedance 2.0
   judge: gateway

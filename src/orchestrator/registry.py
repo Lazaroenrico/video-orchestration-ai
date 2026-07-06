@@ -1,6 +1,6 @@
 """Resolução de adapters a partir dos configs (papel -> adapter).
 
-Cada **papel** da pipeline (llm, creator, video, qc, assembly, distribution) é
+Cada **papel** da pipeline (llm, creator, video, qc, assembly) é
 mapeado em ``config/providers.yaml`` para o nome de um adapter registrado aqui.
 ``build_adapter_from_providers`` monta um ``CompositeAdapter`` que roteia cada
 método para o adapter do papel correspondente — assim dá para misturar adapters
@@ -21,12 +21,17 @@ from orchestrator.adapters.creator_real import (
     build_real_creator_replicate_adapter,
     build_real_creator_vercel_adapter,
 )
+from orchestrator.adapters.integrity_qc import build_integrity_qc_adapter
 from orchestrator.adapters.mock import MockAdapter
+from orchestrator.adapters._throttle import get_replicate_throttle
 from orchestrator.adapters.replicate_video import ReplicateVideoAdapter
+from orchestrator.adapters.vercel_seedance_assembly import (
+    build_vercel_seedance_assembly_adapter,
+)
 from orchestrator.tracing import traced
 
 # Papéis que o grafo exerce (cada método de node mapeia para um destes).
-ROLES = ("llm", "creator", "video", "qc", "assembly", "distribution")
+ROLES = ("llm", "creator", "video", "qc", "assembly")
 
 
 def _build_replicate(pipeline: dict[str, Any]) -> ReplicateVideoAdapter:
@@ -34,6 +39,10 @@ def _build_replicate(pipeline: dict[str, Any]) -> ReplicateVideoAdapter:
     return ReplicateVideoAdapter(
         tiers=pipeline["tiers"],
         clip=pipeline.get("clip", {}),
+        throttle=get_replicate_throttle(),
+        allow_mock_fallback=bool(
+            pipeline.get("video", {}).get("allow_mock_fallback", True)
+        ),
     )
 
 
@@ -48,6 +57,8 @@ _ADAPTERS: dict[str, Callable[[dict[str, Any]], Any]] = {
     "creator_real": build_real_creator_adapter,
     "creator_real_vercel": build_real_creator_vercel_adapter,
     "creator_real_replicate": build_real_creator_replicate_adapter,
+    "integrity_qc": build_integrity_qc_adapter,
+    "vercel_seedance_assembly": build_vercel_seedance_assembly_adapter,
 }
 
 
@@ -73,6 +84,20 @@ class CompositeAdapter:
 
     def __init__(self, by_role: dict[str, Any]) -> None:
         self._by_role = by_role
+
+    # Ports OPCIONAIS do papel creator (reroll de voz e o sub-adapter ``voice``
+    # usado nos previews): só existem quando o adapter do papel os expõe. Quem
+    # chama usa ``getattr(adapter, ..., None)`` e cai no fallback quando ausente
+    # (ex.: MockAdapter) — por isso delegamos via __getattr__ em vez de métodos
+    # fixos, que fariam o fallback nunca disparar.
+    _OPTIONAL_CREATOR_ATTRS = frozenset({"reroll_creator_voice", "voice"})
+
+    def __getattr__(self, name: str) -> Any:
+        if name in CompositeAdapter._OPTIONAL_CREATOR_ATTRS:
+            value = getattr(self._by_role["creator"], name, None)
+            if value is not None:
+                return value
+        raise AttributeError(name)
 
     # --- llm (Steps 1 e 2) ---
     @traced("adapter.llm.generate_concepts", run_type="chain", role="llm", step=1)
@@ -102,11 +127,6 @@ class CompositeAdapter:
     @traced("adapter.assembly.assemble", run_type="chain", role="assembly", step=8)
     async def assemble(self, *args: Any, **kwargs: Any) -> Any:
         return await self._by_role["assembly"].assemble(*args, **kwargs)
-
-    # --- distribution (Step 9) ---
-    @traced("adapter.distribution.distribute", run_type="chain", role="distribution", step=9)
-    async def distribute(self, *args: Any, **kwargs: Any) -> Any:
-        return await self._by_role["distribution"].distribute(*args, **kwargs)
 
 
 def build_adapter_from_providers(

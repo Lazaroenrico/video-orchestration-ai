@@ -35,6 +35,7 @@ from typing import Any, Optional
 
 import httpx
 
+from orchestrator.adapters._retry import with_transport_retry
 from orchestrator.adapters.base import VoiceProfile, image_gender_clause
 from orchestrator.tracing import add_trace_metadata, traced
 
@@ -116,12 +117,16 @@ class OpenAIImageAdapter:
         model: str = "gpt-image-2",
         timeout: float = 120.0,
         client: Optional[httpx.AsyncClient] = None,
+        max_retries: int = 3,
+        backoff_base: float = 1.0,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.token = token or os.environ.get("OPENAI_API_KEY", "")
         self.model = model
         self.timeout = timeout
         self._client = client
+        self.max_retries = max_retries
+        self.backoff_base = backoff_base
 
     @traced(
         "adapter.openai_image.generate_face", run_type="tool", step=3, provider="openai"
@@ -155,42 +160,50 @@ class OpenAIImageAdapter:
             "prompt": prompt,
         }
 
-        if self._client is not None:
-            resp = await self._client.post(
-                f"{self.base_url}/images/generations",
-                headers=headers,
-                json=body,
-            )
-        else:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                resp = await client.post(
+        async def _call() -> dict[str, Any]:
+            if self._client is not None:
+                resp = await self._client.post(
                     f"{self.base_url}/images/generations",
                     headers=headers,
                     json=body,
                 )
+            else:
+                async with httpx.AsyncClient(timeout=self.timeout) as client:
+                    resp = await client.post(
+                        f"{self.base_url}/images/generations",
+                        headers=headers,
+                        json=body,
+                    )
 
-        # Tracing/log dedicado da falha: o corpo da resposta do gateway é onde o
-        # 400 explica a causa real (param não suportado, moderação, etc.). Sem isto,
-        # raise_for_status() levanta um erro opaco sem o corpo. Em 4xx o corpo é JSON
-        # curto (não há b64_json), então logá-lo não despeja base64 no terminal.
-        if not resp.is_success:
-            body = resp.text[:2000]
-            _log.error(
-                "GPT Image 2 falhou: status=%s model=%s url=%s body=%s",
-                resp.status_code,
-                self.model,
-                str(resp.url),
-                body,
-            )
-            add_trace_metadata(
-                image_error_status=resp.status_code,
-                image_error_body=body,
-                image_model=self.model,
-            )
+            # Tracing/log dedicado da falha: o corpo da resposta do gateway é onde o
+            # 400 explica a causa real (param não suportado, moderação, etc.). Sem isto,
+            # raise_for_status() levanta um erro opaco sem o corpo. Em 4xx o corpo é JSON
+            # curto (não há b64_json), então logá-lo não despeja base64 no terminal.
+            if not resp.is_success:
+                error_body = resp.text[:2000]
+                _log.error(
+                    "GPT Image 2 falhou: status=%s model=%s url=%s body=%s",
+                    resp.status_code,
+                    self.model,
+                    str(resp.url),
+                    error_body,
+                )
+                add_trace_metadata(
+                    image_error_status=resp.status_code,
+                    image_error_body=error_body,
+                    image_model=self.model,
+                )
 
-        _raise_for_status_verbose(resp, label="openai_image")
-        data: dict[str, Any] = resp.json()
-        item: dict[str, Any] = data["data"][0]
+            _raise_for_status_verbose(resp, label="openai_image")
+            data: dict[str, Any] = resp.json()
+            return data["data"][0]
+
+        item: dict[str, Any] = await with_transport_retry(
+            _call,
+            max_retries=self.max_retries,
+            backoff_base=self.backoff_base,
+            label="openai_image.generate_face",
+        )
 
         # OpenAI direto devolve uma URL; GPT Image / Vercel Gateway devolve base64.
         if item.get("url"):

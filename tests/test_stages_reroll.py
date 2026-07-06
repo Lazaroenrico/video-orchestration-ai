@@ -124,3 +124,33 @@ async def test_reroll_without_profile_still_works(tmp_path):
     assert result["voice_reroll_count"] == 1
     assert result["voice_ref"] == "voice-0::reroll-1"
     assert result["upscaled_base"] == "data:image/svg+xml;base64,IMG"
+
+
+class _DataUriVoiceAdapter:
+    """Adapter cujo reroll devolve o áudio como data URI (baixável, offline)."""
+
+    async def reroll_creator_voice(self, *, creator_id, index, reroll_count, creator, voice_profile):
+        return {
+            "voice_id": "data:audio/mpeg;base64,QUJD",  # bytes b"ABC"
+            "voice_ref": "data:audio/mpeg;base64,QUJD",
+            "voice_source_uri": None,
+            "voice_preview_uri": None,
+        }
+
+
+async def test_reroll_persists_downloadable_voice_and_serves_it_locally(tmp_path):
+    """Voz nova baixável (Replicate/data URI) é persistida em disco e o creator
+    passa a apontar para o caminho web local — o player da UI toca na hora."""
+    result = await reroll_creator_voice(
+        _DataUriVoiceAdapter(), _creator(preset="female"), run_id="run-x", media_root=tmp_path
+    )
+
+    expected_web_path = "/media/run-x/creator-2/voice-r1.mp3"
+    assert result["voice_id"] == expected_web_path
+    assert result["voice_ref"] == expected_web_path
+    assert result["voice"] == expected_web_path
+    assert result["voice_preview_uri"] == expected_web_path
+    assert result["voice_source_uri"] == "data:audio/mpeg;base64,QUJD"
+    assert (tmp_path / "run-x" / "creator-2" / "voice-r1.mp3").read_bytes() == b"ABC"
+    # gênero segue travado
+    assert result["voice_profile"] == {"preset": "female", "prompt": "warm delivery"}

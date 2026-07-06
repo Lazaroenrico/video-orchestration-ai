@@ -163,6 +163,7 @@ async def test_persist_creator_media_downloads_image_keeps_voice_id(tmp_path):
     await client.aclose()
     assert out["upscaled_base"] == "/media/run-1/creator-0/image.png"
     assert out["image_source_uri"] == "https://replicate.delivery/x/out.png"
+    assert out["image_local_path"] == str(tmp_path / "run-1" / "creator-0" / "image.png")
     # voice_id não é URL -> permanece referência, sem source uri
     assert out["voice_id"] == "el_voice_abc"
     assert "voice_source_uri" not in out

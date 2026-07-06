@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal, Optional, Protocol, runtime_checkable
 
-from orchestrator.graph.state import Artifact, JudgeVerdict, QCResult
+from orchestrator.graph.state import Artifact, Item, JudgeVerdict, QCResult
 
 VoicePreset = Literal["male", "female", "neutral"]
 
@@ -143,21 +143,16 @@ class VideoPort(Protocol):
 class QCPort(Protocol):
     """QC sistematizado (Step 7)."""
 
-    async def qc_check(self, item_id: str, attempt: int, fail_rate: float) -> QCResult: ...
+    async def qc_check(self, item: Item, fail_rate: float = 0.0) -> QCResult: ...
 
 
 @runtime_checkable
 class AssemblyPort(Protocol):
     """Montagem/edição (Step 8)."""
 
-    async def assemble(self, item_id: str, platform: str) -> Artifact: ...
-
-
-@runtime_checkable
-class DistributionPort(Protocol):
-    """Distribuição no portfolio de contas (Step 9)."""
-
-    async def distribute(self, item_id: str) -> dict[str, Any]: ...
+    async def assemble(
+        self, item: Item, platform: str, system_prompt: Optional[str] = None
+    ) -> Artifact: ...
 
 
 @runtime_checkable

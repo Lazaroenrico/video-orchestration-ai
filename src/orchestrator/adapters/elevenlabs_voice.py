@@ -29,6 +29,7 @@ from typing import Optional
 
 import httpx
 
+from orchestrator.adapters._retry import with_transport_retry
 from orchestrator.adapters.base import VoiceProfile
 from orchestrator.tracing import traced
 
@@ -57,10 +58,14 @@ class ElevenLabsVoiceAdapter:
         base_url: str = "https://api.elevenlabs.io/v1",
         token: str = "",
         client: Optional[httpx.AsyncClient] = None,
+        max_retries: int = 3,
+        backoff_base: float = 1.0,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.token = token or os.environ.get("ELEVENLABS_API_KEY", "")
         self._client = client
+        self.max_retries = max_retries
+        self.backoff_base = backoff_base
 
     @traced("adapter.elevenlabs.create_voice", run_type="tool", step=3, provider="elevenlabs")
     async def create_voice(
@@ -68,7 +73,8 @@ class ElevenLabsVoiceAdapter:
     ) -> str:
         """Cria voz de creator via POST ``{base_url}/voices/add``.
 
-        Retorna o ``voice_id`` (string).
+        Retorna o ``voice_id`` (string). Retenta em ``429`` (throttle transitório);
+        demais erros HTTP propagam na hora.
         """
         headers = {
             "xi-api-key": self.token,
@@ -82,22 +88,29 @@ class ElevenLabsVoiceAdapter:
             body["description"] = description
             body["labels"] = {"preset": voice_profile.preset}
 
-        if self._client is not None:
-            resp = await self._client.post(
-                f"{self.base_url}/voices/add",
-                headers=headers,
-                json=body,
-            )
-        else:
-            async with httpx.AsyncClient() as client:
-                resp = await client.post(
+        async def _call() -> dict:
+            if self._client is not None:
+                resp = await self._client.post(
                     f"{self.base_url}/voices/add",
                     headers=headers,
                     json=body,
                 )
+            else:
+                async with httpx.AsyncClient() as client:
+                    resp = await client.post(
+                        f"{self.base_url}/voices/add",
+                        headers=headers,
+                        json=body,
+                    )
+            resp.raise_for_status()
+            return resp.json()
 
-        resp.raise_for_status()
-        data = resp.json()
+        data = await with_transport_retry(
+            _call,
+            max_retries=self.max_retries,
+            backoff_base=self.backoff_base,
+            label="elevenlabs.create_voice",
+        )
         return data["voice_id"]
 
     @traced(

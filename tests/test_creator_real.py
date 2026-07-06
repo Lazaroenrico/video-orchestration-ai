@@ -603,6 +603,115 @@ async def test_build_creator_propagates_when_face_generation_fails() -> None:
         await creator.build_creator(0)
 
 
+async def test_build_creator_raises_clear_error_when_face_missing_primary() -> None:
+    """Shape inesperado do adapter de imagem não pode virar KeyError cru."""
+
+    class _NoPrimaryImage:
+        async def generate_face(self, index: int, system_prompt=None, voice_profile=None) -> dict:
+            return {"angles": ["front", "3/4", "profile", "smile", "neutral"]}
+
+    creator = RealCreatorAdapter(image=_NoPrimaryImage(), topaz=_OkUpscale(), voice=_OkVoice())
+    with pytest.raises(RuntimeError, match="primary"):
+        await creator.build_creator(0)
+
+
+async def test_build_creator_raises_clear_error_when_face_missing_angles() -> None:
+    class _NoAnglesImage:
+        async def generate_face(self, index: int, system_prompt=None, voice_profile=None) -> dict:
+            return {"primary": "data:image/png;base64,AAAA"}
+
+    creator = RealCreatorAdapter(image=_NoAnglesImage(), topaz=_OkUpscale(), voice=_OkVoice())
+    with pytest.raises(RuntimeError, match="angles"):
+        await creator.build_creator(0)
+
+
+# ---------------------------------------------------------------------------
+# Retry de 429 nos adapters HTTP puros (mesma política dos adapters Replicate)
+# ---------------------------------------------------------------------------
+
+
+async def test_openai_image_retries_on_429_then_succeeds() -> None:
+    """429 do gateway é throttle transitório — deve retentar, não falhar na 1ª."""
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return httpx.Response(429, json={"error": "rate limited"})
+        return httpx.Response(200, json={"data": [{"url": FAKE_FACE_URL}]})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    adapter = OpenAIImageAdapter(
+        base_url=BASE_OPENAI, token=FAKE_TOKEN, client=client, backoff_base=0
+    )
+
+    result = await adapter.generate_face(0)
+
+    assert result["primary"] == FAKE_FACE_URL
+    assert calls == 2
+
+
+async def test_openai_image_does_not_retry_non_429_status() -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(401, json={"error": "unauthorized"})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    adapter = OpenAIImageAdapter(
+        base_url=BASE_OPENAI, token=FAKE_TOKEN, client=client, backoff_base=0
+    )
+
+    with pytest.raises(httpx.HTTPStatusError):
+        await adapter.generate_face(0)
+    assert calls == 1
+
+
+async def test_topaz_upscale_retries_on_429_then_succeeds() -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return httpx.Response(429, json={"error": "rate limited"})
+        return httpx.Response(200, json={"output_url": FAKE_UPSCALED_URL})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    adapter = TopazUpscaleAdapter(
+        base_url=BASE_TOPAZ, token=FAKE_TOKEN, client=client, backoff_base=0
+    )
+
+    result = await adapter.upscale("https://cdn/face.png")
+
+    assert result == FAKE_UPSCALED_URL
+    assert calls == 2
+
+
+async def test_elevenlabs_create_voice_retries_on_429_then_succeeds() -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return httpx.Response(429, json={"error": "rate limited"})
+        return httpx.Response(200, json={"voice_id": FAKE_VOICE_ID})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    adapter = ElevenLabsVoiceAdapter(
+        base_url=BASE_ELEVENLABS, token=FAKE_TOKEN, client=client, backoff_base=0
+    )
+
+    result = await adapter.create_voice(0)
+
+    assert result == FAKE_VOICE_ID
+    assert calls == 2
+
+
 # ---------------------------------------------------------------------------
 # Testes do GPT Image 2 via Vercel AI Gateway
 # (contrato confirmado em https://vercel.com/docs/ai-gateway image-generation)
@@ -758,7 +867,7 @@ async def test_elevenlabs_synthesize_preview_raises_on_http_error() -> None:
 
 
 # ---------------------------------------------------------------------------
-# media_store.persist_item_media — clips e assembled viram /media/... quando
+# media_store.persist_item_media — clips e assembled viram /videos/... quando
 # baixáveis; no-op total para mock:// (mesma garantia de persist_creator_media).
 # ---------------------------------------------------------------------------
 
@@ -773,7 +882,7 @@ def _ok_media_transport(content: bytes, content_type: str) -> httpx.MockTranspor
 
 
 async def test_persist_item_media_downloads_clips_and_assembled(tmp_path) -> None:
-    """clips[].uri e assembled.uri http(s) -> baixados para /media/{run}/items/{id}/..."""
+    """clips[].uri e assembled.uri http(s) -> baixados para /videos/{run}/items/{id}/..."""
     item = Item(
         id="item-1",
         concept={"hook_style": "problem"},
@@ -783,21 +892,23 @@ async def test_persist_item_media_downloads_clips_and_assembled(tmp_path) -> Non
         assembled=Artifact(kind="final", uri="https://cdn.example/final.mp4"),
     )
     client = httpx.AsyncClient(transport=_ok_media_transport(_FAKE_MP4, "video/mp4"))
+    videos_root = tmp_path / "videos"
 
     out = await media_store.persist_item_media(
-        item, run_id="run-9", media_root=tmp_path, client=client,
+        item, run_id="run-9", videos_root=videos_root, client=client,
     )
     await client.aclose()
 
-    assert out.clips[0].uri == "/media/run-9/items/item-1/clip-0.mp4"
+    assert out.clips[0].uri == "/videos/run-9/items/item-1/clip-0.mp4"
     assert out.clips[0].meta["source_uri"] == "https://cdn.example/clip0.mp4"
-    assert out.assembled.uri == "/media/run-9/items/item-1/assembled.mp4"
+    assert out.assembled.uri == "/videos/run-9/items/item-1/assembled.mp4"
     assert out.assembled.meta["source_uri"] == "https://cdn.example/final.mp4"
-    assert (tmp_path / "run-9" / "items" / "item-1" / "clip-0.mp4").read_bytes() == _FAKE_MP4
-    assert (tmp_path / "run-9" / "items" / "item-1" / "assembled.mp4").read_bytes() == _FAKE_MP4
-    # Item devolvido é renderável a partir das novas uris /media/...
-    assert out.clips[0].uri.startswith("/media/")
-    assert out.assembled.uri.startswith("/media/")
+    assert (videos_root / "run-9" / "items" / "item-1" / "clip-0.mp4").read_bytes() == _FAKE_MP4
+    assert (videos_root / "run-9" / "items" / "item-1" / "assembled.mp4").read_bytes() == _FAKE_MP4
+    assert not (tmp_path / "media").exists()
+    # Item devolvido é renderável a partir das novas uris /videos/...
+    assert out.clips[0].uri.startswith("/videos/")
+    assert out.assembled.uri.startswith("/videos/")
 
 
 async def test_persist_item_media_mock_is_noop(tmp_path) -> None:
@@ -809,7 +920,7 @@ async def test_persist_item_media_mock_is_noop(tmp_path) -> None:
         assembled=Artifact(kind="final", uri="mock://final/item-2"),
     )
 
-    out = await media_store.persist_item_media(item, run_id="run-9", media_root=tmp_path)
+    out = await media_store.persist_item_media(item, run_id="run-9", videos_root=tmp_path)
 
     assert out.clips[0].uri == "mock://clip/item-2/tier0"
     assert out.assembled.uri == "mock://final/item-2"
@@ -827,12 +938,12 @@ async def test_persist_item_media_accepts_dict_input(tmp_path) -> None:
     client = httpx.AsyncClient(transport=_ok_media_transport(_FAKE_MP4, "video/mp4"))
 
     out = await media_store.persist_item_media(
-        item, run_id="run-9", media_root=tmp_path, client=client,
+        item, run_id="run-9", videos_root=tmp_path, client=client,
     )
     await client.aclose()
 
     assert isinstance(out, dict)
-    assert out["clips"][0]["uri"] == "/media/run-9/items/item-3/clip-0.mp4"
+    assert out["clips"][0]["uri"] == "/videos/run-9/items/item-3/clip-0.mp4"
     assert out["clips"][0]["meta"]["source_uri"] == "https://cdn.example/clip0.mp4"
 
 
@@ -895,3 +1006,53 @@ async def test_build_voice_preview_noop_without_voice_subadapter(tmp_path) -> No
 
     assert preview is None
     assert not any(tmp_path.iterdir())
+
+
+# --------------------------------------------------------------------------- #
+# reroll_creator_voice — troca REAL da voz do creator (próxima voz do pool)    #
+# --------------------------------------------------------------------------- #
+
+class _RerollVoiceSpy:
+    """VoicePort que registra o índice pedido — verifica o shift do pool."""
+
+    def __init__(self):
+        self.calls: list[tuple[int, object]] = []
+
+    async def create_voice(self, index, voice_profile=None):
+        self.calls.append((index, voice_profile))
+        return f"https://replicate.delivery/voice-{index}.mp3"
+
+
+async def test_reroll_creator_voice_requests_next_pool_index() -> None:
+    """Reroll N desloca o índice do pool em N — voz DIFERENTE, gênero preservado."""
+    voice = _RerollVoiceSpy()
+    adapter = RealCreatorAdapter(image=_FakeImage(), topaz=_OkUpscale(), voice=voice)
+    profile = VoiceProfile(preset="female", prompt="warm delivery")
+
+    update = await adapter.reroll_creator_voice(
+        creator_id="creator-2",
+        index=2,
+        reroll_count=1,
+        creator={"id": "creator-2", "voice_id": "old-voice"},
+        voice_profile=profile,
+    )
+
+    assert voice.calls == [(3, profile)]  # index 2 + reroll 1 -> próxima voz do pool
+    assert update["voice_id"] == "https://replicate.delivery/voice-3.mp3"
+    assert update["voice_ref"] == update["voice_id"]
+    assert update["voice"] == update["voice_id"]
+    # Metadados de mídia antigos são invalidados para reforçar re-persistência.
+    assert update["voice_source_uri"] is None
+    assert update["voice_preview_uri"] is None
+
+
+async def test_reroll_creator_voice_shifts_again_on_second_reroll() -> None:
+    voice = _RerollVoiceSpy()
+    adapter = RealCreatorAdapter(image=_FakeImage(), topaz=_OkUpscale(), voice=voice)
+
+    await adapter.reroll_creator_voice(
+        creator_id="creator-0", index=0, reroll_count=2,
+        creator={"id": "creator-0"}, voice_profile=None,
+    )
+
+    assert voice.calls == [(2, None)]

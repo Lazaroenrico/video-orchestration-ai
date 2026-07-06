@@ -139,8 +139,32 @@ async def test_non_ltx_tiers_fallback_to_mock_clip():
     assert artifact.meta["tier"] == "kling"
 
 
+async def test_non_ltx_tiers_raise_when_mock_fallback_disabled():
+    adapter, calls = _make_adapter(allow_mock_fallback=False)
+
+    with pytest.raises(RuntimeError, match="mock fallback disabled"):
+        await adapter.generate_clip("item-abc", "seedance", 8, 1)
+
+    assert calls == []
+
+
 async def test_unknown_tier_raises_key_error():
     adapter, _ = _make_adapter()
 
     with pytest.raises(KeyError):
         await adapter.generate_clip("item-abc", "unknown", 8, 1)
+
+
+async def test_generate_clip_raises_on_none_output():
+    """Output nulo do SDK não pode virar Artifact com uri "None" — tem que ser erro."""
+    adapter, _ = _make_adapter(output=None)
+
+    with pytest.raises(RuntimeError, match="output.*empty"):
+        await adapter.generate_clip("item-abc", "ltx", 8, 1)
+
+
+async def test_generate_clip_raises_on_empty_string_output():
+    adapter, _ = _make_adapter(output="   ")
+
+    with pytest.raises(RuntimeError, match="output.*empty"):
+        await adapter.generate_clip("item-abc", "ltx", 8, 1)

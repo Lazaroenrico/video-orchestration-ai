@@ -1,0 +1,306 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Licao 0001 - Como o motor gera imagem e voz</title>
+  <style>
+    :root {
+      --ink: #181714;
+      --muted: #665f54;
+      --paper: #fbfaf5;
+      --panel: #ffffff;
+      --line: #d6cec0;
+      --accent: #0a6a5d;
+      --accent-2: #b94b2f;
+      --soft: #ece6d8;
+      --code: #f2eee5;
+      --good: #116a42;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      background:
+        linear-gradient(90deg, rgba(24,23,20,.045) 1px, transparent 1px) 0 0 / 34px 34px,
+        var(--paper);
+      font-family: Georgia, "Times New Roman", serif;
+      line-height: 1.55;
+    }
+    main {
+      width: min(980px, calc(100% - 32px));
+      margin: 30px auto 56px;
+    }
+    header {
+      border-bottom: 2px solid var(--ink);
+      padding-bottom: 18px;
+      margin-bottom: 24px;
+    }
+    .eyebrow {
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 12px;
+      color: var(--accent);
+      text-transform: uppercase;
+      letter-spacing: 0;
+      margin-bottom: 10px;
+    }
+    h1, h2, h3 { line-height: 1.08; margin: 0; }
+    h1 { font-size: clamp(34px, 6vw, 62px); max-width: 880px; letter-spacing: 0; }
+    h2 {
+      font-size: 25px;
+      margin-top: 34px;
+      padding-top: 18px;
+      border-top: 1px solid var(--line);
+    }
+    h3 { font-size: 17px; margin-top: 16px; }
+    p { margin: 10px 0; }
+    a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: 3px; }
+    code {
+      font-family: "SFMono-Regular", Consolas, monospace;
+      background: var(--code);
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      padding: 1px 4px;
+      font-size: .91em;
+    }
+    .lead {
+      font-size: 20px;
+      max-width: 760px;
+      color: #2b2924;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 12px;
+      margin: 16px 0;
+    }
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 15px;
+      min-height: 154px;
+      box-shadow: 0 1px 0 rgba(0,0,0,.04);
+    }
+    .card strong {
+      display: block;
+      font-size: 15px;
+      margin-bottom: 8px;
+      color: var(--accent);
+    }
+    .flow {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 8px;
+      margin: 18px 0;
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 12px;
+    }
+    .flow div {
+      background: #fff;
+      border: 1px solid var(--line);
+      border-left: 4px solid var(--accent);
+      border-radius: 4px;
+      padding: 10px;
+      min-height: 72px;
+    }
+    .callout {
+      margin: 18px 0;
+      border-left: 4px solid var(--accent-2);
+      padding: 10px 14px;
+      background: #fff0e7;
+      color: #4b261c;
+    }
+    ul { margin: 8px 0 0 20px; padding: 0; }
+    li { margin: 6px 0; }
+    .practice {
+      background: #f5f1e8;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 16px;
+      margin-top: 16px;
+    }
+    .qa {
+      border-top: 1px solid var(--line);
+      padding-top: 12px;
+      margin-top: 12px;
+    }
+    button {
+      appearance: none;
+      border: 1px solid var(--accent);
+      background: var(--accent);
+      color: white;
+      border-radius: 4px;
+      padding: 7px 10px;
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 12px;
+      cursor: pointer;
+    }
+    button:hover { filter: brightness(.96); }
+    .answer {
+      display: none;
+      margin-top: 8px;
+      padding: 9px;
+      border-left: 3px solid var(--good);
+      background: #eef7f0;
+    }
+    .answer.open { display: block; }
+    .sources {
+      font-size: 14px;
+      color: var(--muted);
+    }
+    @media (max-width: 760px) {
+      main { width: min(100% - 22px, 980px); }
+      .flow { grid-template-columns: 1fr; }
+      .lead { font-size: 18px; }
+    }
+    @media print {
+      body { background: white; }
+      main { width: auto; margin: 0; }
+      button { display: none; }
+      .answer { display: block; }
+      .card, .flow div, .practice { break-inside: avoid; }
+    }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <div class="eyebrow">Licao 0001 · UGC Orchestrator</div>
+    <h1>Como o projeto esta montado, e como ele gera imagem e voz</h1>
+    <p class="lead">O jeito certo de ler este repo e separar o motor de orquestracao dos adapters. O grafo decide a ordem e os gates; os adapters sabem falar com Claude, GPT Image 2, Replicate, ElevenLabs ou mock.</p>
+  </header>
+
+  <section>
+    <h2>1. O que este projeto e</h2>
+    <p>O projeto e um motor de orquestracao para AI UGC em escala. Ele modela a pipeline operacional atual sem distribuicao: conceitos, scripts, creator, talking-head, product demo, execucao paralela, QC, montagem e feedback.</p>
+    <p>Na pratica, o v1 ja nao e apenas mock puro. O perfil <code>config/</code> atual e live/hibrido: LLM via Vercel AI Gateway, creator real via GPT Image 2 + Replicate, video via Replicate LTX, e os passos de QC/montagem/distribuicao ainda mock. O perfil <code>config-mock/</code> segue offline e deterministico.</p>
+  </section>
+
+  <section>
+    <h2>2. O desenho mental</h2>
+    <div class="flow">
+      <div><strong>Config</strong><br><code>providers.yaml</code> escolhe adapter por papel.</div>
+      <div><strong>Grafo</strong><br><code>builder.py</code> define ordem, fan-out e gates.</div>
+      <div><strong>Nodes</strong><br><code>stages.py</code> executa cada passo.</div>
+      <div><strong>Adapters</strong><br><code>base.py</code> define contratos; cada provider implementa.</div>
+    </div>
+    <p>O padrao mais importante e o <code>CompositeAdapter</code>. Os nodes chamam um unico objeto, mas internamente ele roteia por papel: <code>generate_concepts</code> vai para o adapter de LLM, <code>build_creator</code> vai para creator, <code>generate_clip</code> vai para video, e assim por diante.</p>
+  </section>
+
+  <section>
+    <h2>3. Fluxo real de um run</h2>
+    <div class="grid">
+      <div class="card">
+        <strong>Roster primeiro</strong>
+        O run comeca criando um pequeno elenco de creators reutilizaveis. Hoje o config pede 2 creators por padrao.
+      </div>
+      <div class="card">
+        <strong>Aprovacao humana</strong>
+        Na UI, <code>approve_creators=true</code> por padrao. O grafo pausa, mostra rosto e voz, e so continua com os aprovados.
+      </div>
+      <div class="card">
+        <strong>Conceitos depois</strong>
+        O LLM gera os conceitos para a oferta. No loop, hooks vencedores anteriores podem enviesar os proximos conceitos.
+      </div>
+      <div class="card">
+        <strong>Fan-out por item</strong>
+        Cada conceito vira um <code>Item</code> e entra no subgrafo: script, video, product demo, QC e assembly.
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>4. Como a imagem e gerada</h2>
+    <p>Imagem nasce dentro de <code>RealCreatorAdapter.build_creator</code>. Antes de chamar o modelo de imagem, o codigo resolve um <code>VoiceProfile</code>. Isso parece contraintuitivo, mas e a decisao certa: o mesmo perfil que orienta a voz tambem orienta o prompt da imagem.</p>
+    <ul>
+      <li><code>assign_voice_profile</code> escolhe um perfil concreto por creator: override, inferencia do prompt, ou alternancia deterministica por indice.</li>
+      <li><code>OpenAIImageAdapter.generate_face</code> monta um prompt seguro de retrato comercial, sem termos sensiveis que acionem moderacao.</li>
+      <li><code>image_gender_clause</code> injeta uma frase brand-safe: adulta mulher ou adulto homem, conforme o perfil.</li>
+      <li>GPT Image 2 e chamado via endpoint OpenAI-compativel do Vercel Gateway.</li>
+      <li>A resposta pode vir como URL ou <code>b64_json</code>; o adapter normaliza para uma URI.</li>
+      <li>Depois, o upscale roda em Replicate Real-ESRGAN e a imagem e persistida em <code>.orchestrator/media</code>.</li>
+    </ul>
+    <div class="callout">A tecnica central aqui e paridade por construcao: imagem e voz nao tentam "combinar" depois. Elas recebem a mesma decisao de persona antes de nascer.</div>
+  </section>
+
+  <section>
+    <h2>5. Como a voz e gerada</h2>
+    <p>No perfil live atual, voz significa ElevenLabs hospedado no Replicate, via <code>ReplicateVoiceAdapter</code>. O modelo exato vem de <code>REPLICATE_ELEVENLABS_MODEL</code>, e o schema e configuravel porque modelos Replicate variam nomes de campo.</p>
+    <ul>
+      <li>O campo de texto pode ser <code>prompt</code> ou outro nome via <code>REPLICATE_ELEVENLABS_TEXT_FIELD</code>.</li>
+      <li>O campo de voz pode ser <code>voice</code>, <code>voice_id</code> ou outro nome via env.</li>
+      <li>As vozes podem ser configuradas como pools CSV por genero: female, male, neutral e default.</li>
+      <li>A escolha e deterministica: <code>pool[index % len(pool)]</code>.</li>
+      <li>Quando a voz vem como URL, o sistema baixa e salva localmente para a UI poder tocar depois.</li>
+      <li>Reroll chama o adapter real de novo com indice avancado, preservando o genero e a imagem.</li>
+    </ul>
+    <p>Se a voz falha, o creator nao e descartado automaticamente. A imagem e preservada e a falha entra no log. Isso e intencional: imagem e o artefato minimo; voz e best-effort no build inicial, mas precisa aparecer para aprovacao quando o caminho live esta saudavel.</p>
+  </section>
+
+  <section>
+    <h2>6. Rate limit: a correcao atual</h2>
+    <p>O problema de <code>429</code> vinha do fan-out: varios creators em paralelo, cada um disparando upscale e voz, estouravam o burst baixo do Replicate. O projeto corrigiu em duas camadas.</p>
+    <div class="grid">
+      <div class="card">
+        <strong>Retry esperto</strong>
+        <code>with_transport_retry</code> retenta erros de transporte e <code>429</code>. Se o erro diz "resets in 8s", ele espera pelo menos esse tempo mais folga.
+      </div>
+      <div class="card">
+        <strong>Throttle global</strong>
+        <code>AsyncThrottle</code> e singleton compartilhado por voz, upscale e video. Default: uma chamada por vez e intervalo minimo de 10s.
+      </div>
+    </div>
+    <p>Com credito maior no Replicate, da para abrir a torneira por env: <code>REPLICATE_MIN_INTERVAL_SECONDS=0</code> e <code>REPLICATE_MAX_CONCURRENCY=8</code>. Com credito baixo, o default protege a pipeline.</p>
+  </section>
+
+  <section>
+    <h2>7. Padroes tecnicos usados</h2>
+    <ul>
+      <li><strong>LangGraph:</strong> <code>StateGraph</code> de topo e subgrafo por item; fan-out via <code>Send</code>; pausa humana via <code>interrupt</code> e resume por <code>Command</code>.</li>
+      <li><strong>Ports/Protocols:</strong> contratos em <code>adapters/base.py</code> isolam LLM, creator, video, QC e assembly.</li>
+      <li><strong>Config-driven adapters:</strong> <code>providers.yaml</code> troca provider por papel sem mudar o grafo.</li>
+      <li><strong>Determinismo:</strong> mock sem <code>random</code>, IDs e artefatos derivados de hash, testes offline.</li>
+      <li><strong>Best-effort controlado:</strong> upscale e voz podem falhar sem perder a face gerada; erro fica visivel.</li>
+      <li><strong>Persistencia de midia:</strong> URLs volateis viram arquivos locais em <code>.orchestrator/media</code>.</li>
+      <li><strong>TDD e regressao:</strong> cada bug recente virou teste: rate limit, voz, reroll, approval e UI.</li>
+    </ul>
+  </section>
+
+  <section class="practice">
+    <h2>Pratica rapida</h2>
+    <p>Responda de memoria antes de revelar. O objetivo e construir recuperacao, nao leitura passiva.</p>
+
+    <div class="qa">
+      <h3>1. Se a imagem e a voz nao combinam, qual contrato voce deve olhar primeiro?</h3>
+      <button onclick="reveal('a1')">Revelar resposta</button>
+      <div class="answer" id="a1"><code>VoiceProfile</code> em <code>adapters/base.py</code> e seu uso em <code>creator_real.py</code>/<code>openai_image.py</code>. Ele precisa ser resolvido antes da imagem e repassado tambem para a voz.</div>
+    </div>
+
+    <div class="qa">
+      <h3>2. Se o Replicate retorna 429, quais duas pecas seguram o problema?</h3>
+      <button onclick="reveal('a2')">Revelar resposta</button>
+      <div class="answer" id="a2"><code>with_transport_retry</code> trata o 429 e respeita hint de reset; <code>AsyncThrottle</code> reduz concorrencia e espaça chamadas entre upscale, voz e video.</div>
+    </div>
+
+    <div class="qa">
+      <h3>3. Se voce quer trocar o provider de video, onde deve mexer primeiro?</h3>
+      <button onclick="reveal('a3')">Revelar resposta</button>
+      <div class="answer" id="a3">Implemente ou ajuste um adapter que cumpra <code>VideoPort</code>, registre em <code>registry.py</code>, e troque <code>video:</code> em <code>config/providers.yaml</code>. O grafo nao deveria mudar.</div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Leitura recomendada</h2>
+    <p>A fonte primaria para revisar o estado atual e <a href="../docs/PROGRESS.md">docs/PROGRESS.md</a>, especialmente as entradas sobre rate limit, approval de creators e reroll de voz. Para entender as decisoes de arquitetura, leia <a href="../docs/DECISIONS.md">docs/DECISIONS.md</a>.</p>
+    <p>Referencia rapida desta licao: <a href="../reference/ugc-orchestrator-map.html">Mapa rapido do UGC Orchestrator</a>.</p>
+    <p class="sources">Pergunte ao agente qualquer parte que nao ficou clara; bons proximos temas sao: "me ensine o grafo LangGraph", "me ensine o contrato de adapters" ou "me ensine a depurar um run live".</p>
+  </section>
+</main>
+<script>
+function reveal(id) {
+  document.getElementById(id).classList.toggle("open");
+}
+</script>
+</body>
+</html>

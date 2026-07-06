@@ -21,6 +21,7 @@ import replicate
 
 from orchestrator.adapters.base import VoiceProfile
 from orchestrator.adapters._retry import with_transport_retry
+from orchestrator.adapters._throttle import AsyncThrottle
 from orchestrator.tracing import traced
 
 # Chaves conhecidas onde modelos de áudio costumam expor a saída.
@@ -31,6 +32,11 @@ Runner = Callable[..., Awaitable[Any]]
 
 def _env(name: str, default: str = "") -> str:
     return os.environ.get(name, default).strip()
+
+
+def _env_pool(name: str) -> list[str]:
+    """Lê ``name`` como lista separada por vírgula (um pool de vozes). Vazio -> ``[]``."""
+    return [v.strip() for v in _env(name).split(",") if v.strip()]
 
 
 def _load_base_input() -> dict[str, Any]:
@@ -69,6 +75,7 @@ class ReplicateVoiceAdapter:
         voice_field: Optional[str] = None,
         model_id_field: Optional[str] = None,
         base_input: Optional[dict[str, Any]] = None,
+        throttle: Optional[AsyncThrottle] = None,
     ) -> None:
         resolved_model = (model or _env("REPLICATE_ELEVENLABS_MODEL")).strip()
         if not resolved_model:
@@ -77,6 +84,7 @@ class ReplicateVoiceAdapter:
             )
         self.model = resolved_model
         self._runner: Runner = runner or replicate.async_run
+        self._throttle = throttle
         self.max_retries = max_retries
         self.backoff_base = backoff_base
         self.text_field = (text_field or _env("REPLICATE_ELEVENLABS_TEXT_FIELD", "text")).strip()
@@ -88,11 +96,13 @@ class ReplicateVoiceAdapter:
         ).strip()
         self.base_input = dict(base_input) if base_input is not None else _load_base_input()
         self.model_id = _env("REPLICATE_ELEVENLABS_MODEL_ID")
-        self.voice_ids = {
-            "female": _env("REPLICATE_ELEVENLABS_VOICE_ID_FEMALE"),
-            "male": _env("REPLICATE_ELEVENLABS_VOICE_ID_MALE"),
-            "neutral": _env("REPLICATE_ELEVENLABS_VOICE_ID_NEUTRAL"),
-            "default": _env("REPLICATE_ELEVENLABS_VOICE_ID"),
+        # Cada preset é um *pool* (lista) de vozes; a seleção por índice de creator dá
+        # variedade determinística (voz distinta por creator do mesmo gênero) sem repetir.
+        self.voice_pools = {
+            "female": _env_pool("REPLICATE_ELEVENLABS_VOICE_ID_FEMALE"),
+            "male": _env_pool("REPLICATE_ELEVENLABS_VOICE_ID_MALE"),
+            "neutral": _env_pool("REPLICATE_ELEVENLABS_VOICE_ID_NEUTRAL"),
+            "default": _env_pool("REPLICATE_ELEVENLABS_VOICE_ID"),
         }
 
     @traced("adapter.replicate_voice.create_voice", run_type="tool", step=3, provider="replicate")
@@ -105,7 +115,7 @@ class ReplicateVoiceAdapter:
         lógica propagam na hora.
         """
         output = await with_transport_retry(
-            lambda: self._runner(
+            lambda: self._throttled_run(
                 self.model, input=self._build_input(index, voice_profile)
             ),
             max_retries=self.max_retries,
@@ -114,20 +124,32 @@ class ReplicateVoiceAdapter:
         )
         return self._coerce_output(output)
 
+    async def _throttled_run(self, ref: str, **kwargs: Any) -> Any:
+        """Passa cada tentativa pelo throttle global (quando configurado)."""
+        if self._throttle is None:
+            return await self._runner(ref, **kwargs)
+        return await self._throttle.run(lambda: self._runner(ref, **kwargs))
+
     def _build_input(self, index: int, voice_profile: Optional[VoiceProfile]) -> dict[str, Any]:
         body = dict(self.base_input)
         body[self.text_field] = self._build_text(index, voice_profile)
 
-        voice_id = self._voice_id_for(voice_profile)
+        voice_id = self._voice_id_for(index, voice_profile)
         if voice_id and self.voice_field:
             body[self.voice_field] = voice_id
         if self.model_id and self.model_id_field:
             body[self.model_id_field] = self.model_id
         return body
 
-    def _voice_id_for(self, voice_profile: Optional[VoiceProfile]) -> str:
+    def _voice_id_for(self, index: int, voice_profile: Optional[VoiceProfile]) -> str:
+        """Escolhe a voz do pool do preset ciclando por ``index`` (sem repetir enquanto
+        o pool for >= nº de creators do gênero). Cai no pool ``default`` se o preset
+        estiver vazio; ``""`` se não há nenhuma voz configurada."""
         preset = voice_profile.preset if voice_profile is not None else "neutral"
-        return self.voice_ids.get(preset) or self.voice_ids["default"]
+        pool = self.voice_pools.get(preset) or self.voice_pools["default"]
+        if not pool:
+            return ""
+        return pool[index % len(pool)]
 
     @staticmethod
     def _build_text(index: int, voice_profile: Optional[VoiceProfile]) -> str:
@@ -140,11 +162,22 @@ class ReplicateVoiceAdapter:
 
     @staticmethod
     def _coerce_output(output: Any) -> str:
-        """Normaliza o output (str | FileOutput | dict) para uma string."""
+        """Normaliza o output (str | FileOutput | dict) para uma string.
+
+        Output nulo/vazio é erro: coagir para ``str`` produziria ``"None"`` como
+        voice_id, que seria persistido e quebraria o downstream em silêncio.
+        """
+        if output is None:
+            raise RuntimeError("Replicate voice output is empty")
         if isinstance(output, dict):
+            if not output:
+                raise RuntimeError("Replicate voice output dict is empty")
             for key in _AUDIO_KEYS:
                 if key in output:
                     return str(output[key])
             # fallback: primeiro valor do dict
             return str(next(iter(output.values())))
-        return str(output)
+        uri = str(output).strip()
+        if not uri:
+            raise RuntimeError("Replicate voice output is empty")
+        return uri

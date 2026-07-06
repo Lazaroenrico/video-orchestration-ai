@@ -22,7 +22,7 @@ from langgraph.types import interrupt
 import orchestrator.feedback_store as _feedback_store
 from orchestrator import media_store, stream_bus
 from orchestrator.adapters.base import VoiceProfile, assign_voice_profile
-from orchestrator.config import default_media_path
+from orchestrator.config import default_media_path, default_videos_path
 from orchestrator.graph.state import Item, new_item
 from orchestrator.nodes.base import as_item, get_adapter, get_pipeline
 from orchestrator.tracing import add_trace_metadata, traced
@@ -153,6 +153,25 @@ async def reroll_creator_voice(
     # Trava o gênero da imagem: reroll nunca altera o preset resolvido.
     if profile is not None:
         next_creator["voice_profile"] = profile.as_dict()
+
+    # Voz nova baixável (ex.: URL do Replicate, que expira em ~1h): persiste os
+    # bytes com nome versionado por reroll — o path muda a cada troca, então o
+    # <audio> da UI nunca serve cache da voz anterior.
+    voice_uri = next_creator.get("voice_id")
+    if isinstance(voice_uri, str) and media_store._is_downloadable(voice_uri):
+        creator_id = next_creator.get("id") or "creator"
+        local = await media_store.persist_media(
+            voice_uri,
+            Path(media_root) / run_id / creator_id,
+            f"voice-r{reroll_count}",
+            web_prefix=f"/media/{run_id}/{creator_id}",
+        )
+        if local != voice_uri:
+            next_creator["voice_id"] = local
+            next_creator["voice_ref"] = local
+            next_creator["voice"] = local
+            next_creator["voice_source_uri"] = voice_uri
+            next_creator["voice_preview_uri"] = local
 
     next_creator["voice_reroll_count"] = reroll_count
     next_creator["voice_preview_uri"] = await _build_voice_preview(
@@ -319,7 +338,7 @@ async def node_concepts(state: dict[str, Any], config: RunnableConfig) -> dict[s
 async def node_feedback(state: dict[str, Any], config: RunnableConfig) -> dict[str, Any]:
     """Step 10 — agrega resultados (store que o Step 1 leria no próximo ciclo)."""
     results: list[Item] = state.get("results", [])
-    approved = [r for r in results if r.distributed]
+    approved = [r for r in results if r.assembled is not None and not r.dropped]
     dropped = [r for r in results if r.dropped]
     summary = {
         "produced": len(results),
@@ -367,6 +386,28 @@ def _video_prompt(item: Item, run_prompt: str | None, *, stage: str) -> str:
     parts.append("No audio. No captions burned into the video.")
     return "\n\n".join(parts)
 
+
+def _assembly_prompt(item: Item, run_prompt: str | None, *, platform: str) -> str:
+    """Prompt para o vídeo final, usando Seedance como gerador de montagem."""
+    parts: list[str] = []
+    if run_prompt:
+        parts.append(run_prompt.strip())
+    parts.append(f"Final vertical UGC ad for {platform}.")
+    parts.append("Use the creator reference image as the consistent on-camera creator.")
+    parts.append("Create one polished final video from the approved script and concept.")
+    if item.script:
+        parts.append(f"Script:\n{item.script}")
+    concept = item.concept or {}
+    concept_bits = [
+        f"{key}: {concept[key]}"
+        for key in ("hook", "angle", "hook_style", "offer", "format")
+        if concept.get(key)
+    ]
+    if concept_bits:
+        parts.append("Concept context: " + "; ".join(concept_bits))
+    parts.append("No mock footage. No placeholder frames. No captions burned into the video.")
+    return "\n\n".join(parts)
+
 @traced("node.script", run_type="chain", step=2)
 async def node_script(state: Any, config: RunnableConfig) -> dict[str, Any]:
     """Step 2 — escreve o script no voice do creator, calibrado por plataforma."""
@@ -412,10 +453,10 @@ def make_gen_node(tier: str):
         )
         cost_usd = round(item.cost_usd + clip.meta["cost_usd"], 4)
         run_id = config["configurable"].get("thread_id", "run")
-        media_root = default_media_path()
+        videos_root = default_videos_path()
         updated = item.model_copy(update={"clips": item.clips + [clip]})
         persisted = await media_store.persist_item_media(
-            updated, run_id=run_id, media_root=media_root,
+            updated, run_id=run_id, videos_root=videos_root,
         )
         return {
             "tier": tier,
@@ -450,10 +491,10 @@ async def node_product_demo(state: Any, config: RunnableConfig) -> dict[str, Any
     )
     cost_usd = round(item.cost_usd + demo.meta["cost_usd"], 4)
     run_id = config["configurable"].get("thread_id", "run")
-    media_root = default_media_path()
+    videos_root = default_videos_path()
     updated = item.model_copy(update={"clips": item.clips + [demo]})
     persisted = await media_store.persist_item_media(
-        updated, run_id=run_id, media_root=media_root,
+        updated, run_id=run_id, videos_root=videos_root,
     )
     return {
         "clips": persisted.clips,
@@ -468,7 +509,7 @@ async def node_qc(state: Any, config: RunnableConfig) -> dict[str, Any]:
     adapter = get_adapter(config)
     pipeline = get_pipeline(config)
     fail_rate = float(pipeline.get("qc", {}).get("fail_rate", 0.34))
-    qc = await adapter.qc_check(item_id=item.id, attempt=item.attempts, fail_rate=fail_rate)
+    qc = await adapter.qc_check(item=item, fail_rate=fail_rate)
     add_trace_metadata(
         step=7, stage="qc", item_id=item.id, attempt=item.attempts,
         qc_score=qc.score, qc_passed=qc.passed,
@@ -485,24 +526,20 @@ async def node_assembly(state: Any, config: RunnableConfig) -> dict[str, Any]:
     run_cfg = config["configurable"].get("run", {})
     platform = run_cfg.get("platform", "tiktok")
     add_trace_metadata(step=8, stage="assembly", item_id=item.id, platform=platform)
-    art = await adapter.assemble(item_id=item.id, platform=platform)
+    art = await adapter.assemble(
+        item=item,
+        platform=platform,
+        system_prompt=_assembly_prompt(
+            item, run_cfg.get("video_prompt"), platform=platform
+        ),
+    )
     run_id = config["configurable"].get("thread_id", "run")
-    media_root = default_media_path()
+    videos_root = default_videos_path()
     updated = item.model_copy(update={"assembled": art})
     persisted = await media_store.persist_item_media(
-        updated, run_id=run_id, media_root=media_root,
+        updated, run_id=run_id, videos_root=videos_root,
     )
     return {"assembled": persisted.assembled}
-
-
-@traced("node.distribution", run_type="chain", step=9)
-async def node_distribution(state: Any, config: RunnableConfig) -> dict[str, Any]:
-    """Step 9 — agenda o vídeo no portfolio de contas."""
-    item = as_item(state)
-    adapter = get_adapter(config)
-    add_trace_metadata(step=9, stage="distribution", item_id=item.id)
-    await adapter.distribute(item_id=item.id)
-    return {"distributed": True}
 
 
 @traced("node.drop", run_type="chain", step=7)

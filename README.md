@@ -5,14 +5,17 @@ descrita em `Context.md`. O motor é construído via **TDD** sobre **LangGraph /
 LangChain / LangSmith** e permite misturar adapters reais e mock por papel.
 
 - `config-mock/` roda dry-run determinístico, sem chamadas externas e custo zero.
-- `config/` é o perfil live/híbrido atual: LLM + creator + vídeo LTX 2.3 Fast via
-  APIs reais; QC, assembly e distribuição continuam mock.
+- `config/` é o perfil live atual: LLM + creator + vídeo LTX 2.3 Fast + QC de
+  integridade + assembly final Seedance 2.0 via APIs reais, sem mock nos papéis runtime.
 
-## Pipeline (10 passos)
+## Pipeline (9 passos)
 
 1. Conceitos (Claude) · 2. Scripts (Claude) · 3. Creator reutilizável (GPT Image 2 + Topaz + ElevenLabs) ·
 4. Talking-head (LTX/Kling/Seedance) · 5. Product demo · 6. Execução paralela ·
-7. QC · 8. Montagem · 9. Distribuição · 10. Loop de feedback.
+7. QC · 8. Montagem · 9. Loop de feedback.
+
+O motor termina em **montagem**: item aprovado é item que passou no QC e gerou
+`assembled`. Distribuição/postagem saiu do escopo do produto.
 
 Cada passo é um node num `StateGraph` do LangGraph. Os adapters de provedores são
 abstraídos por protocols e ligados por `config/providers.yaml`, sem mexer no grafo.
@@ -22,6 +25,7 @@ abstraídos por protocols e ligados por `config/providers.yaml`, sem mexer no gr
 ```bash
 uv venv --python 3.12
 uv pip install -e ".[dev]"
+npm install  # necessário só para o bridge live de vídeo final via Seedance
 ```
 
 ## Uso
@@ -44,9 +48,11 @@ cp .env.example .env
 ```
 
 O perfil `config/` já ativa `llm: vercel_gateway_llm`, `creator:
-creator_real_replicate` e `video: replicate`. O vídeo usa LTX 2.3 Fast sem áudio
-(`generate_audio: false`); a voz do creator vem de ElevenLabs via Replicate, e o
-voiceover final entra em etapa posterior de montagem.
+creator_real_replicate`, `video: replicate`, `qc: integrity_qc` e `assembly:
+vercel_seedance_assembly`. Os clips intermediários usam LTX 2.3 Fast sem áudio
+(`generate_audio: false`); o vídeo final é gerado pelo Seedance 2.0 via Vercel AI
+Gateway (`bytedance/seedance-2.0`). O fallback mock do vídeo fica desabilitado no
+perfil live.
 
 ```bash
 orchestrator run --batch 3 --offer "serum X" --config-dir config

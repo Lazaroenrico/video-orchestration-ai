@@ -66,13 +66,13 @@ class Item(BaseModel):
     concept: dict[str, Any]
     creator_ref: Optional[str] = None
     creator_image_uri: Optional[str] = None
+    creator_image_local_path: Optional[str] = None
     script: Optional[str] = None
     tier: Optional[str] = None
     clips: list[Artifact] = Field(default_factory=list)
     qc: Optional[QCResult] = None
     attempts: int = 0
     assembled: Optional[Artifact] = None
-    distributed: bool = False
     dropped: bool = False
     cost_usd: float = 0.0
 
@@ -81,9 +81,15 @@ def new_item(
     concept: dict[str, Any],
     creator_ref: Optional[str] = None,
     creator_image_uri: Optional[str] = None,
+    creator_image_local_path: Optional[str] = None,
 ) -> Item:
     """Factory de um novo ``Item`` a partir de um conceito."""
-    return Item(concept=concept, creator_ref=creator_ref, creator_image_uri=creator_image_uri)
+    return Item(
+        concept=concept,
+        creator_ref=creator_ref,
+        creator_image_uri=creator_image_uri,
+        creator_image_local_path=creator_image_local_path,
+    )
 
 
 def add_items(left: Optional[list[Item]], right: Optional[list[Item]]) -> list[Item]:

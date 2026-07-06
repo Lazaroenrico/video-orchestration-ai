@@ -148,10 +148,10 @@ async def test_node_feedback_writes_to_store(tmp_path):
 
     store_path = tmp_path / "fb_store.json"
 
-    # Build a minimal state with two items (one distributed, one dropped)
+    # Build a minimal state with two items (one assembled, one dropped)
     item_ok = Item(
         concept={"hook_style": "curiosity"},
-        distributed=True,
+        assembled={"kind": "video", "uri": "mock://assembled"},
         cost_usd=0.5,
         attempts=1,
     )
@@ -197,7 +197,7 @@ async def test_node_feedback_no_store_in_config(tmp_path):
 
     item = Item(
         concept={"hook_style": "curiosity"},
-        distributed=True,
+        assembled={"kind": "video", "uri": "mock://assembled"},
         cost_usd=0.5,
     )
 

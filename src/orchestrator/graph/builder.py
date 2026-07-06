@@ -1,7 +1,7 @@
 """Montagem do ``StateGraph`` da pipeline (topologia fixa no v1).
 
 - Subgrafo per-item (``Item``): script -> [route tier] -> gen(tier) -> product_demo
-  -> qc -> [qc gate] -> {assembly -> distribution | regen | drop}.
+  -> qc -> [qc gate] -> {assembly | regen | drop}.
 - Grafo de topo (``BatchState``): roster -> concepts -> [fan-out via Send] ->
   process_item (invoca o subgrafo) -> feedback.
 """
@@ -21,7 +21,6 @@ from orchestrator.nodes.stages import (
     node_approval,
     node_assembly,
     node_concepts,
-    node_distribution,
     node_drop,
     node_feedback,
     node_product_demo,
@@ -47,7 +46,6 @@ def build_item_graph(pipeline: dict[str, Any]):
 
     sg.add_node("qc", make_qc_route_node(tns, max_attempts), destinations=qc_map)
     sg.add_node("assembly", node_assembly)
-    sg.add_node("distribution", node_distribution)
     sg.add_node("drop", node_drop)
 
     sg.add_edge(START, "script")
@@ -58,8 +56,7 @@ def build_item_graph(pipeline: dict[str, Any]):
     for t in tns:
         sg.add_edge(t, "product_demo")
     sg.add_edge("product_demo", "qc")
-    sg.add_edge("assembly", "distribution")
-    sg.add_edge("distribution", END)
+    sg.add_edge("assembly", END)
     sg.add_edge("drop", END)
     return sg.compile()
 
@@ -130,7 +127,8 @@ def make_process_item_node(item_app: Any):
         item = as_item(result)
         add_trace_metadata(
             step=6, stage="process_item_done", item_id=item.id,
-            cost_usd=item.cost_usd, dropped=item.dropped, distributed=item.distributed,
+            cost_usd=item.cost_usd, dropped=item.dropped,
+            assembled=bool(item.assembled),
         )
         return {
             "results": [item],
@@ -156,6 +154,7 @@ def make_fan_out_node():
                 concept=concept,
                 creator_ref=creator.get("id"),
                 creator_image_uri=creator_image_uri,
+                creator_image_local_path=creator.get("image_local_path"),
             )
             cid = concept.get("id")
             if cid:

@@ -1,11 +1,152 @@
 # PROGRESS — handoff
 
-Estado em **2026-07-02**. Suíte: **330 passando, 2 skips** (testes `--live` opt-in,
+Estado em **2026-07-06**. Suíte: **415 passando, 2 skips** (testes `--live` opt-in,
 pulados sem `JUDGE_GATEWAY_URL`) + 2 warnings conhecidos/benignos (LangSmith
 deprecation em import; LangGraph resume parcial — ver falha #5).
 Rodar: `rtk proxy python -m pytest`.
 
 > Nota: a falha que estava em aberto em `_SAFE_CREATOR_PROMPT` foi corrigida — ver falha #10.
+
+## Retry de 429 nos adapters HTTP puros do creator + erro claro em shape inesperado (2026-07-06)
+
+Sintoma: `tests/test_creator_real.py` trazia 6 testes RED sem GREEN correspondente —
+`OpenAIImageAdapter`, `TopazUpscaleAdapter` e `ElevenLabsVoiceAdapter` não aceitavam
+`backoff_base` e não retentavam `429`; além disso, um `generate_face` com shape
+inesperado (sem `primary`/`angles`) estourava `KeyError` cru em `build_creator`.
+
+Causa raiz: esses três adapters (contrato HTTP direto, sem SDK Replicate) nunca
+ganharam a mesma política de retry aplicada aos adapters Replicate
+(`replicate_upscale.py`/`replicate_video.py`/`replicate_voice.py`) quando o rate
+limiting foi introduzido (falha #14) — o trabalho ficou pela metade (só os testes
+foram escritos).
+
+Correção: os três adapters passaram a envolver a chamada HTTP em
+`with_transport_retry` (mesmo módulo `_retry.py`, mesma semântica: retenta só
+`429`, backoff exponencial determinístico via `backoff_base`/`max_retries`
+injetáveis). `RealCreatorAdapter.build_creator` valida `primary`/`angles` no dict
+devolvido por `generate_face` e levanta `RuntimeError` com mensagem explícita antes
+de indexar. Verificação: `rtk proxy python -m pytest` → **415 passed, 2 skipped**.
+
+## Prompts persistidos no servidor + redesign do fluxo do dashboard (2026-07-03)
+
+Objetivo: acabar com prompts que "somem" — templates viviam só no `localStorage`
+do browser, o botão "Salvar Prompts" do modal apenas fechava o overlay, e o prompt
+do run só era persistido no servidor como carona do creator aprovado (nunca quando
+`approve_creators=false`). Também melhorar o fluxo do form (seções 1·Produto /
+2·Prompts / 3·Executar, com os prompts ativos visíveis antes de iniciar).
+
+### Red → Green (TDD)
+- RED: `tests/test_web_prompts.py` (18 casos) exigiu `orchestrator/prompt_store.py`
+  (save/list/delete de templates + `record_last_used`/`get_last_used`),
+  `default_prompt_store_path()` (`ORCH_PROMPTS`, default `.orchestrator/prompts.json`),
+  endpoints `GET/POST /api/prompts` e `DELETE /api/prompts/{id}`, registro do
+  último prompt usado em todo `POST /api/run`, e contratos estáticos da UI
+  (templates via DOM, rascunho persistente, `applyPrompts`, chips de status,
+  reuso de prompts do histórico).
+- GREEN:
+  - `prompt_store.py` (novo): JSON com `templates` (`_idx` incremental p/ ordenação
+    determinística, padrão do `creator_store`) + `last_used` por tipo (`creator`/`video`).
+  - `web/server.py`: endpoints acima; `start_run` grava `last_used` sempre.
+  - `web/static/index.html`:
+    - Templates agora carregam do servidor e são montados via `createElement`/
+      `textContent` + `addEventListener` (helper `buildTemplateCard`); os 6 templates
+      builtin saíram do HTML inline para `BUILTIN_TEMPLATES` (JS data).
+    - Rascunho das textareas em `localStorage` (`draft_*_prompt`), restaurado no load;
+      sem rascunho, cai no `last_used` do servidor. "Salvar Prompts" → `applyPrompts()`.
+    - Form principal em 3 seções com chips (`#prompt-status`) mostrando o prompt
+      ativo de creator/vídeo antes de gastar créditos.
+    - Histórico ganhou "↩ Reusar prompts" (preenche o builder com os prompts do run).
+    - `migrateLocalTemplates()` sobe templates legados do `localStorage` para o
+      servidor uma única vez.
+
+### Falha investigada nesta fase (raiz do "prompt salvo não aplica")
+- Sintoma: clicar num template salvo às vezes não preenchia a textarea (silencioso).
+  - Causa raiz: `loadCustomTemplates` injetava o prompt num atributo `onclick`
+    inline escapando apenas `'` e `\n`; qualquer prompt com **aspas duplas**
+    quebrava o atributo HTML e o clique virava no-op. `title`/`desc` também
+    entravam por `innerHTML` sem escape.
+  - Correção: cards montados via DOM com `textContent` e listener; o texto do
+    template nunca passa por parsing de HTML. Regressão:
+    `test_ui_templates_pane_is_dom_built_without_inline_injection` + smoke live
+    (template com aspas duplas e quebra de linha salva/aplica/deleta via API).
+- Verificação: `rtk proxy python -m pytest` → **391 passed, 2 skipped**;
+  `node --check` no script extraído do HTML; smoke com uvicorn +
+  `POST/GET/DELETE /api/prompts` e `GET /` → 200.
+
+## Correção — imagem de referência do Seedance acima de 30 MiB (2026-07-02)
+
+Sintoma: o assembly final falhava no Vercel AI Gateway/Seedance com
+`The request failed because the size of the input image (31 MiB) exceeds the limit (30 MiB)`.
+
+Causa raiz: o fan-out guardava só a URL remota da imagem upscalada (`image_source_uri`) no
+`Item`. Algumas imagens upscaladas pelo Replicate ficavam com 31-38 MB; o bridge Node
+enviava essa referência diretamente para `experimental_generateVideo`, e o Gateway
+rejeitava o input por tamanho.
+
+Correção: `persist_creator_media` agora guarda também `image_local_path`; o fan-out propaga
+esse path para `Item.creator_image_local_path`; o `VercelSeedanceAssemblyAdapter` prefere o
+arquivo local no assembly e comprime qualquer referência acima do alvo seguro (28 MiB) para
+um JPEG temporário antes de chamar o bridge. Para checkpoints antigos sem path local, o
+adapter baixa a URL remota para temporário e aplica a mesma compactação. Regressões em
+`tests/test_media_store.py`, `tests/test_builder.py` e `tests/test_vercel_seedance_assembly.py`.
+
+## Perfil live sem mock + assembly Seedance 2.0 (2026-07-02)
+
+Objetivo: fazer `config/` representar o caminho live real, sem `mock` nos papéis runtime,
+e gerar o vídeo final com Seedance 2.0 via Vercel AI Gateway. `config-mock/` continua
+sendo o dry-run determinístico/offline.
+
+### Red → Green (TDD)
+- RED: novos testes exigiram `config/providers.yaml` sem `mock` em `llm`/`creator`/
+  `video`/`qc`/`assembly`, `video.allow_mock_fallback=false`, `IntegrityQCAdapter`,
+  `VercelSeedanceAssemblyAdapter` e erro explícito em tier não-LTX quando o fallback do
+  Replicate estiver desligado.
+- GREEN:
+  - `adapters/integrity_qc.py`: bloqueia mídia mock/fallback e URIs que não sejam vídeo.
+  - `adapters/vercel_seedance_assembly.py`: monta payload para `bytedance/seedance-2.0`,
+    com runner Node injetável e saída `data:video/mp4`.
+  - `scripts/vercel_generate_video.mjs` + `package.json`: bridge para AI SDK
+    `experimental_generateVideo`.
+  - `nodes/stages.py`: QC/assembly recebem o `Item` completo; assembly recebe prompt final
+    com script, conceito e briefing do run.
+  - `registry.py` e `config/`: registram `integrity_qc`/`vercel_seedance_assembly` e
+    desabilitam fallback mock no vídeo live.
+
+### Falha investigada nesta fase
+- Sintoma: a fatia focada falhava na coleta com `ModuleNotFoundError` para
+  `orchestrator.adapters.integrity_qc` e `orchestrator.adapters.vercel_seedance_assembly`.
+  - Causa: os testes RED especificavam adapters ainda inexistentes; `config/` ainda
+    apontava `qc`/`assembly` para `mock`.
+  - Correção: criar os adapters, bridge Node, contratos por `Item` e atualizar registry/config.
+  - Verificação: `rtk proxy python -m pytest` → **366 passed, 2 skipped**;
+    `rtk node --check scripts/vercel_generate_video.mjs` → OK.
+
+## Remoção completa de distribuição do motor (2026-07-02)
+
+Objetivo: tirar postagem/agendamento do produto. O motor agora termina em `assembly`;
+um item aprovado/finalizado é aquele com `assembled` preenchido, ou `dropped=True` se
+esgotou o QC.
+
+### Red → Green (TDD)
+- RED: testes passaram a exigir ausência do node `distribution` no item graph e feedback
+  contando aprovados por `assembled`.
+- GREEN:
+  - `graph/builder.py`: `assembly -> END`; removido node/edge de distribuição.
+  - `graph/state.py`: removido `Item.distributed`.
+  - `adapters/base.py`, `adapters/mock.py`, `registry.py`: removidos `DistributionPort`,
+    `distribute` e role `distribution`.
+  - `runner.py`, `nodes/stages.py`, `web/server.py`, UI: conclusão por `assembled`.
+  - `config/*.yaml`, docs e testes atualizados para a pipeline sem distribuição.
+  - Verificação final: `rtk proxy python -m pytest` → **357 passed, 2 skipped,
+    2 warnings conhecidos**.
+
+### Falha investigada nesta fase
+- Sintoma: a fatia focada falhava em
+  `tests/test_builder.py::test_item_graph_has_expected_nodes` porque `distribution`
+  ainda existia, e em `tests/test_feedback_store.py::test_node_feedback_writes_to_store`
+  porque `approved` ainda era calculado por `distributed`.
+  - Causa: o grafo e o feedback ainda usavam a semântica antiga de postagem.
+  - Correção: remover Step 9 e trocar estado terminal aprovado para `assembled`.
 
 ## ElevenLabs via Replicate no creator live (2026-07-02)
 
@@ -190,7 +331,7 @@ renderável, redesign de UI, integração), delegados a agentes Sonnet sob TDD.
 - **Persistência de mídia de item + voz audível** (`media_store.py`, `nodes/stages.py`,
   `adapters/elevenlabs_voice.py`):
   - `persist_item_media` baixa `clips[].uri`/`assembled.uri` http(s) para
-    `/media/{run_id}/items/{item_id}/…` (provenance em `meta["source_uri"]`); no-op para
+    `/videos/{run_id}/items/{item_id}/…` (provenance em `meta["source_uri"]`); no-op para
     `mock://`/opaco. Chamado nos gen nodes e em `node_assembly`.
   - `elevenlabs_voice.synthesize_preview` gera amostra TTS curta; `_build_voice_preview`
     resolve um `voice_preview_uri` audível (reusa voz já baixada do Replicate; sintetiza
@@ -434,7 +575,7 @@ Atributo do interrupt no LangGraph 1.2.6 confirmado:
 - [x] `graph/state.py` — Item/BatchState/QCResult/JudgeVerdict + reducers (`test_state.py`)
 - [x] `adapters/base.py` + `adapters/mock.py` — mocks determinísticos, custo por tier (`test_adapters_mock.py`)
 - [x] `graph/routing.py` — tier routing + QC gate/loop (`test_routing.py`)
-- [x] `nodes/stages.py` + `nodes/base.py` — os 10 stages como nodes
+- [x] `nodes/stages.py` + `nodes/base.py` — stages da pipeline como nodes
 - [x] `registry.py` — provider→adapter (mock + replicate)
 - [x] `graph/builder.py` — StateGraph (subgrafo per-item + fan-out via Send) (`test_builder.py`)
 - [x] `graph/checkpoint.py` — SQLite async-compatible saver (`test_checkpoint.py`)
@@ -505,12 +646,11 @@ orchestrator run --batch 2 --offer "test product" --platform tiktok
    - [x] Vídeo Replicate (`adapters/replicate_video.py`, D14) — `video: replicate` + `REPLICATE_API_TOKEN`.
    - **Pendente p/ rodar real:** (a) expor as chaves/envs no ambiente; (b) configurar o
      ref real `REPLICATE_ELEVENLABS_MODEL` e o schema `REPLICATE_ELEVENLABS_*` do modelo;
-     (c) Steps 8/9 seguem mock (sem API única). Ver D24.
-2. **Step 9 (distribuição) real** (cloud phones/proxies/scheduler) — hoje mock.
-3. **Topologia data-driven**: mover nodes/edges para o `pipeline.yaml` (hoje fixa no builder).
-4. **LangSmith**: setar `LANGSMITH_TRACING=true`/`LANGSMITH_API_KEY` p/ tracing; opcional
+     (c) Step 8 segue mock (sem API única). Ver D24.
+2. **Topologia data-driven**: mover nodes/edges para o `pipeline.yaml` (hoje fixa no builder).
+3. **LangSmith**: setar `LANGSMITH_TRACING=true`/`LANGSMITH_API_KEY` p/ tracing; opcional
    subir o eval do Judge via `langsmith.evaluate` (hoje o evaluator roda local/offline).
-5. [x] **CLI do loop**: `runner.run_cycles` + comando `orchestrator loop --cycles N
+4. [x] **CLI do loop**: `runner.run_cycles` + comando `orchestrator loop --cycles N
    --feedback-store ...` roda N ciclos encadeados; cada ciclo lê o feedback do anterior
    (viés nos conceitos) e grava o seu. Testes: `test_run_cycles.py` (3),
    `test_cli.py::test_cli_loop_*` (2). Ver **D16**.
@@ -625,3 +765,82 @@ orchestrator run --batch 2 --offer "test product" --platform tiktok
       (`ltx` no config atual); testes de roteamento foram atualizados para a nova regra
       e `tests/test_builder.py` ganhou cobertura garantindo que itens regenerados acumulam
       somente clips `ltx`.
+
+12. **Dashboard pausava pedindo aprovação de creators**
+    - Sintoma: o dashboard entrava no `GraphInterrupt(type="approve_creators")` e ficava
+      aguardando aceite/reprovação manual; quando o painel visual não aparecia, a execução
+      parecia travada.
+    - Causa raiz: `_execute_run` hardcodava `run.approve_creators=True` para todo run web,
+      optando pelo gate humano mesmo quando o fluxo desejado era geração direta.
+    - Correção: runs do dashboard agora usam `approve_creators=False`; o node de approval
+      continua disponível para testes e invocações diretas que optem explicitamente pelo
+      gate humano. Regressão coberta por
+      `test_dashboard_run_bypasses_creator_approval_by_default`.
+
+13. **Voz dos creators inaudível na web (Replicate ElevenLabs 422)**
+    - Sintoma: na pipeline live (`creator_real_replicate`), imagem/upscale OK, mas a voz
+      falhava com `POST .../elevenlabs/turbo-v2.5/predictions 422 — input: prompt is
+      required`; `voice_id` virava `""`, `_build_voice_preview` devolvia `None` e a UI
+      mostrava "sem voz" — nenhum áudio audível.
+    - Causa raiz: `.env` fixava `REPLICATE_ELEVENLABS_MODEL=elevenlabs/turbo-v2.5` mas não
+      o campo de texto; o `ReplicateVoiceAdapter` usava o default `text`, enquanto o modelo
+      exige `prompt`. Confirmado ao vivo: campo de texto = `prompt`, campo de voz = `voice`,
+      aceita nomes premade (ex.: `Rachel`), retorna `.mp3`.
+    - Correção: `.env`/`.env.example` ajustados (`TEXT_FIELD=prompt`, `VOICE_FIELD=voice`).
+      Adicionalmente, para não repetir voz entre creators do mesmo gênero, o adapter passou
+      a ler cada `VOICE_ID_{FEMALE,MALE,NEUTRAL}` como **pool** (lista CSV) e escolher
+      `pool[index % len(pool)]` — determinístico, casado com o gênero do `voice_profile`
+      (que já alimenta a imagem). Regressões:
+      `test_turbo_v25_sends_script_under_prompt` e
+      `test_voice_pool_no_repeat_across_creators` em `tests/test_replicate_voice.py`.
+      Suíte offline verde (2 skips `--live`).
+
+14. **429 Too Many Requests derrubava upscale/voz/vídeo na pipeline live**
+    - Sintoma: com conta Replicate de crédito baixo (<US$5, cap ~6 req/min, burst 1),
+      o roster disparava N creators em paralelo (upscale + voz cada) e quase todas as
+      chamadas voltavam `429 Request was throttled`; a voz (best-effort) virava `""`
+      silenciosamente e o upscale caía no fallback da imagem original.
+    - Causa raiz: nenhum rate limiting no cliente — o fan-out do grafo estourava o
+      burst da conta instantaneamente; o retry usava só backoff exponencial curto,
+      ignorando o hint "resets in ~Ns" do corpo do 429.
+    - Correção: novo `adapters/_throttle.py` com `AsyncThrottle` (semáforo com
+      `REPLICATE_MAX_CONCURRENCY`, default 1, + intervalo mínimo entre inícios
+      `REPLICATE_MIN_INTERVAL_SECONDS`, default 10s) como singleton de processo
+      compartilhado por voz, upscale e vídeo (`get_replicate_throttle()`, wired nas
+      fábricas `build_real_creator_replicate_adapter` e `registry._build_replicate`).
+      `with_transport_retry` agora extrai o hint de reset do 429 ("resets in ~8s" /
+      "Expected available in 3 seconds") e espera `max(backoff, hint + 1s)`. Clock e
+      sleep injetáveis — testes determinísticos, sem dormir.
+      Regressões: `tests/test_replicate_throttle.py` e novos casos em `tests/test_retry.py`.
+
+15. **Dashboard não deixava escolher a pessoa gerada para os vídeos**
+    - Sintoma: o painel de aprovação de creators existia na UI mas nunca aparecia; os
+      vídeos saíam com todos os creators gerados, sem escolha humana.
+    - Causa raiz: `_execute_run` hardcodava `approve_creators=False` (decisão do item 12,
+      que resolveu o "travamento" da época removendo o gate em vez de torná-lo opcional).
+    - Correção: `approve_creators` virou campo do `RunRequest` (default `True`) propagado
+      ao run config; a UI ganhou o checkbox "Escolher creators antes de gerar os vídeos"
+      (ligado por padrão) no form. O run pausa no gate, mostra imagem+voz de cada creator
+      e retoma só com os aprovados (o fan-out já atribuía `creator_ref`/`creator_image_uri`
+      a partir do roster filtrado). Regressões:
+      `test_dashboard_run_pauses_for_creator_approval_by_default` e
+      `test_dashboard_run_can_bypass_creator_approval`.
+
+16. **Reroll de voz era fake e o histórico mostrava creators sem mídia**
+    - Sintoma: o botão "↻ Reroll" do painel de aprovação só trocava um bip sintético
+      gerado no browser (nunca chamava o servidor); no caminho live, mesmo o endpoint
+      `/reroll-voice` apenas renomeava a ref (`::reroll-N`) sem gerar voz nova. A galeria
+      de creators listava entradas "só inspiração" (prompt sem imagem/voz).
+    - Causa raiz: `RealCreatorAdapter` não implementava o contrato `reroll_creator_voice`
+      (só o fallback genérico do stage rodava); o `CompositeAdapter` não delegava os ports
+      opcionais do papel creator; `/api/creators` não filtrava entradas incompletas.
+    - Correção: `RealCreatorAdapter.reroll_creator_voice` pede `create_voice(index +
+      reroll_count)` — avança para a PRÓXIMA voz do pool do mesmo gênero (imagem e preset
+      preservados); `CompositeAdapter.__getattr__` delega `reroll_creator_voice`/`voice`
+      ao adapter do papel creator quando existem; o stage persiste a voz nova baixável em
+      `voice-r{N}.{ext}` (path versionado — sem cache do áudio antigo na UI) e o botão da
+      UI agora chama `rerollApprovalCreatorVoice` (endpoint real). `/api/creators` e a
+      recuperação via media dir só retornam pessoas completas (imagem renderizável + voz
+      tocável). Regressões: novos casos em `tests/test_creator_real.py`,
+      `tests/test_registry_composite.py`, `tests/test_stages_reroll.py` e
+      `tests/test_web_item_updates.py`. Suíte completa verde (358 passed, 2 skips `--live`).

@@ -48,8 +48,6 @@ mindmap
       assembly Step8
         assemble
         persist_item_media
-      distribution Step9
-        distribute
       drop
         marca dropped true
     Camada web FastAPI
@@ -77,7 +75,6 @@ mindmap
       qc mock
         determinístico por fail_rate
       assembly mock
-      distribution mock
       judge gateway
         JudgePort via HTTP configurável judge.yaml
 ```
@@ -110,7 +107,7 @@ sequenceDiagram
         REP-->>G: clip mp4
         G->>G: qc_check (mock determinístico)
         G->>MEDIA: persist_item_media (clips, assembled)
-        G->>G: assemble / distribute (mock)
+        G->>G: assemble (mock)
     end
     G-->>U: feedback (summary agregando resultados do batch)
 ```
@@ -127,7 +124,6 @@ sequenceDiagram
 | 5 | `node_product_demo` | `replicate` | Sim — LTX 2.3 Fast image-to-video sem áudio |
 | 7 | `node_qc` | `mock` | Não — determinístico via `fail_rate` |
 | 8 | `node_assembly` | `mock` | Não — mock |
-| 9 | `node_distribution` | `mock` | Não — mock |
 | — | `JudgePort` (gateway) | `gateway` | Sim, quando usado — HTTP configurável (`config/judge.yaml`) |
 
 ## 4. Notas de arquitetura
@@ -146,8 +142,8 @@ sequenceDiagram
   voz, clipes) e reescreve URIs para caminhos locais servíveis sob
   `/media/{run_id}/...`, tornando o dashboard independente das URLs
   originais dos providers.
-- **QC loop**: `route_after_qc` decide entre reprocessar no próximo tier
-  (mais caro), ir para `assembly`, ou `drop` após `qc.max_attempts` (default 3).
+- **QC loop**: `route_after_qc` decide entre reprocessar no tier configurado,
+  ir para `assembly`, ou `drop` após `qc.max_attempts` (default 3).
 - **Feedback loop (Step 10 → 1)**: `node_feedback` grava um resumo em
   `feedback_store`; o próximo ciclo (`orchestrator loop`) usa
   `prior_winning_styles` como `bias` em `generate_concepts`.

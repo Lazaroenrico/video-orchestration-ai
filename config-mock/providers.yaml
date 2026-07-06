@@ -11,5 +11,4 @@ adapters:
   video: mock
   qc: mock
   assembly: mock
-  distribution: mock
   judge: gateway   # informativo: 'judge' não está em ROLES, não é instanciado no run

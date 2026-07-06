@@ -29,7 +29,6 @@ def test_all_pipeline_nodes_have_trace_markers():
         stages.node_product_demo: "node.product_demo",
         stages.node_qc: "node.qc",
         stages.node_assembly: "node.assembly",
-        stages.node_distribution: "node.distribution",
         stages.node_drop: "node.drop",
         builder.make_process_item_node(None): "node.process_item",
         builder.make_fan_out_node(): "node.fan_out",
@@ -58,7 +57,6 @@ def test_composite_adapter_public_methods_have_trace_markers():
         "generate_clip": "adapter.video.generate_clip",
         "qc_check": "adapter.qc.qc_check",
         "assemble": "adapter.assembly.assemble",
-        "distribute": "adapter.distribution.distribute",
     }
 
     for method, trace_name in expected.items():
@@ -85,7 +83,6 @@ def test_concrete_adapter_methods_have_trace_markers():
         MockAdapter.generate_clip: "adapter.mock.generate_clip",
         MockAdapter.qc_check: "adapter.mock.qc_check",
         MockAdapter.assemble: "adapter.mock.assemble",
-        MockAdapter.distribute: "adapter.mock.distribute",
         AnthropicLLMAdapter.generate_concepts: "adapter.anthropic.generate_concepts",
         AnthropicLLMAdapter.write_script: "adapter.anthropic.write_script",
         RealCreatorAdapter.build_creator: "adapter.creator_real.build_creator",

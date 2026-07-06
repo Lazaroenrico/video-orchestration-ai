@@ -16,6 +16,7 @@ dependencies = [
     "anthropic>=0.40",
     "replicate>=1.0",
     "python-dotenv>=1.0",
+    "pillow>=10.0",
 ]
 
 [project.optional-dependencies]

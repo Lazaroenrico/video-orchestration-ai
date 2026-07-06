@@ -6,6 +6,9 @@ __pycache__/
 build/
 dist/
 
+# Node bridge (Seedance / Vercel AI SDK)
+node_modules/
+
 # Estado de runs (checkpoints sqlite)
 .orchestrator/
 

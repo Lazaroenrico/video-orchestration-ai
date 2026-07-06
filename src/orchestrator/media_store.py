@@ -147,26 +147,31 @@ async def persist_item_media(
     item: Any,
     *,
     run_id: str,
-    media_root: str | Path,
+    videos_root: str | Path | None = None,
+    media_root: str | Path | None = None,
     client: Optional[httpx.AsyncClient] = None,
 ) -> Any:
     """Persiste os bytes dos clips e do vídeo montado de um ``Item``.
 
     - ``clips[n].uri`` http(s)/data: -> baixado para
-      ``/media/{run_id}/items/{item_id}/clip-{n}.{ext}``; a uri original fica em
+      ``/videos/{run_id}/items/{item_id}/clip-{n}.{ext}``; a uri original fica em
       ``meta["source_uri"]``.
     - ``assembled.uri`` http(s)/data: -> baixado para
-      ``/media/{run_id}/items/{item_id}/assembled.{ext}``, mesma proveniência.
+      ``/videos/{run_id}/items/{item_id}/assembled.{ext}``, mesma proveniência.
     - Não-baixáveis (``mock://``, ids opacos): no-op total, item devolvido inalterado.
 
     Aceita ``item`` como ``Item`` (pydantic) ou dict — devolve o mesmo tipo recebido,
     mirando o padrão já usado em ``persist_creator_media``/``_to_plain`` do server.
     """
+    root = videos_root if videos_root is not None else media_root
+    if root is None:
+        raise TypeError("persist_item_media exige videos_root")
+
     is_model = hasattr(item, "model_dump")
     data = item.model_dump() if is_model else dict(item)
     item_id = data.get("id") or "item"
-    dest_dir = Path(media_root) / run_id / "items" / item_id
-    web_prefix = f"/media/{run_id}/items/{item_id}"
+    dest_dir = Path(root) / run_id / "items" / item_id
+    web_prefix = f"/videos/{run_id}/items/{item_id}"
 
     clips = data.get("clips") or []
     new_clips: list[dict[str, Any]] = []
@@ -232,6 +237,8 @@ async def persist_creator_media(
         if local != image_uri:
             out["upscaled_base"] = local
             out["image_source_uri"] = image_uri
+            filename = local.rsplit("/", 1)[-1]
+            out["image_local_path"] = str(dest_dir / filename)
 
     voice_uri = out.get("voice_id")
     if isinstance(voice_uri, str) and _is_downloadable(voice_uri):

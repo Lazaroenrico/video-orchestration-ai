@@ -29,6 +29,18 @@ def test_https_mp4_artifact_is_renderable_video() -> None:
     assert art["renderable"] is True
 
 
+def test_videos_path_artifact_is_renderable_video() -> None:
+    art = web_server._normalize_artifact(
+        {"kind": "clip", "uri": "/videos/run-1/items/item-1/assembled.mp4"}
+    )
+    assert art["media_type"] == "video"
+    assert art["renderable"] is True
+
+
+def test_web_app_mounts_videos_static_route() -> None:
+    assert any(getattr(route, "path", None) == "/videos" for route in web_server.app.routes)
+
+
 def test_data_image_artifact_is_renderable_image() -> None:
     art = web_server._normalize_artifact({"kind": "face", "uri": "data:image/png;base64,abc"})
     assert art["media_type"] == "image"
@@ -129,7 +141,6 @@ def test_process_item_final_snapshot_keeps_artifacts_and_status() -> None:
                         "id": "item-1",
                         "concept": {"hook": "Try this"},
                         "assembled": Artifact(kind="video", uri="https://cdn.example/final.mp4"),
-                        "distributed": True,
                         "dropped": False,
                         "attempts": 1,
                         "cost_usd": 0.11,
@@ -141,8 +152,8 @@ def test_process_item_final_snapshot_keeps_artifacts_and_status() -> None:
     )
     assert update is not None
     item = update["item"]
-    assert item["distributed"] is True
     assert item["dropped"] is False
+    assert item["assembled"]["uri"] == "https://cdn.example/final.mp4"
     assert item["cost_usd"] == 0.11
     assert {a["uri"] for a in item["artifacts"]} == {
         "mock://clip/item-1/demo",
@@ -180,6 +191,8 @@ def test_ui_approval_panel_exposes_voice_preset_and_reroll_controls() -> None:
     assert 'value = "neutral"' in show_body
     assert 'const reroll = document.createElement("button")' in show_body
     assert 'reroll.className = "ap-voice-reroll"' in show_body
+    # O reroll precisa bater no servidor (voz REAL nova), não só trocar o bip local.
+    assert "rerollApprovalCreatorVoice(" in show_body
 
 
 def test_ui_approval_voice_reroll_updates_audio_preview_in_place() -> None:
@@ -196,7 +209,12 @@ def test_creators_history_exposes_store_path_and_entries(tmp_path, monkeypatch) 
     creator_store.record_creators(
         store,
         "run-1",
-        [{"id": "creator-0", "image": "/media/run-1/creator-0/image.png", "voice": "voice-0"}],
+        [{
+            "id": "creator-0",
+            "image": "/media/run-1/creator-0/image.png",
+            "voice": "/media/run-1/creator-0/voice.mp3",
+            "voice_preview_uri": "/media/run-1/creator-0/voice.mp3",
+        }],
         approved_ids=["creator-0"],
     )
     monkeypatch.setenv("ORCH_CREATORS", str(store))
@@ -208,6 +226,69 @@ def test_creators_history_exposes_store_path_and_entries(tmp_path, monkeypatch) 
     assert payload["store_path"] == str(store)
     assert payload["exists"] is True
     assert payload["creators"][0]["creator_id"] == "creator-0"
+
+
+def test_creators_history_only_returns_people_with_image_and_voice(tmp_path, monkeypatch) -> None:
+    """Entradas incompletas (só prompt/"inspiração", só imagem, ou voz não tocável)
+    não aparecem na galeria — a web só carrega pessoas com imagem + voz."""
+    store = tmp_path / "creators.json"
+    creator_store = web_server.creator_store
+    creator_store.record_creators(
+        store,
+        "run-1",
+        [
+            {  # completo: imagem renderizável + voz tocável
+                "id": "creator-0",
+                "image": "/media/run-1/creator-0/image.png",
+                "voice": "/media/run-1/creator-0/voice.mp3",
+                "voice_preview_uri": "/media/run-1/creator-0/voice.mp3",
+            },
+            {  # só "inspiração": nem imagem nem voz
+                "id": "creator-1",
+                "image": None,
+                "voice": None,
+            },
+            {  # imagem sem voz tocável (voice_id opaco não toca no browser)
+                "id": "creator-2",
+                "image": "/media/run-1/creator-2/image.png",
+                "voice": "voice-2",
+            },
+            {  # voz sem imagem
+                "id": "creator-3",
+                "image": None,
+                "voice": "/media/run-1/creator-3/voice.mp3",
+                "voice_preview_uri": "/media/run-1/creator-3/voice.mp3",
+            },
+        ],
+        approved_ids=["creator-0", "creator-1", "creator-2", "creator-3"],
+        creator_prompt="mulher 30 anos, estilo natural",
+    )
+    monkeypatch.setenv("ORCH_CREATORS", str(store))
+
+    import asyncio
+
+    payload = asyncio.run(web_server.creators_history())
+
+    ids = [c["creator_id"] for c in payload["creators"]]
+    assert ids == ["creator-0"]
+
+
+def test_recover_from_media_skips_dirs_missing_image_or_voice(tmp_path) -> None:
+    media_root = tmp_path / "media"
+    complete = media_root / "web-a" / "creator-0"
+    complete.mkdir(parents=True)
+    (complete / "image.png").write_bytes(b"png")
+    (complete / "voice.mp3").write_bytes(b"mp3")
+    image_only = media_root / "web-a" / "creator-1"
+    image_only.mkdir(parents=True)
+    (image_only / "image.png").write_bytes(b"png")
+    voice_only = media_root / "web-a" / "creator-2"
+    voice_only.mkdir(parents=True)
+    (voice_only / "voice.wav").write_bytes(b"wav")
+
+    recovered = web_server._recover_creators_from_media(media_root)
+
+    assert [c["creator_id"] for c in recovered] == ["creator-0"]
 
 
 def test_creators_history_recovers_from_media_when_store_is_empty(tmp_path, monkeypatch) -> None:
@@ -317,6 +398,107 @@ async def test_approve_uses_updated_pending_roster_state(monkeypatch) -> None:
         "approved": ["creator-0"],
         "creators": [updated_creator],
     }
+
+
+@pytest.mark.asyncio
+async def test_dashboard_run_pauses_for_creator_approval_by_default(tmp_path, monkeypatch) -> None:
+    """Default do dashboard: pausa no gate humano para o usuário ESCOLHER os creators
+    (imagem + voz) que vão estrelar os vídeos, e só retoma com os aprovados."""
+    run_id = "web-creator-approval"
+    monkeypatch.setenv("ORCH_MEDIA", str(tmp_path / "media"))
+    monkeypatch.setenv("ORCH_CREATORS", str(tmp_path / "creators.json"))
+    web_server._runs[run_id] = {"queues": [], "buffer": [], "done": False}
+
+    task = asyncio.create_task(
+        web_server._execute_run(
+            run_id=run_id,
+            offer="serum X",
+            batch=1,
+            platform="tiktok",
+            config_dir="config-mock",
+            db_path=str(tmp_path / "runs.sqlite"),
+        )
+    )
+
+    try:
+        deadline = asyncio.get_running_loop().time() + 2.0
+        while asyncio.get_running_loop().time() < deadline:
+            state = web_server._runs[run_id]
+            if "approval" in state:
+                break
+            assert not task.done(), "run terminou sem pausar para aprovação"
+            await asyncio.sleep(0.02)
+        else:
+            raise AssertionError("dashboard não pausou para aprovação de creators")
+
+        pending = state.get("pending_creators") or []
+        assert pending, "pending_creators deveria estar populado durante a pausa"
+        event_types = [event.get("type") for event in state["buffer"]]
+        assert "awaiting_approval" in event_types
+
+        approved_id = pending[0]["id"]
+        state["approval"].set_result({"approved": [approved_id], "creators": pending})
+        await asyncio.wait_for(task, timeout=5.0)
+    finally:
+        if not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        state = web_server._runs.pop(run_id, {})
+
+    event_types = [event.get("type") for event in state.get("buffer", [])]
+    assert "run_end" in event_types
+
+
+@pytest.mark.asyncio
+async def test_dashboard_run_can_bypass_creator_approval(tmp_path, monkeypatch) -> None:
+    """Opt-out explícito (approve_creators=False): run direto, sem gate humano."""
+    run_id = "web-no-creator-approval"
+    monkeypatch.setenv("ORCH_MEDIA", str(tmp_path / "media"))
+    monkeypatch.setenv("ORCH_CREATORS", str(tmp_path / "creators.json"))
+    web_server._runs[run_id] = {"queues": [], "buffer": [], "done": False}
+
+    task = asyncio.create_task(
+        web_server._execute_run(
+            run_id=run_id,
+            offer="serum X",
+            batch=1,
+            platform="tiktok",
+            config_dir="config-mock",
+            db_path=str(tmp_path / "runs.sqlite"),
+            approve_creators=False,
+        )
+    )
+
+    try:
+        deadline = asyncio.get_running_loop().time() + 2.0
+        while asyncio.get_running_loop().time() < deadline:
+            state = web_server._runs[run_id]
+            assert "approval" not in state, "dashboard should not pause for creator approval"
+            if task.done():
+                await task
+                break
+            await asyncio.sleep(0.02)
+        else:
+            raise AssertionError("dashboard run did not finish")
+    finally:
+        if not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        state = web_server._runs.pop(run_id, {})
+
+    event_types = [event.get("type") for event in state.get("buffer", [])]
+    assert "awaiting_approval" not in event_types
+    assert "run_end" in event_types
+
+
+def test_run_request_defaults_to_creator_approval() -> None:
+    assert web_server.RunRequest().approve_creators is True
 
 
 @pytest.mark.asyncio

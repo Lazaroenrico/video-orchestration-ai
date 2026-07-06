@@ -1,10 +1,11 @@
 ## Projeto
 
 Motor de orquestração para a pipeline de **AI UGC em escala** descrita em `Context.md`
-(10 passos: conceitos → scripts → creator → talking-head → product demo → execução
-paralela → QC → montagem → distribuição → feedback). **v1 = só o motor**, em modo
+(9 passos: conceitos → scripts → creator → talking-head → product demo → execução
+paralela → QC → montagem → feedback). **v1 = só o motor**, em modo
 **mock/dry-run** (sem chamadas externas reais, custo zero). Integrações reais (Claude,
 GPT Image 2, Topaz, ElevenLabs, Replicate/fal/AtlasCloud) entram depois, adapter a adapter.
+Distribuição/postagem está fora do escopo: o estado terminal aprovado é `assembled`.
 
 ## Stack e papéis
 
@@ -22,7 +23,7 @@ GPT Image 2, Topaz, ElevenLabs, Replicate/fal/AtlasCloud) entram depois, adapter
 config/         pipeline.yaml (knobs), providers.yaml (provider->adapter), judge.yaml (gateway)
 src/orchestrator/
   graph/        state.py, routing.py, builder.py, checkpoint.py
-  nodes/        base.py, stages.py  (os 10 stages como nodes; mocks no v1)
+  nodes/        base.py, stages.py  (os stages da pipeline como nodes; mocks no v1)
   adapters/     base.py (Protocols), mock.py, judge.py (gateway + cassette)
   registry.py   resolve provider->adapter
   config.py     carga dos YAMLs

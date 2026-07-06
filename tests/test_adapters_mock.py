@@ -207,7 +207,7 @@ async def test_qc_failure_has_reasons(adapter):
         pytest.fail("nenhuma reprovação encontrada para checar reasons")
 
 
-# --- assembly (Step 8) / distribution (Step 9) ---
+# --- assembly (Step 8) ---
 
 async def test_assemble_returns_video_artifact(adapter):
     art = await adapter.assemble(item_id="i1", platform="tiktok")
@@ -217,9 +217,3 @@ async def test_assemble_returns_video_artifact(adapter):
     norm = _normalize_artifact({"kind": art.kind, "uri": art.uri})
     assert norm["media_type"] == "video"
     assert norm["renderable"] is True
-
-
-async def test_distribute_returns_schedule(adapter):
-    res = await adapter.distribute(item_id="i1")
-    assert res["account"]
-    assert res["scheduled_at"]

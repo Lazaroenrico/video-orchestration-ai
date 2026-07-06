@@ -12,7 +12,7 @@ import hashlib
 from typing import Any, Optional
 
 from orchestrator.adapters.base import VoiceProfile, resolve_voice_profile
-from orchestrator.graph.state import Artifact, QCResult
+from orchestrator.graph.state import Artifact, Item, QCResult
 from orchestrator.tracing import traced
 
 _HOOK_STYLES = ["problem", "curiosity", "bold_claim", "emotional", "social_proof"]
@@ -115,7 +115,7 @@ def _mp4_data_uri(*seed_parts: Any) -> str:
 
 
 class MockAdapter:
-    """Serve a todos os papéis (llm/image/voice/video/assembly/distribution) no v1."""
+    """Serve aos papéis mock (llm/image/voice/video/assembly) no v1."""
 
     def __init__(self, tiers: list[dict[str, Any]], latency: float = 0.0) -> None:
         self.tiers = {t["name"]: t for t in tiers}
@@ -247,40 +247,55 @@ class MockAdapter:
 
     # --- Step 7: QC ---
     @traced("adapter.mock.qc_check", run_type="tool", step=7, provider="mock")
-    async def qc_check(self, item_id: str, attempt: int, fail_rate: float) -> QCResult:
+    async def qc_check(
+        self,
+        item: Item | str | None = None,
+        fail_rate: float = 0.34,
+        *,
+        item_id: Optional[str] = None,
+        attempt: Optional[int] = None,
+    ) -> QCResult:
         await self._tick()
-        base = _unit("qc", item_id)
-        score = min(0.999, base + 0.25 * attempt)
+        if isinstance(item, Item):
+            resolved_item_id = item.id
+            resolved_attempt = item.attempts if attempt is None else attempt
+        else:
+            resolved_item_id = item_id or str(item or "")
+            resolved_attempt = int(attempt or 0)
+        if not resolved_item_id:
+            raise ValueError("qc_check requires item or item_id")
+        base = _unit("qc", resolved_item_id)
+        score = min(0.999, base + 0.25 * resolved_attempt)
         passed = score >= fail_rate
         reasons: list[str] = []
         if not passed:
-            k = 1 + int(_unit("nreasons", item_id) * 2)  # 1..2 problemas
-            start = int(_unit("which", item_id) * len(_QC_SUSPECTS))
+            k = 1 + int(_unit("nreasons", resolved_item_id) * 2)  # 1..2 problemas
+            start = int(_unit("which", resolved_item_id) * len(_QC_SUSPECTS))
             reasons = [_QC_SUSPECTS[(start + j) % len(_QC_SUSPECTS)] for j in range(k)]
         return QCResult(passed=passed, score=round(score, 4), reasons=reasons)
 
     # --- Step 8: montagem ---
     @traced("adapter.mock.assemble", run_type="tool", step=8, provider="mock")
-    async def assemble(self, item_id: str, platform: str) -> Artifact:
+    async def assemble(
+        self,
+        item: Item | str | None = None,
+        platform: str = "tiktok",
+        *,
+        item_id: Optional[str] = None,
+        system_prompt: Optional[str] = None,
+    ) -> Artifact:
         await self._tick()
+        if isinstance(item, Item):
+            resolved_item_id = item.id
+        else:
+            resolved_item_id = item_id or str(item or "")
+        if not resolved_item_id:
+            raise ValueError("assemble requires item or item_id")
         return Artifact(
             kind="video",
-            uri=_mp4_data_uri("video", item_id),
+            uri=_mp4_data_uri("video", resolved_item_id, system_prompt or ""),
             meta={"captions": True, "broll": True, "platform": platform},
         )
-
-    # --- Step 9: distribuição ---
-    @traced("adapter.mock.distribute", run_type="tool", step=9, provider="mock")
-    async def distribute(self, item_id: str) -> dict[str, Any]:
-        await self._tick()
-        acct = int(_unit("acct", item_id) * 20)
-        hour = int(_unit("hour", item_id) * 24)
-        return {
-            "account": f"acct-{acct:02d}",
-            "scheduled_at": f"2026-06-27T{hour:02d}:00:00",
-            "status": "scheduled",
-        }
-
 
 def build_mock_adapter(tiers: list[dict[str, Any]], latency: Optional[float] = None) -> MockAdapter:
     return MockAdapter(tiers=tiers, latency=latency or 0.0)
