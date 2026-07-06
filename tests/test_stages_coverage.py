@@ -117,6 +117,48 @@ async def test_node_roster_raises_when_all_fail():
         await stages.node_roster({}, _roster_config(_FailAllAdapter()))
 
 
+async def test_node_roster_uses_seed_creator_without_building_new_creator():
+    seed = {
+        "creator_id": "creator-fixed",
+        "image_uri": "data:image/png;base64,SEED",
+        "voice_ref": "voice-fixed",
+        "voice_preview_uri": "data:audio/wav;base64,SEED",
+        "angles": ["front", "side"],
+    }
+
+    class _BoomAdapter:
+        async def build_creator(self, *, index, system_prompt, voice_profile):
+            raise AssertionError("build_creator should not be called for seed creator")
+
+    config = {
+        "configurable": {
+            "adapter": _BoomAdapter(),
+            "pipeline": {"roster": {"creators": 2}},
+            "run": {"seed_creator": seed},
+            "thread_id": "run-seed",
+        }
+    }
+
+    result = await stages.node_roster({}, config)
+
+    assert len(result["roster"]) == 1
+    creator = result["roster"][0]
+    assert creator["id"] == "creator-fixed"
+    assert creator["upscaled_base"] == "data:image/png;base64,SEED"
+    assert creator["image_uri"] == "data:image/png;base64,SEED"
+    assert creator["image"] == "data:image/png;base64,SEED"
+    assert creator["image_source_uri"] == "data:image/png;base64,SEED"
+    assert creator["voice_id"] == "voice-fixed"
+    assert creator["voice_ref"] == "voice-fixed"
+    assert creator["voice"] == "voice-fixed"
+    assert creator["voice_preview_uri"] == "data:audio/wav;base64,SEED"
+    assert creator["angles"] == ["front", "side"]
+
+
+def test_normalize_seed_creator_returns_none_without_id():
+    assert stages._normalize_seed_creator({"image_uri": "data:image/png;base64,SEED"}) is None
+
+
 # ------------------------------------------------------------------ #
 # node_approval — aprova todos quando não há seleção explícita        #
 # ------------------------------------------------------------------ #

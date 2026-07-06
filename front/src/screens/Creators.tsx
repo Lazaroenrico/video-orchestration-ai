@@ -1,4 +1,5 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { PageHeader } from "../components/PageHeader";
 import { Card } from "../components/Card";
 import { Button } from "../components/Button";
@@ -69,14 +70,45 @@ function CreatorCard({ c, onOpen }: { c: Creator; onOpen: () => void }) {
 
 export function Creators() {
   const { data, loading, error } = useAsync(() => api.getCreators(), []);
+  const navigate = useNavigate();
   const [selected, setSelected] = useState<Creator | null>(null);
   const [query, setQuery] = useState("");
+  const [draftOffer, setDraftOffer] = useState("");
+  const [drafting, setDrafting] = useState(false);
+  const [draftError, setDraftError] = useState<string | null>(null);
 
   const creators = data?.creators ?? [];
   const filtered = useMemo(
     () => creators.filter((c) => c.id.toLowerCase().includes(query.toLowerCase())),
     [creators, query]
   );
+
+  useEffect(() => {
+    setDraftOffer(selected?.offer ?? "");
+    setDraftError(null);
+  }, [selected?.id, selected?.offer, selected?.run_id]);
+
+  const launchDraft = async () => {
+    if (!selected) return;
+    setDrafting(true);
+    setDraftError(null);
+    try {
+      const { run_id } = await api.startRun({
+        offer: draftOffer.trim() || selected.offer || "creator draft",
+        batch: 1,
+        platform: "tiktok",
+        creator_id: selected.id,
+        creator_run_id: selected.run_id ?? null,
+        approve_creators: false,
+        edit_concepts: true,
+      });
+      navigate(`/scripts?run=${encodeURIComponent(run_id)}`);
+    } catch (err) {
+      setDraftError(err instanceof Error ? err.message : "Could not start draft run");
+    } finally {
+      setDrafting(false);
+    }
+  };
 
   return (
     <div>
@@ -138,7 +170,13 @@ export function Creators() {
         open={!!selected}
         onClose={() => setSelected(null)}
         title={selected?.id ?? ""}
-        footer={<Button icon="movie" className="w-full">Draft Video with {selected?.id}</Button>}
+        footer={
+          selected ? (
+            <Button icon="movie" className="w-full" onClick={launchDraft} disabled={drafting}>
+              {drafting ? "Starting draft..." : `Draft Video with ${selected.id}`}
+            </Button>
+          ) : null
+        }
       >
         {selected && (
           <div className="flex flex-col gap-6">
@@ -175,6 +213,25 @@ export function Creators() {
                   Voice preview
                 </span>
                 <audio src={playableVoice(selected)!} controls className="w-full mt-2" />
+              </div>
+            )}
+            <label className="block">
+              <span className="font-label-sm text-label-sm uppercase tracking-wider text-on-surface-variant">
+                Product / Offer
+              </span>
+              <input
+                value={draftOffer}
+                onChange={(e) => {
+                  setDraftOffer(e.target.value);
+                  if (draftError) setDraftError(null);
+                }}
+                placeholder={selected.offer || "creator draft"}
+                className="mt-2 w-full rounded-lg border-surface-border bg-surface-container-lowest font-body-md text-body-md focus:ring-primary focus:border-primary"
+              />
+            </label>
+            {draftError && (
+              <div className="rounded-lg border border-error/30 bg-error/5 px-3 py-2 font-body-md text-body-md text-error">
+                {draftError}
               </div>
             )}
             <div>

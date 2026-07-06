@@ -149,13 +149,34 @@ Mesmos inputs → **mesma saída**, sempre. Os mocks derivam tudo de hash dos in
 e os testes são estáveis. Mudar `--offer`, `--batch` ou o `--run-id` muda o resultado de
 forma determinística.
 
+## 6. Dashboard: scripts e Draft Video
+
+O dashboard React consegue retomar a visualização de scripts a partir do checkpoint, não
+apenas do SSE ao vivo. A tela `/scripts` também aceita um run explícito:
+
+```text
+http://localhost:8000/scripts?run=<run_id>
+```
+
+Fluxo para criar um rascunho com um creator já aprovado/recuperado:
+
+1. Abra `/creators`.
+2. Selecione um creator com imagem e voz completas.
+3. Preencha `Product / Offer` no drawer, se quiser sobrescrever a oferta original.
+4. Clique `Draft Video with creator-*`.
+5. A UI cria um novo run usando esse creator como roster fixo e navega para
+   `/scripts?run=<novo_run_id>`.
+6. Edite ou exclua conceitos/scripts e clique `Save & Continue`; o run segue para vídeo,
+   QC e montagem com `creator_ref` apontando para o creator escolhido.
+
 ## Limitações conhecidas (observabilidade)
 
 O foco do v1 é o **motor**; a saída hoje é **agregada**. Ao testar, tenha em mente:
 
 - O relatório **não lista o conteúdo por item** — os conceitos, scripts e URIs de clip
-  por tier existem no estado (`Item.concept/script/clips/assembled`), mas não são
-  expostos na CLI. Um relatório detalhado/export JSON seria o próximo incremento natural.
+  por tier existem no estado (`Item.concept/script/clips/assembled`) e agora são expostos
+  ao dashboard via `/api/state/{run_id}`, mas a CLI ainda mostra apenas o resumo agregado.
+  Um relatório detalhado/export JSON seria o próximo incremento natural para terminal.
 - Não há etapa de distribuição/postagem no motor atual; o item aprovado termina em
   `node_assembly`, com `assembled` preenchido.
 

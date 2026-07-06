@@ -222,6 +222,44 @@ def apply_roster_updates(
     return merged
 
 
+def _normalize_seed_creator(creator: dict[str, Any]) -> dict[str, Any] | None:
+    """Normaliza um creator escolhido anteriormente para o contrato do fan-out."""
+    creator_id = creator.get("id") or creator.get("creator_id")
+    if not creator_id:
+        return None
+    image_uri = (
+        creator.get("image_uri")
+        or creator.get("image")
+        or creator.get("upscaled_base")
+        or creator.get("image_source_uri")
+    )
+    voice_ref = (
+        creator.get("voice_id")
+        or creator.get("voice_ref")
+        or creator.get("voice")
+    )
+    voice_preview_uri = (
+        creator.get("voice_preview_uri")
+        or creator.get("voice_preview")
+        or creator.get("preview_uri")
+    )
+    normalized = dict(creator)
+    normalized["id"] = str(creator_id)
+    if image_uri is not None:
+        normalized["upscaled_base"] = image_uri
+        normalized["image_uri"] = image_uri
+        normalized["image"] = image_uri
+        normalized["image_source_uri"] = creator.get("image_source_uri") or image_uri
+    if voice_ref is not None:
+        normalized["voice_id"] = voice_ref
+        normalized["voice_ref"] = voice_ref
+        normalized["voice"] = voice_ref
+    if voice_preview_uri is not None:
+        normalized["voice_preview_uri"] = voice_preview_uri
+    normalized["angles"] = list(creator.get("angles") or [])
+    return normalized
+
+
 # ===================== Top-graph (BatchState) =====================
 
 @traced("node.roster", run_type="chain", step=3)
@@ -235,6 +273,13 @@ async def node_roster(state: dict[str, Any], config: RunnableConfig) -> dict[str
     run_id = config["configurable"].get("thread_id", "run")
     media_root = default_media_path()
     add_trace_metadata(step=3, stage="roster", creators=n)
+
+    seed_creator = run_cfg.get("seed_creator")
+    if isinstance(seed_creator, dict):
+        normalized_seed = _normalize_seed_creator(seed_creator)
+        if normalized_seed is not None:
+            add_trace_metadata(step=3, stage="roster", creators=1, seeded=True)
+            return {"roster": [normalized_seed]}
 
     async def _build(i: int) -> dict[str, Any]:
         stream_bus.emit_token({

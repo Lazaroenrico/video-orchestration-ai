@@ -70,6 +70,11 @@ Concepts & Scripts, Creators Library, Job Queue, Video Review & QC, Integrations
 Analytics, Settings, Publishing Calendar), ligadas a dados reais via `/api/*` + SSE
 onde há backend.
 
+A tela Concepts & Scripts hidrata runs checkpointados via `/api/state/{run_id}`, então
+ela não depende só do stream SSE em memória. Na galeria de creators, `Draft Video with
+<creator>` inicia um novo run com o creator selecionado como roster fixo e abre
+`/scripts?run=<novo_run_id>` para revisão/edição antes de gerar vídeo.
+
 ```bash
 cd front && npm install && npm run build   # gera front/dist (servido em GET /)
 orchestrator serve                         # dashboard em http://localhost:8000/
@@ -79,8 +84,9 @@ cd front && npm run dev                    # dev: Vite faz proxy /api,/media,/vi
 `front/dist` e `front/node_modules` são gitignored — builde a SPA antes de `orchestrator
 serve` (sem o build, `GET /` devolve uma página de fallback instruindo a rodar `npm run
 build`, o que mantém o CI sem Node verde). Endpoints principais: `POST /api/run`,
-`GET /api/stream/{run_id}` (SSE), `POST /api/approve/{run_id}`, `GET /api/creators`,
-`GET /api/prompts`, `GET /api/integrations`, `GET /api/runs`, `GET /api/status/{run_id}`.
+`GET /api/stream/{run_id}` (SSE), `GET /api/state/{run_id}`, `POST /api/approve/{run_id}`,
+`GET /api/creators`, `GET /api/prompts`, `GET /api/integrations`, `GET /api/runs`,
+`GET /api/status/{run_id}`.
 
 ## Testes (TDD)
 

@@ -26,6 +26,8 @@ function phasePill(phase: RunPhase): { status: Status; label: string } {
       return { status: "generating", label: "Generating" };
     case "awaiting":
       return { status: "review", label: "Awaiting Approval" };
+    case "editing":
+      return { status: "review", label: "Review Scripts" };
     case "done":
       return { status: "published", label: "Completed" };
     case "error":
@@ -229,6 +231,32 @@ export function CampaignDetail() {
         <div className="mb-gutter">
           <ApprovalPanel runId={runId} creators={run.awaiting} />
         </div>
+      )}
+
+      {run.phase === "editing" && (
+        <Card className="mb-gutter border-warning-review/30 bg-warning-review/5">
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+            <div className="flex items-start gap-3">
+              <div className="w-10 h-10 rounded-lg bg-warning-review/10 text-warning-review flex items-center justify-center flex-shrink-0">
+                <Icon name="rate_review" size={22} />
+              </div>
+              <div>
+                <h2 className="font-headline-md text-headline-md text-primary">
+                  Scripts are ready for review
+                </h2>
+                <p className="font-body-md text-body-md text-on-surface-variant mt-1">
+                  This campaign is paused at the concept edit gate.
+                </p>
+              </div>
+            </div>
+            <Button
+              icon="description"
+              onClick={() => navigate(`/scripts?run=${encodeURIComponent(runId)}`)}
+            >
+              Review Scripts
+            </Button>
+          </div>
+        </Card>
       )}
 
       <div className="grid grid-cols-12 gap-gutter">

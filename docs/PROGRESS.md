@@ -965,3 +965,53 @@ Concepts & Scripts renderiza editor com textareas por campo, textarea grande par
 e script editado propagado. O smoke por porta TCP local foi bloqueado pelo sandbox de
 socket entre sessões, então a verificação usou o app ASGI/funções de endpoint no mesmo
 processo.
+
+## Correção — scripts vazios no front + Draft Video inerte
+
+**Sintoma:** `/scripts` podia abrir sem conceitos/scripts para runs existentes, e o botão
+`Draft Video with <creator>` na galeria de creators não disparava nenhuma ação.
+
+**Causa raiz:** o front dependia apenas de `/api/stream/{run_id}`. Esse stream vive em
+memória (`_runs`) e não hidrata runs já checkpointados; para esses casos, `/api/status`
+devolvia só o resumo agregado, sem itens/conceitos/scripts. Além disso, o botão
+`Draft Video` era só visual: não tinha handler, não enviava o creator selecionado e o
+backend não tinha caminho para reutilizar um creator existente como roster fixo.
+
+**Correção:** novo `GET /api/state/{run_id}` combina checkpoint SQLite com estado runtime
+do web server e devolve `items`, `edit_concepts`, `awaiting`, `phase` e `summary` para
+hidratação da SPA. `useRunStream` carrega esse estado antes/ao lado do SSE, e `/scripts`
+aceita `?run=<run_id>`. `RunRequest` agora aceita `creator_id`/`creator_run_id`; o backend
+resolve o creator salvo ou recuperado de mídia, injeta `seed_creator` no run config, e
+`node_roster` reutiliza esse creator sem chamar `build_creator`. A galeria chama
+`POST /api/run` com o creator selecionado e navega para `/scripts?run=<novo_run_id>`.
+`CampaignDetail` também mostra CTA direto para revisão quando o run está no gate
+`editing`.
+
+**Regressões:** `test_run_state_returns_checkpoint_items_with_scripts`,
+`test_run_state_returns_pending_concepts_during_edit_gate`,
+`test_node_roster_uses_seed_creator_without_building_new_creator` e
+`test_execute_run_with_seed_creator_uses_selected_creator`. Verificação focada:
+`rtk proxy python -m pytest --no-cov tests/test_web_endpoints.py tests/test_web_item_updates.py tests/test_stages_coverage.py tests/test_builder.py`
+→ **87 passed, 1 warning**; frontend `rtk npm run build` → verde.
+
+**Falha investigada pós-integração:** a suíte completa passou funcionalmente
+(`541 passed, 2 skipped`), mas quebrou no gate de cobertura com total **99.04%**.
+Os buracos eram ramos novos de fallback/erro: seed creator sem id,
+`_find_creator_for_draft` via mídia recuperada/404 com `creator_run_id`,
+fases runtime (`idle`/`running`/`awaiting`/`done`) e snapshots runtime em
+`/api/state`. Correção: adicionar regressões específicas em
+`tests/test_web_endpoints.py` e `tests/test_stages_coverage.py`, sem afrouxar
+asserts nem o gate `fail_under=100`. Verificação focada:
+`rtk proxy python -m pytest --no-cov tests/test_web_endpoints.py tests/test_stages_coverage.py`
+→ **60 passed, 1 warning**.
+
+**Ajustes pós-review:** o revisor encontrou três riscos reais na integração web.
+`/api/creators` agora normaliza entradas do store antes de responder, garantindo
+`id` público mesmo quando o JSON salvo só tem `creator_id` e preservando os
+metadados do histórico. `useRunSelection` deixou de forçar `?run=` de volta a cada
+seleção manual: o run preferido só é reaplicado quando o query param muda. O reducer
+do SSE limpa `editing`/`awaiting` e volta para `running` no primeiro `node_start` ou
+`item_update` após o gate, evitando formulário stale durante a geração. Verificação:
+`rtk proxy python -m pytest --no-cov tests/test_web_item_updates.py tests/test_web_endpoints.py tests/test_stages_coverage.py tests/test_builder.py`
+→ **95 passed, 1 warning**; `cd front && rtk npm run build` → verde; suíte final
+`rtk proxy python -m pytest` → **549 passed, 2 skipped**, cobertura **100%**.

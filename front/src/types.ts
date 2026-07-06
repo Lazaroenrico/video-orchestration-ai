@@ -57,6 +57,8 @@ export interface RunSummary {
   winning_styles: unknown[];
 }
 
+export type RunPhaseSnapshot = "idle" | "running" | "editing" | "awaiting" | "done" | "error";
+
 export interface RunsIndex {
   runs: string[];
   active: string[];
@@ -91,6 +93,9 @@ export interface StartRunBody {
   offer: string;
   batch?: number;
   platform?: string;
+  config_dir?: string | null;
+  creator_id?: string | null;
+  creator_run_id?: string | null;
   creator_prompt?: string | null;
   video_prompt?: string | null;
   approve_creators?: boolean;
@@ -103,6 +108,15 @@ export interface EditableConcept {
   id: string;
   script?: string;
   [k: string]: unknown;
+}
+
+export interface RunDetail {
+  run_id: string;
+  phase: RunPhaseSnapshot;
+  items: Item[];
+  edit_concepts: EditableConcept[];
+  awaiting: Creator[];
+  summary: RunSummary | null;
 }
 
 export type StreamEvent =

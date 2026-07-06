@@ -5,6 +5,7 @@ import type {
   PromptsIndex,
   PromptTemplate,
   EditableConcept,
+  RunDetail,
   RunSummary,
   RunsIndex,
   StartRunBody,
@@ -30,6 +31,8 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   getRuns: () => req<RunsIndex>("/api/runs"),
+  getRunState: (runId: string) =>
+    req<RunDetail>(`/api/state/${encodeURIComponent(runId)}`),
   getStatus: (runId: string) =>
     req<RunSummary>(`/api/status/${encodeURIComponent(runId)}`),
   startRun: (body: StartRunBody) =>

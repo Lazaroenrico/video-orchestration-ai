@@ -184,6 +184,8 @@ def test_creators_history_exposes_store_path_and_entries(tmp_path, monkeypatch) 
     assert payload["store_path"] == str(store)
     assert payload["exists"] is True
     assert payload["creators"][0]["creator_id"] == "creator-0"
+    assert payload["creators"][0]["id"] == "creator-0"
+    assert payload["creators"][0]["run_id"] == "run-1"
 
 
 def test_creators_history_only_returns_people_with_image_and_voice(tmp_path, monkeypatch) -> None:

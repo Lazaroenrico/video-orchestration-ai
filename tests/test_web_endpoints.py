@@ -36,6 +36,17 @@ def _drain(q: asyncio.Queue) -> list:
     return items
 
 
+async def _wait_for_run_key(run_id: str, key: str, task: asyncio.Task, timeout: float = 3.0) -> dict:
+    deadline = asyncio.get_running_loop().time() + timeout
+    while asyncio.get_running_loop().time() < deadline:
+        state = web_server._runs[run_id]
+        if key in state:
+            return state
+        assert not task.done(), f"run finished before {key!r} was available"
+        await asyncio.sleep(0.02)
+    raise AssertionError(f"run did not expose {key!r}")
+
+
 # ------------------------------------------------------------------ #
 # _emit_sync                                                         #
 # ------------------------------------------------------------------ #
@@ -93,6 +104,56 @@ def test_item_id_from_falls_back_to_last_result():
 
 def test_item_id_from_returns_none_when_no_id():
     assert web_server._item_id_from({"output": {"results": []}}, {}) is None
+
+
+def test_creator_id_returns_none_without_id_alias():
+    assert web_server._creator_id({"name": "Creator"}) is None
+
+
+def test_find_creator_for_draft_recovers_from_media_and_scopes_run(tmp_path, monkeypatch):
+    media_root = tmp_path / "media"
+    creator_dir = media_root / "web-old" / "creator-0"
+    creator_dir.mkdir(parents=True)
+    (creator_dir / "image.png").write_bytes(b"png")
+    (creator_dir / "voice.wav").write_bytes(b"wav")
+    monkeypatch.setattr(web_server, "default_creator_store_path", lambda: tmp_path / "missing.json")
+    monkeypatch.setattr(web_server, "default_media_path", lambda: media_root)
+    monkeypatch.setattr(
+        web_server.creator_store,
+        "load_creators",
+        lambda path: [{"id": "creator-other"}],
+    )
+
+    creator = web_server._find_creator_for_draft("creator-0", "web-old")
+
+    assert creator["id"] == "creator-0"
+    assert creator["image_uri"] == "/media/web-old/creator-0/image.png"
+    assert creator["voice_preview_uri"] == "/media/web-old/creator-0/voice.wav"
+
+    with pytest.raises(HTTPException) as ei:
+        web_server._find_creator_for_draft("creator-0", "web-other")
+    assert ei.value.status_code == 404
+    assert "web-other" in ei.value.detail
+
+
+def test_runtime_phase_branches():
+    class _Pending:
+        def done(self) -> bool:
+            return False
+
+    class _Done:
+        def done(self) -> bool:
+            return True
+
+    assert web_server._runtime_phase(None, None) == "idle"
+    assert web_server._runtime_phase(None, {"in_flight": 1}) == "running"
+    assert web_server._runtime_phase(None, {"in_flight": 0}) == "done"
+    assert web_server._runtime_phase({"concept_edit": _Pending()}, None) == "editing"
+    assert web_server._runtime_phase(
+        {"concept_edit": _Done(), "approval": _Pending()}, None
+    ) == "awaiting"
+    assert web_server._runtime_phase({"approval": _Done(), "done": True}, None) == "done"
+    assert web_server._runtime_phase({"done": False}, None) == "running"
 
 
 def test_build_item_update_none_for_untracked_node():
@@ -274,6 +335,144 @@ async def test_run_status_404_for_unknown_run(tmp_path):
     assert ei.value.status_code == 404
 
 
+async def test_run_state_404_for_unknown_run(tmp_path):
+    with pytest.raises(HTTPException) as ei:
+        await web_server.run_state(
+            "nope", config_dir="config-mock", db=str(tmp_path / "cp.db")
+        )
+    assert ei.value.status_code == 404
+
+
+async def test_run_state_returns_runtime_summary_without_checkpoint(tmp_path):
+    run_id = "runtime-done"
+    web_server._runs[run_id] = {
+        "queues": [],
+        "buffer": [{
+            "type": "run_end",
+            "summary": {
+                "run_id": run_id,
+                "produced": 1,
+                "approved": 1,
+                "dropped": 0,
+                "in_flight": 0,
+                "total_attempts": 1,
+                "total_cost_usd": 0.0,
+                "cost_by_tier": {},
+                "winning_styles": [],
+            },
+        }],
+        "done": True,
+    }
+
+    state = await web_server.run_state(run_id, config_dir="config-mock", db=str(tmp_path / "cp.db"))
+
+    assert state["phase"] == "done"
+    assert state["summary"]["produced"] == 1
+    assert state["items"] == []
+
+
+async def test_run_state_merges_runtime_snapshots_and_skips_invalid(tmp_path, monkeypatch):
+    run_id = "runtime-snap"
+    web_server._runs[run_id] = {
+        "queues": [],
+        "buffer": [],
+        "done": False,
+        "item_snapshots": {
+            "fallback-id": {"script": "SCRIPT", "concept": {"hook": "h"}},
+            "bad": "not a snapshot",
+        },
+    }
+
+    async def fake_get_status(pipeline, *, db_path, run_id):
+        return {"results": [{"id": "", "concept": {}, "script": "checkpoint sem id"}]}
+
+    monkeypatch.setattr(web_server.runner, "get_status", fake_get_status)
+
+    state = await web_server.run_state(run_id, config_dir="config-mock", db=str(tmp_path / "cp.db"))
+
+    assert state["phase"] == "running"
+    assert len(state["items"]) == 1
+    assert state["items"][0]["id"] == "fallback-id"
+    assert state["items"][0]["script"] == "SCRIPT"
+
+
+async def test_run_state_returns_pending_creators_during_approval_gate(tmp_path):
+    run_id = "runtime-awaiting"
+    fut = asyncio.get_running_loop().create_future()
+    web_server._runs[run_id] = {
+        "queues": [],
+        "buffer": [],
+        "done": False,
+        "approval": fut,
+        "pending_creators": [{
+            "creator_id": "creator-0",
+            "image": "/media/runtime-awaiting/creator-0/image.png",
+            "voice": "/media/runtime-awaiting/creator-0/voice.wav",
+        }],
+    }
+
+    state = await web_server.run_state(run_id, config_dir="config-mock", db=str(tmp_path / "cp.db"))
+
+    assert state["phase"] == "awaiting"
+    assert state["awaiting"][0]["id"] == "creator-0"
+
+
+async def test_run_state_returns_checkpoint_items_with_scripts(tmp_path, monkeypatch):
+    monkeypatch.setenv("ORCH_MEDIA", str(tmp_path / "media"))
+    monkeypatch.setenv("ORCH_CREATORS", str(tmp_path / "creators.json"))
+    run_id = "web-state-durable"
+    db = tmp_path / "cp.db"
+    web_server._runs[run_id] = {"queues": [], "buffer": [], "done": False}
+
+    await web_server._execute_run(
+        run_id, offer="serum X", batch=2, platform="tiktok",
+        config_dir="config-mock", db_path=str(db),
+        approve_creators=False, edit_concepts=False,
+    )
+    web_server._runs.pop(run_id)
+
+    state = await web_server.run_state(run_id, config_dir="config-mock", db=str(db))
+
+    assert state["phase"] == "done"
+    assert state["items"]
+    assert all(item["script"] for item in state["items"])
+    assert all(item["concept"] for item in state["items"])
+
+
+async def test_run_state_returns_pending_concepts_during_edit_gate(tmp_path, monkeypatch):
+    monkeypatch.setenv("ORCH_MEDIA", str(tmp_path / "media"))
+    monkeypatch.setenv("ORCH_CREATORS", str(tmp_path / "creators.json"))
+    run_id = "web-state-edit"
+    db = tmp_path / "cp.db"
+    web_server._runs[run_id] = {"queues": [], "buffer": [], "done": False}
+    task = asyncio.create_task(
+        web_server._execute_run(
+            run_id, offer="serum X", batch=2, platform="tiktok",
+            config_dir="config-mock", db_path=str(db),
+            approve_creators=False, edit_concepts=True,
+        )
+    )
+
+    try:
+        runtime = await _wait_for_run_key(run_id, "concept_edit", task)
+
+        state = await web_server.run_state(run_id, config_dir="config-mock", db=str(db))
+
+        assert state["phase"] == "editing"
+        assert len(state["edit_concepts"]) == 2
+        assert all(concept["script"] for concept in state["edit_concepts"])
+
+        runtime["concept_edit"].set_result({"concepts": runtime["pending_concepts"]})
+        await asyncio.wait_for(task, timeout=8.0)
+    finally:
+        if not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+
 # ------------------------------------------------------------------ #
 # _execute_run — fluxo completo (mock) e caminho de erro             #
 # ------------------------------------------------------------------ #
@@ -306,6 +505,32 @@ async def test_execute_run_completes_with_mock_pipeline(monkeypatch, tmp_path):
     )
     assert isinstance(status, dict)
     assert status["run_id"] == "run-x"
+
+
+async def test_execute_run_with_seed_creator_uses_selected_creator(tmp_path, monkeypatch):
+    monkeypatch.setenv("ORCH_MEDIA", str(tmp_path / "media"))
+    monkeypatch.setenv("ORCH_CREATORS", str(tmp_path / "creators.json"))
+    run_id = "web-seed-creator"
+    db = tmp_path / "cp.db"
+    seed = {
+        "id": "creator-fixed",
+        "image_uri": "data:image/png;base64,SEED",
+        "voice_ref": "voice-fixed",
+        "voice_preview_uri": "data:audio/wav;base64,SEED",
+        "angles": ["front"],
+    }
+    web_server._runs[run_id] = {"queues": [], "buffer": [], "done": False}
+
+    await web_server._execute_run(
+        run_id, offer="serum X", batch=1, platform="tiktok",
+        config_dir="config-mock", db_path=str(db),
+        seed_creator=seed,
+        approve_creators=False, edit_concepts=False,
+    )
+
+    state = await web_server.run_state(run_id, config_dir="config-mock", db=str(db))
+
+    assert state["items"][0]["creator_ref"] == "creator-fixed"
 
 
 async def test_execute_run_emits_error_on_failure(monkeypatch, tmp_path):

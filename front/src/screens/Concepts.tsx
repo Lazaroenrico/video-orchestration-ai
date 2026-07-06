@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { PageHeader } from "../components/PageHeader";
 import { Card } from "../components/Card";
 import { Icon } from "../components/Icon";
@@ -41,7 +42,10 @@ function draftTitle(draft: ConceptDraft): string {
 }
 
 export function Concepts() {
-  const { runs, active, selected, setSelected, loading, error } = useRunSelection();
+  const [searchParams] = useSearchParams();
+  const preferredRunId = searchParams.get("run");
+  const { runs, active, selected, setSelected, loading, error } =
+    useRunSelection(preferredRunId);
   const run = useRunStream(selected);
   const items = Object.values(run.items).filter((i) => i.concept || i.script);
   const [pick, setPick] = useState<string | null>(null);

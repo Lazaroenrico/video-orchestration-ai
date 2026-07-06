@@ -1,8 +1,17 @@
 import { useCallback, useEffect, useReducer, useRef } from "react";
-import type { Creator, EditableConcept, Item, RunSummary, StreamEvent } from "../types";
+import { api } from "./client";
+import type {
+  Creator,
+  EditableConcept,
+  Item,
+  RunDetail,
+  RunPhaseSnapshot,
+  RunSummary,
+  StreamEvent,
+} from "../types";
 
 export type NodeState = { node: string; label: string; status: "running" | "done" };
-export type RunPhase = "idle" | "running" | "editing" | "awaiting" | "done" | "error";
+export type RunPhase = RunPhaseSnapshot;
 
 export interface RunStreamState {
   phase: RunPhase;
@@ -34,6 +43,41 @@ function log(s: RunStreamState, kind: string, text: string): RunStreamState["log
   return [...s.log, { kind, text, ts: Date.now() }].slice(-200);
 }
 
+function keyedItems(items: Item[]): Record<string, Item> {
+  return items.reduce<Record<string, Item>>((acc, item) => {
+    acc[item.id] = item;
+    return acc;
+  }, {});
+}
+
+function mergeById<T extends { id: string }>(hydrated: T[], live: T[]): T[] {
+  const byId = new Map<string, T>();
+  hydrated.forEach((item) => byId.set(item.id, item));
+  live.forEach((item) => byId.set(item.id, item));
+  return [...byId.values()];
+}
+
+function clearGateOnResume(s: RunStreamState): Partial<RunStreamState> {
+  if (s.phase !== "editing" && s.phase !== "awaiting") return {};
+  return { phase: "running", editConcepts: [], awaiting: [] };
+}
+
+function hydrate(s: RunStreamState, detail: RunDetail): RunStreamState {
+  const hydratedItems = keyedItems(detail.items);
+  const phase =
+    s.phase === "idle" || (s.phase === "running" && detail.phase !== "idle")
+      ? detail.phase
+      : s.phase;
+  return {
+    ...s,
+    phase,
+    items: { ...hydratedItems, ...s.items },
+    editConcepts: mergeById(detail.edit_concepts, s.editConcepts),
+    awaiting: mergeById(detail.awaiting, s.awaiting),
+    summary: s.summary ?? detail.summary,
+  };
+}
+
 function reduce(s: RunStreamState, ev: StreamEvent): RunStreamState {
   switch (ev.type) {
     case "run_start":
@@ -42,7 +86,7 @@ function reduce(s: RunStreamState, ev: StreamEvent): RunStreamState {
       const nodes = s.nodes.some((n) => n.node === ev.node)
         ? s.nodes.map((n) => (n.node === ev.node ? { ...n, status: "running" as const } : n))
         : [...s.nodes, { node: ev.node, label: ev.label, status: "running" as const }];
-      return { ...s, nodes, log: log(s, "node", `▶ ${ev.label}`) };
+      return { ...s, ...clearGateOnResume(s), nodes, log: log(s, "node", `▶ ${ev.label}`) };
     }
     case "node_end": {
       const nodes = s.nodes.map((n) =>
@@ -53,6 +97,7 @@ function reduce(s: RunStreamState, ev: StreamEvent): RunStreamState {
     case "item_update":
       return {
         ...s,
+        ...clearGateOnResume(s),
         items: { ...s.items, [ev.item.id]: ev.item },
         log: log(s, "item", `item ${ev.item.id} · ${ev.label}`),
       };
@@ -92,10 +137,14 @@ function reduce(s: RunStreamState, ev: StreamEvent): RunStreamState {
   }
 }
 
-type Action = { kind: "event"; ev: StreamEvent } | { kind: "reset" };
+type Action =
+  | { kind: "event"; ev: StreamEvent }
+  | { kind: "hydrate"; detail: RunDetail }
+  | { kind: "reset" };
 
 function rootReducer(s: RunStreamState, a: Action): RunStreamState {
   if (a.kind === "reset") return initial;
+  if (a.kind === "hydrate") return hydrate(s, a.detail);
   return reduce(s, a.ev);
 }
 
@@ -110,6 +159,16 @@ export function useRunStream(runId: string | null) {
   useEffect(() => {
     dispatch({ kind: "reset" });
     if (!runId) return;
+    let cancelled = false;
+    api
+      .getRunState(runId)
+      .then((detail) => {
+        if (!cancelled) dispatch({ kind: "hydrate", detail });
+      })
+      .catch(() => {
+        /* The checkpoint can lag run creation; SSE remains the source of truth. */
+      });
+
     const es = new EventSource(`/api/stream/${encodeURIComponent(runId)}`);
     esRef.current = es;
     es.onmessage = (msg) => {
@@ -128,6 +187,7 @@ export function useRunStream(runId: string | null) {
       /* browser auto-reconnects; server replays the buffer on reconnect */
     };
     return () => {
+      cancelled = true;
       es.close();
       esRef.current = null;
     };

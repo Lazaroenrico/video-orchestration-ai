@@ -226,6 +226,11 @@ def _normalize_creator(creator: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _normalize_creator_history(creator: dict[str, Any]) -> dict[str, Any]:
+    """Normaliza creator do histórico sem perder metadados salvos no store."""
+    return {**creator, **_normalize_creator(creator)}
+
+
 def _playable_voice_uri(creator: dict[str, Any]) -> Optional[str]:
     """URI de voz que o browser consegue tocar (path local /media, http(s) ou data:audio).
 
@@ -319,6 +324,32 @@ def _recover_creators_from_media(media_root: Path) -> list[dict[str, Any]]:
             })
 
     return recovered
+
+
+def _find_creator_for_draft(
+    creator_id: str, creator_run_id: Optional[str] = None,
+) -> dict[str, Any]:
+    """Resolve um creator salvo/reconstruído para reutilizar em um novo run."""
+    for candidates in (
+        creator_store.load_creators(default_creator_store_path()),
+        _recover_creators_from_media(default_media_path()),
+    ):
+        for creator in candidates:
+            if _creator_id(creator) != creator_id:
+                continue
+            if creator_run_id is not None and str(creator.get("run_id") or "") != creator_run_id:
+                continue
+            return _normalize_creator(creator)
+
+    detail = f"creator {creator_id!r} not found"
+    if creator_run_id is not None:
+        detail = f"creator {creator_id!r} not found for run {creator_run_id!r}"
+    raise HTTPException(status_code=404, detail=detail)
+
+
+def _creator_id(creator: dict[str, Any]) -> Optional[str]:
+    raw = creator.get("id") or creator.get("creator_id")
+    return str(raw) if raw is not None else None
 
 
 def _artifact_dict(art: Any) -> Optional[dict[str, Any]]:
@@ -426,6 +457,30 @@ def _complete_item_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _item_payload_from_result(item: Any) -> dict[str, Any]:
+    return _safe_serialize(_complete_item_payload(_snapshot_from_item(item)))
+
+
+def _runtime_phase(
+    state: dict[str, Any] | None, summary: dict[str, Any] | None,
+) -> str:
+    if state is not None:
+        concept_future = state.get("concept_edit")
+        if concept_future is not None and not getattr(concept_future, "done", lambda: False)():
+            return "editing"
+        approval_future = state.get("approval")
+        if approval_future is not None and not getattr(approval_future, "done", lambda: False)():
+            return "awaiting"
+        if state.get("done"):
+            return "done"
+        return "running"
+    if summary is None:
+        return "idle"
+    if int(summary.get("in_flight") or 0) > 0:
+        return "running"
+    return "done"
+
+
 def _build_item_update(
     run_id: str,
     node: str,
@@ -494,6 +549,7 @@ async def _execute_run(
     video_prompt: Optional[str] = None,
     approve_creators: bool = True,
     edit_concepts: bool = True,
+    seed_creator: Optional[dict[str, Any]] = None,
 ) -> None:
     """Roda a pipeline completa, emitindo eventos para os subscribers SSE.
 
@@ -538,6 +594,7 @@ async def _execute_run(
                     # Default: pausa ANTES do creator para o usuário editar/descartar
                     # concept+script; opt-out via edit_concepts=False no POST /api/run.
                     "edit_concepts": edit_concepts,
+                    "seed_creator": seed_creator,
                 },
                 "thread_id": run_id,
             },
@@ -701,6 +758,8 @@ class RunRequest(BaseModel):
     video_prompt: Optional[str] = None
     approve_creators: bool = True
     edit_concepts: bool = True
+    creator_id: Optional[str] = None
+    creator_run_id: Optional[str] = None
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -714,6 +773,10 @@ async def dashboard() -> HTMLResponse:
 
 @app.post("/api/run")
 async def start_run(req: RunRequest, background_tasks: BackgroundTasks) -> dict[str, str]:
+    seed_creator = (
+        _find_creator_for_draft(req.creator_id, req.creator_run_id)
+        if req.creator_id else None
+    )
     run_id = f"web-{uuid.uuid4().hex[:8]}"
     _runs[run_id] = {"queues": [], "buffer": [], "done": False}
     db_path = req.db or str(default_db_path())
@@ -727,7 +790,8 @@ async def start_run(req: RunRequest, background_tasks: BackgroundTasks) -> dict[
     background_tasks.add_task(
         _execute_run,
         run_id, req.offer, req.batch, req.platform, req.config_dir, db_path,
-        req.creator_prompt, req.video_prompt, req.approve_creators, req.edit_concepts,
+        req.creator_prompt, req.video_prompt,
+        req.approve_creators, req.edit_concepts, seed_creator,
     )
     return {"run_id": run_id}
 
@@ -833,11 +897,15 @@ async def delete_prompt_template(template_id: str) -> dict[str, Any]:
 async def creators_history() -> dict[str, Any]:
     store_path = default_creator_store_path()
     creators = [
-        c for c in creator_store.load_creators(str(store_path))
+        _normalize_creator_history(c)
+        for c in creator_store.load_creators(str(store_path))
         if _has_complete_media(c)
     ]
     if not creators:
-        creators = _recover_creators_from_media(default_media_path())
+        creators = [
+            _normalize_creator_history(c)
+            for c in _recover_creators_from_media(default_media_path())
+        ]
     return {
         "creators": creators,
         "store_path": str(store_path),
@@ -913,6 +981,83 @@ async def run_status(run_id: str, config_dir: Optional[str] = None, db: Optional
     if state is None:
         raise HTTPException(status_code=404, detail=f"run {run_id!r} not found")
     return runner.summarize({**state, "run_id": run_id})
+
+
+@app.get("/api/state/{run_id}")
+async def run_state(run_id: str, config_dir: Optional[str] = None, db: Optional[str] = None) -> dict[str, Any]:
+    pipeline = load_pipeline(config_dir)
+    db_path = db or str(default_db_path())
+    checkpoint_state = await runner.get_status(pipeline, db_path=db_path, run_id=run_id)
+    runtime_state = _runs.get(run_id)
+    if checkpoint_state is None and runtime_state is None:
+        raise HTTPException(status_code=404, detail=f"run {run_id!r} not found")
+
+    summary: dict[str, Any] | None = None
+    if checkpoint_state is not None:
+        summary = runner.summarize({**checkpoint_state, "run_id": run_id})
+    if summary is None and runtime_state is not None:
+        for event in reversed(runtime_state.get("buffer") or []):
+            if event.get("type") == "run_end" and isinstance(event.get("summary"), dict):
+                summary = _safe_serialize(event["summary"])
+                break
+
+    checkpoint_results = (checkpoint_state or {}).get("results") or []
+    runtime_snapshots = (
+        (runtime_state or {}).get("item_snapshots")
+        if runtime_state is not None else None
+    )
+    if isinstance(runtime_snapshots, dict) and runtime_snapshots:
+        snapshots: dict[str, dict[str, Any]] = {}
+        order: list[str] = []
+        for result in checkpoint_results:
+            snapshot = _snapshot_from_item(result)
+            item_id = snapshot.get("id")
+            if not item_id:
+                continue
+            item_id = str(item_id)
+            snapshots[item_id] = _merge_item_snapshot(snapshots.get(item_id, {}), snapshot)
+            if item_id not in order:
+                order.append(item_id)
+        for fallback_id, raw_snapshot in runtime_snapshots.items():
+            snapshot = _to_plain(raw_snapshot)
+            if not isinstance(snapshot, dict):
+                continue
+            item_id = str(snapshot.get("id") or fallback_id)
+            snapshot = {**snapshot, "id": item_id}
+            snapshots[item_id] = _merge_item_snapshot(snapshots.get(item_id, {}), snapshot)
+            if item_id not in order:
+                order.append(item_id)
+        items = [
+            _safe_serialize(_complete_item_payload(snapshots[item_id]))
+            for item_id in order
+        ]
+    else:
+        items = [_item_payload_from_result(item) for item in checkpoint_results]
+
+    phase = _runtime_phase(runtime_state, summary)
+    edit_concepts: list[dict[str, Any]] = []
+    awaiting: list[dict[str, Any]] = []
+    if runtime_state is not None and phase == "editing":
+        edit_concepts = [
+            _safe_serialize(c)
+            for c in runtime_state.get("pending_concepts") or []
+            if isinstance(c, dict)
+        ]
+    if runtime_state is not None and phase == "awaiting":
+        awaiting = [
+            _normalize_creator(c)
+            for c in runtime_state.get("pending_creators") or []
+            if isinstance(c, dict)
+        ]
+
+    return {
+        "run_id": run_id,
+        "phase": phase,
+        "items": items,
+        "edit_concepts": edit_concepts,
+        "awaiting": awaiting,
+        "summary": summary,
+    }
 
 
 # --------------------------------------------------------------------------- #
