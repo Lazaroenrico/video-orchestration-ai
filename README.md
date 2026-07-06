@@ -61,6 +61,27 @@ orchestrator run --batch 3 --offer "serum X" --config-dir config
 Passo a passo completo, com a saída esperada de cada comando e como lê-la:
 **[`docs/DEMO.md`](docs/DEMO.md)**.
 
+## Dashboard web ("Kinetic Command")
+
+A UI é uma **SPA React (Vite + TypeScript + Tailwind)** em `front/`, buildada para
+`front/dist/` e servida pelo FastAPI. São 12 telas navegáveis (Dashboard, Campaigns,
+Campaign Detail com gate de aprovação de creators + reroll de voz, Create Campaign,
+Concepts & Scripts, Creators Library, Job Queue, Video Review & QC, Integrations,
+Analytics, Settings, Publishing Calendar), ligadas a dados reais via `/api/*` + SSE
+onde há backend.
+
+```bash
+cd front && npm install && npm run build   # gera front/dist (servido em GET /)
+orchestrator serve                         # dashboard em http://localhost:8000/
+cd front && npm run dev                    # dev: Vite faz proxy /api,/media,/videos -> :8000
+```
+
+`front/dist` e `front/node_modules` são gitignored — builde a SPA antes de `orchestrator
+serve` (sem o build, `GET /` devolve uma página de fallback instruindo a rodar `npm run
+build`, o que mantém o CI sem Node verde). Endpoints principais: `POST /api/run`,
+`GET /api/stream/{run_id}` (SSE), `POST /api/approve/{run_id}`, `GET /api/creators`,
+`GET /api/prompts`, `GET /api/integrations`, `GET /api/runs`, `GET /api/status/{run_id}`.
+
 ## Testes (TDD)
 
 ```bash

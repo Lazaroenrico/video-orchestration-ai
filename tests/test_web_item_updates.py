@@ -161,48 +161,6 @@ def test_process_item_final_snapshot_keeps_artifacts_and_status() -> None:
     }
 
 
-def test_ui_handles_item_update_and_keeps_item_text_dom_safe() -> None:
-    html = Path("src/orchestrator/web/static/index.html").read_text(encoding="utf-8")
-    assert 'case "item_update"' in html
-    assert "function renderItem" in html
-    render_body = html.split("function renderItem(item)", 1)[1].split("\nfunction ", 1)[0]
-    assert ".textContent" in render_body
-    assert "innerHTML = `" not in render_body
-
-
-def test_ui_stream_panel_logs_non_llm_events() -> None:
-    html = Path("src/orchestrator/web/static/index.html").read_text(encoding="utf-8")
-    assert "function appendStreamLine" in html
-    assert 'case "creator_start"' in html
-    assert 'appendStreamLine("creator", `gerando ${ev.creator_id}`)' in html
-    assert 'appendStreamLine("run", "pipeline iniciada")' in html
-
-
-def test_ui_approval_panel_exposes_voice_preset_and_reroll_controls() -> None:
-    html = Path("src/orchestrator/web/static/index.html").read_text(encoding="utf-8")
-    show_body = html.split("function showApprovalPanel(creators)", 1)[1].split(
-        "\nasync function confirmApproval()", 1
-    )[0]
-
-    assert 'const preset = document.createElement("select")' in show_body
-    assert 'preset.className = "ap-voice-preset"' in show_body
-    assert 'value = "male"' in show_body
-    assert 'value = "female"' in show_body
-    assert 'value = "neutral"' in show_body
-    assert 'const reroll = document.createElement("button")' in show_body
-    assert 'reroll.className = "ap-voice-reroll"' in show_body
-    # O reroll precisa bater no servidor (voz REAL nova), não só trocar o bip local.
-    assert "rerollApprovalCreatorVoice(" in show_body
-
-
-def test_ui_approval_voice_reroll_updates_audio_preview_in_place() -> None:
-    html = Path("src/orchestrator/web/static/index.html").read_text(encoding="utf-8")
-    assert "function updateApprovalCreatorVoicePreview" in html
-    assert 'case "creator_update"' in html
-    assert 'audio.src = creator.voice_preview_uri' in html
-    assert "audio.load()" in html
-
-
 def test_creators_history_exposes_store_path_and_entries(tmp_path, monkeypatch) -> None:
     store = tmp_path / "creators.json"
     creator_store = web_server.creator_store
@@ -417,6 +375,8 @@ async def test_dashboard_run_pauses_for_creator_approval_by_default(tmp_path, mo
             platform="tiktok",
             config_dir="config-mock",
             db_path=str(tmp_path / "runs.sqlite"),
+            # Isola o gate de creator: sem pausa de edição de conceitos.
+            edit_concepts=False,
         )
     )
 
@@ -469,6 +429,7 @@ async def test_dashboard_run_can_bypass_creator_approval(tmp_path, monkeypatch) 
             config_dir="config-mock",
             db_path=str(tmp_path / "runs.sqlite"),
             approve_creators=False,
+            edit_concepts=False,
         )
     )
 
@@ -499,6 +460,159 @@ async def test_dashboard_run_can_bypass_creator_approval(tmp_path, monkeypatch) 
 
 def test_run_request_defaults_to_creator_approval() -> None:
     assert web_server.RunRequest().approve_creators is True
+
+
+def test_run_request_defaults_to_concept_edit() -> None:
+    assert web_server.RunRequest().edit_concepts is True
+
+
+@pytest.mark.asyncio
+async def test_dashboard_run_pauses_for_concept_edit_before_creator(tmp_path, monkeypatch) -> None:
+    """Default do dashboard: pausa para editar concept+script ANTES de gerar o creator.
+
+    O gate de edição precede o roster: nenhum evento de creator deve preceder o
+    ``awaiting_concept_edit``. O resume aplica os conceitos editados (script alterado,
+    conceito excluído) e o run segue para o gate de creator, depois conclui.
+    """
+    run_id = "web-concept-edit"
+    monkeypatch.setenv("ORCH_MEDIA", str(tmp_path / "media"))
+    monkeypatch.setenv("ORCH_CREATORS", str(tmp_path / "creators.json"))
+    web_server._runs[run_id] = {"queues": [], "buffer": [], "done": False}
+
+    task = asyncio.create_task(
+        web_server._execute_run(
+            run_id=run_id,
+            offer="serum X",
+            batch=2,
+            platform="tiktok",
+            config_dir="config-mock",
+            db_path=str(tmp_path / "runs.sqlite"),
+            approve_creators=False,  # isola: testamos só o gate de edição
+        )
+    )
+
+    try:
+        # 1) espera a pausa de edição de conceitos
+        deadline = asyncio.get_running_loop().time() + 3.0
+        while asyncio.get_running_loop().time() < deadline:
+            state = web_server._runs[run_id]
+            if "concept_edit" in state:
+                break
+            assert not task.done(), "run terminou sem pausar para edição de conceitos"
+            await asyncio.sleep(0.02)
+        else:
+            raise AssertionError("dashboard não pausou para edição de conceitos")
+
+        buffer = state["buffer"]
+        types = [e.get("type") for e in buffer]
+        assert "awaiting_concept_edit" in types
+        # o gate de edição precede QUALQUER evento de creator
+        assert "creator_start" not in types and "creator_ready" not in types
+        # o payload traz os conceitos COM script (gerado antes do creator)
+        edit_ev = next(e for e in buffer if e.get("type") == "awaiting_concept_edit")
+        pending = edit_ev["concepts"]
+        assert len(pending) == 2
+        assert all(c.get("script") for c in pending)
+
+        # 2) edita o script de um conceito e EXCLUI o outro (só 1 volta)
+        edited = [{**pending[0], "script": "EDITED SCRIPT"}]
+        state["concept_edit"].set_result({"concepts": edited})
+
+        await asyncio.wait_for(task, timeout=8.0)
+    finally:
+        if not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        state = web_server._runs.pop(run_id, {})
+
+    types = [e.get("type") for e in state.get("buffer", [])]
+    assert "run_end" in types
+    # só 1 conceito seguiu para produção (o outro foi excluído no gate)
+    item_updates = [e for e in state.get("buffer", []) if e.get("type") == "item_update"]
+    produced_ids = {e["item"]["id"] for e in item_updates}
+    assert len(produced_ids) == 1
+
+
+@pytest.mark.asyncio
+async def test_dashboard_run_summary_after_concept_edit_and_creator_approval(tmp_path, monkeypatch) -> None:
+    """Run web com os dois gates deve emitir summary final a partir do estado raiz."""
+    run_id = "web-two-gates"
+    monkeypatch.setenv("ORCH_MEDIA", str(tmp_path / "media"))
+    monkeypatch.setenv("ORCH_CREATORS", str(tmp_path / "creators.json"))
+    web_server._runs[run_id] = {"queues": [], "buffer": [], "done": False}
+
+    task = asyncio.create_task(
+        web_server._execute_run(
+            run_id=run_id,
+            offer="serum X",
+            batch=2,
+            platform="tiktok",
+            config_dir="config-mock",
+            db_path=str(tmp_path / "runs.sqlite"),
+            approve_creators=True,
+            edit_concepts=True,
+        )
+    )
+
+    try:
+        deadline = asyncio.get_running_loop().time() + 3.0
+        while asyncio.get_running_loop().time() < deadline:
+            state = web_server._runs[run_id]
+            if "concept_edit" in state:
+                break
+            assert not task.done(), "run terminou sem pausar para edição de conceitos"
+            await asyncio.sleep(0.02)
+        else:
+            raise AssertionError("dashboard não pausou para edição de conceitos")
+
+        edit_ev = next(
+            e for e in state["buffer"] if e.get("type") == "awaiting_concept_edit"
+        )
+        pending = edit_ev["concepts"]
+        edited_script = f"{pending[0]['script']} EDITED"
+        await web_server.submit_concepts(
+            run_id,
+            web_server.ConceptEditRequest(
+                concepts=[{**pending[0], "script": edited_script}]
+            ),
+        )
+
+        deadline = asyncio.get_running_loop().time() + 3.0
+        while asyncio.get_running_loop().time() < deadline:
+            state = web_server._runs[run_id]
+            if "approval" in state:
+                break
+            assert not task.done(), "run terminou sem pausar para aprovação de creator"
+            await asyncio.sleep(0.02)
+        else:
+            raise AssertionError("dashboard não pausou para aprovação de creator")
+
+        approval_ev = next(
+            e for e in state["buffer"] if e.get("type") == "awaiting_approval"
+        )
+        creator_id = approval_ev["creators"][0]["id"]
+        await web_server.approve(run_id, web_server.ApproveRequest(approved=[creator_id]))
+
+        await asyncio.wait_for(task, timeout=8.0)
+    finally:
+        if not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        state = web_server._runs.pop(run_id, {})
+
+    run_end = next(e for e in state.get("buffer", []) if e.get("type") == "run_end")
+    assert run_end["summary"]["produced"] == 1
+    assert run_end["summary"]["approved"] == 1
+    final_item = [
+        e for e in state.get("buffer", []) if e.get("type") == "item_update"
+    ][-1]["item"]
+    assert final_item["script"] == edited_script
 
 
 @pytest.mark.asyncio

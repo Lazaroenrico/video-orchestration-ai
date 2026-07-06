@@ -417,6 +417,22 @@ def test_build_vercel_gateway_llm_adapter_uses_gateway_api_key(monkeypatch) -> N
     assert adapter._client.base_url == "https://ai-gateway.vercel.sh"
 
 
+def test_build_vercel_gateway_llm_adapter_strips_trailing_v1_from_base_url(monkeypatch) -> None:
+    """O SDK Anthropic acrescenta /v1 — base_url que já termina em /v1 é normalizada."""
+    class FakeAsyncAnthropic:
+        def __init__(self, *, api_key: str, base_url: str, **kwargs) -> None:
+            self.base_url = base_url
+
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setenv("AI_GATEWAY_API_KEY", "k")
+    monkeypatch.setenv("AI_GATEWAY_BASE_URL", "https://ai-gateway.vercel.sh/v1")
+    monkeypatch.setattr(anthropic_llm_module, "AsyncAnthropic", FakeAsyncAnthropic)
+
+    adapter = build_vercel_gateway_llm_adapter({})
+
+    assert adapter._client.base_url == "https://ai-gateway.vercel.sh"
+
+
 def test_build_vercel_gateway_llm_adapter_accepts_vercel_oidc_token(monkeypatch) -> None:
     class FakeAsyncAnthropic:
         def __init__(self, *, api_key: str, base_url: str, **kwargs) -> None:
@@ -557,3 +573,111 @@ async def test_write_script_passes_thinking_no_forbidden_params() -> None:
         assert forbidden not in call_kwargs, (
             f"Forbidden param '{forbidden}' found in write_script kwargs"
         )
+
+
+# --------------------------------------------------------------------------- #
+# Streaming (stream_bus ativo) e resposta sem bloco de texto                   #
+# --------------------------------------------------------------------------- #
+
+
+class _AsyncTokens:
+    """Async-iterável de tokens de texto, como ``stream.text_stream`` do SDK."""
+
+    def __init__(self, tokens: list[str]) -> None:
+        self._tokens = tokens
+
+    async def _gen(self):
+        for t in self._tokens:
+            yield t
+
+    def __aiter__(self):
+        return self._gen()
+
+
+class _FakeStream:
+    """Async context manager que imita ``client.messages.stream(...)``."""
+
+    def __init__(self, tokens: list[str], final: types.SimpleNamespace) -> None:
+        self.text_stream = _AsyncTokens(tokens)
+        self._final = final
+
+    async def __aenter__(self) -> "_FakeStream":
+        return self
+
+    async def __aexit__(self, *exc: Any) -> bool:
+        return False
+
+    async def get_final_message(self) -> types.SimpleNamespace:
+        return self._final
+
+
+def _make_streaming_client(tokens: list[str], final: types.SimpleNamespace) -> MagicMock:
+    client = MagicMock()
+    client.messages.stream = MagicMock(return_value=_FakeStream(tokens, final))
+    client.messages.create = AsyncMock(
+        side_effect=AssertionError("create() não deve ser chamado no ramo de streaming")
+    )
+    return client
+
+
+async def test_generate_concepts_streams_tokens_when_streaming() -> None:
+    import orchestrator.stream_bus as stream_bus
+
+    events: list[dict[str, Any]] = []
+    stream_bus.set_token_callback(events.append)
+    try:
+        final = _make_response([_make_text_block(_concepts_json(2, "serum X"))])
+        client = _make_streaming_client(["{", '"concepts"', ": []}"], final)
+        adapter = AnthropicLLMAdapter(client=client)
+        concepts = await adapter.generate_concepts(offer="serum X", n=2, seed="s")
+    finally:
+        stream_bus.clear_token_callback()
+
+    assert len(concepts) == 2
+    kinds = [e["type"] for e in events]
+    assert kinds[0] == "llm_start"
+    assert kinds[-1] == "llm_end"
+    assert kinds.count("llm_token") == 3
+    client.messages.stream.assert_called_once()
+
+
+async def test_write_script_streams_tokens_when_streaming() -> None:
+    import orchestrator.stream_bus as stream_bus
+
+    events: list[dict[str, Any]] = []
+    stream_bus.set_token_callback(events.append)
+    try:
+        final = _make_response([_make_text_block("HOOK: x\nBODY: y\nCTA: z")])
+        client = _make_streaming_client(["HOOK", ": x"], final)
+        adapter = AnthropicLLMAdapter(client=client)
+        concept = {"id": "c", "offer": "o", "hook": "h", "angle": "problem",
+                   "hook_style": "problem", "format": "talking_head"}
+        script = await adapter.write_script(
+            concept=concept, creator_ref="creator-0", platform="tiktok"
+        )
+    finally:
+        stream_bus.clear_token_callback()
+
+    assert script == "HOOK: x\nBODY: y\nCTA: z"
+    kinds = [e["type"] for e in events]
+    assert kinds[0] == "llm_start"
+    assert kinds[-1] == "llm_end"
+    assert kinds.count("llm_token") == 2
+
+
+async def test_generate_concepts_raises_when_no_text_block() -> None:
+    fake_response = _make_response([_make_thinking_block()])
+    adapter = AnthropicLLMAdapter(client=_make_fake_client(fake_response))
+
+    with pytest.raises(RuntimeError, match="no text block"):
+        await adapter.generate_concepts(offer="x", n=1, seed="s")
+
+
+async def test_write_script_raises_when_no_text_block() -> None:
+    fake_response = _make_response([_make_thinking_block()])
+    adapter = AnthropicLLMAdapter(client=_make_fake_client(fake_response))
+
+    concept = {"id": "c", "offer": "o", "hook": "h", "angle": "problem",
+               "hook_style": "problem", "format": "talking_head"}
+    with pytest.raises(RuntimeError, match="no text block for write_script"):
+        await adapter.write_script(concept=concept, creator_ref="creator-0", platform="tiktok")

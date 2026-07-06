@@ -1056,3 +1056,96 @@ async def test_reroll_creator_voice_shifts_again_on_second_reroll() -> None:
     )
 
     assert voice.calls == [(2, None)]
+
+
+# ---------------------------------------------------------------------------
+# Ramo "client próprio" (self._client is None → cria httpx.AsyncClient)
+# ---------------------------------------------------------------------------
+
+
+def _patch_own_client(monkeypatch, module, transport: httpx.MockTransport, base_url: str):
+    # module.httpx é o módulo global compartilhado; captura o construtor real antes
+    # de patchar para não recursar quando a fábrica criar o client de teste.
+    real_async_client = httpx.AsyncClient
+    monkeypatch.setattr(
+        module.httpx, "AsyncClient",
+        lambda *a, **k: real_async_client(transport=transport, base_url=base_url),
+    )
+
+
+async def test_openai_generate_face_uses_own_client_and_gender_clause(monkeypatch):
+    import orchestrator.adapters.openai_image as openai_image
+
+    _patch_own_client(monkeypatch, openai_image, _make_openai_transport(1), BASE_OPENAI)
+    adapter = OpenAIImageAdapter(base_url=BASE_OPENAI, token=FAKE_TOKEN)  # sem client
+
+    result = await adapter.generate_face(1, voice_profile=VoiceProfile(preset="female"))
+
+    assert result["primary"] == FAKE_FACE_URL
+
+
+async def test_topaz_upscale_uses_own_client(monkeypatch):
+    import orchestrator.adapters.topaz_upscale as topaz_upscale
+
+    _patch_own_client(monkeypatch, topaz_upscale, _make_topaz_transport(FAKE_FACE_URL), BASE_TOPAZ)
+    adapter = TopazUpscaleAdapter(base_url=BASE_TOPAZ, token=FAKE_TOKEN)  # sem client
+
+    result = await adapter.upscale(FAKE_FACE_URL)
+
+    assert result == FAKE_UPSCALED_URL
+
+
+async def test_elevenlabs_create_voice_uses_own_client(monkeypatch):
+    import orchestrator.adapters.elevenlabs_voice as elevenlabs_voice
+
+    _patch_own_client(
+        monkeypatch, elevenlabs_voice, _make_elevenlabs_transport(3), BASE_ELEVENLABS
+    )
+    adapter = ElevenLabsVoiceAdapter(base_url=BASE_ELEVENLABS, token=FAKE_TOKEN)  # sem client
+
+    result = await adapter.create_voice(3)
+
+    assert result == FAKE_VOICE_ID
+
+
+async def test_elevenlabs_synthesize_preview_uses_own_client(monkeypatch):
+    import orchestrator.adapters.elevenlabs_voice as elevenlabs_voice
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST"
+        assert str(request.url) == f"{BASE_ELEVENLABS}/text-to-speech/{FAKE_VOICE_ID}"
+        assert request.headers.get("xi-api-key")
+        return httpx.Response(200, content=b"AUDIO-BYTES")
+
+    _patch_own_client(
+        monkeypatch, elevenlabs_voice, httpx.MockTransport(handler), BASE_ELEVENLABS
+    )
+    adapter = ElevenLabsVoiceAdapter(base_url=BASE_ELEVENLABS, token=FAKE_TOKEN)  # sem client
+
+    audio = await adapter.synthesize_preview(FAKE_VOICE_ID)
+
+    assert audio == b"AUDIO-BYTES"
+
+
+# ---------------------------------------------------------------------------
+# Fábricas Vercel
+# ---------------------------------------------------------------------------
+
+
+def test_build_openai_image_vercel_adapter_requires_token(monkeypatch):
+    monkeypatch.delenv("AI_GATEWAY_API_KEY", raising=False)
+    monkeypatch.delenv("VERCEL_OIDC_TOKEN", raising=False)
+    with pytest.raises(RuntimeError, match="AI_GATEWAY_API_KEY"):
+        build_openai_image_vercel_adapter({})
+
+
+def test_build_real_creator_vercel_adapter_wires_subadapters(monkeypatch):
+    from orchestrator.adapters.creator_real import build_real_creator_vercel_adapter
+
+    monkeypatch.setenv("AI_GATEWAY_API_KEY", "gw-key")
+    adapter = build_real_creator_vercel_adapter({})
+
+    assert isinstance(adapter, RealCreatorAdapter)
+    assert isinstance(adapter.image, OpenAIImageAdapter)
+    assert isinstance(adapter.topaz, TopazUpscaleAdapter)
+    assert isinstance(adapter.voice, ElevenLabsVoiceAdapter)

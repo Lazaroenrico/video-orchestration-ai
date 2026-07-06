@@ -1,9 +1,11 @@
 """Montagem do ``StateGraph`` da pipeline (topologia fixa no v1).
 
-- Subgrafo per-item (``Item``): script -> [route tier] -> gen(tier) -> product_demo
-  -> qc -> [qc gate] -> {assembly | regen | drop}.
-- Grafo de topo (``BatchState``): roster -> concepts -> [fan-out via Send] ->
-  process_item (invoca o subgrafo) -> feedback.
+- Subgrafo per-item (``Item``): [route tier] -> gen(tier) -> product_demo -> qc ->
+  [qc gate] -> {assembly | regen | drop}. O script já vem pronto no ``Item`` (gerado
+  em nível de batch antes do creator).
+- Grafo de topo (``BatchState``): concepts -> scripts -> concept_review (gate de edição)
+  -> roster -> approval -> [fan-out via Send] -> process_item (invoca o subgrafo) ->
+  feedback.
 """
 from __future__ import annotations
 
@@ -20,13 +22,14 @@ from orchestrator.nodes.stages import (
     make_gen_node,
     node_approval,
     node_assembly,
+    node_concept_review,
     node_concepts,
     node_drop,
     node_feedback,
     node_product_demo,
     node_qc,
     node_roster,
-    node_script,
+    node_scripts,
 )
 from orchestrator.tracing import add_trace_metadata, traced
 
@@ -39,7 +42,6 @@ def build_item_graph(pipeline: dict[str, Any]):
     qc_map.update({"assembly": "assembly", "drop": "drop"})
 
     sg = StateGraph(Item)
-    sg.add_node("script", node_script)
     for t in tns:
         sg.add_node(t, make_gen_node(t))
     sg.add_node("product_demo", node_product_demo)
@@ -48,10 +50,10 @@ def build_item_graph(pipeline: dict[str, Any]):
     sg.add_node("assembly", node_assembly)
     sg.add_node("drop", node_drop)
 
-    sg.add_edge(START, "script")
-
+    # O script já vem pronto no Item (batch-level, antes do creator): o subgrafo entra
+    # direto no roteamento de tier.
     sg.add_conditional_edges(
-        "script", make_script_route_node(tns), {t: t for t in tns}
+        START, make_script_route_node(tns), {t: t for t in tns}
     )
     for t in tns:
         sg.add_edge(t, "product_demo")
@@ -150,13 +152,18 @@ def make_fan_out_node():
         for i, concept in enumerate(concepts):
             creator = roster[i % len(roster)]
             creator_image_uri = creator.get("image_source_uri") or creator.get("upscaled_base")
+            # O script foi gerado em nível de batch (antes do creator) e vive em
+            # concept["script"]; move-o para Item.script e mantém o concept limpo.
+            concept_data = dict(concept)
+            script = concept_data.pop("script", None)
             item = new_item(
-                concept=concept,
+                concept=concept_data,
                 creator_ref=creator.get("id"),
                 creator_image_uri=creator_image_uri,
                 creator_image_local_path=creator.get("image_local_path"),
             )
-            cid = concept.get("id")
+            item.script = script
+            cid = concept_data.get("id")
             if cid:
                 item.id = str(cid)
             sends.append(Send("process_item", item.model_dump()))
@@ -170,18 +177,23 @@ def build_graph(pipeline: dict[str, Any], checkpointer: Optional[Any] = None):
     item_app = build_item_graph(pipeline)
 
     g = StateGraph(BatchState)
+    g.add_node("concepts", node_concepts)
+    g.add_node("scripts", node_scripts)
+    g.add_node("concept_review", node_concept_review)
     g.add_node("roster", node_roster)
     g.add_node("approval", node_approval)
-    g.add_node("concepts", node_concepts)
 
     g.add_node("process_item", make_process_item_node(item_app))
     g.add_node("feedback", node_feedback)
 
-    g.add_edge(START, "roster")
+    # concepts -> scripts -> [gate de edição] -> creator -> [gate de aprovação] -> fan-out
+    g.add_edge(START, "concepts")
+    g.add_edge("concepts", "scripts")
+    g.add_edge("scripts", "concept_review")
+    g.add_edge("concept_review", "roster")
     g.add_edge("roster", "approval")
-    g.add_edge("approval", "concepts")
 
-    g.add_conditional_edges("concepts", make_fan_out_node(), ["process_item"])
+    g.add_conditional_edges("approval", make_fan_out_node(), ["process_item"])
     g.add_edge("process_item", "feedback")
     g.add_edge("feedback", END)
     return g.compile(checkpointer=checkpointer)

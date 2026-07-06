@@ -318,3 +318,41 @@ Datas absolutas. Apendar novas decisões ao final.
   testes/compatibilidade, porém `config/pipeline.yaml` define
   `video.allow_mock_fallback=false`, fazendo tiers sem adapter real falharem
   explicitamente no live em vez de mascarar o problema.
+
+## 2026-07-06
+
+### D27 — UI "Kinetic Command": SPA React em `front/` substitui o dashboard estático
+- **Contexto:** o dashboard era um único `web/static/index.html` (dark, página única)
+  servido pelo FastAPI. A UI/UX foi redesenhada no Stitch (design system "Kinetic
+  Command", tema claro, 12 telas) e o HTML monolítico não comportava esse escopo.
+- **Decisão:** implementar a UI como **SPA Vite + React + TypeScript + Tailwind** em
+  `front/` (fonte em `front/src/`), buildada para `front/dist/` e servida pelo FastAPI.
+  `web/static/index.html` foi removido. As 12 telas são ligadas a dados reais via `/api/*`
+  + SSE onde há backend; telas sem backend (Analytics/Settings/Publishing) ficam fiéis ao
+  design com dados agregados/estáticos. Novo `GET /api/integrations` expõe o mapa
+  stage→adapter de `providers.yaml`.
+- **Consequência:** `GET /` serve `front/dist/index.html` (com fallback HTML instruindo
+  `npm run build` quando não buildado — mantém o CI sem Node verde); `/assets` é montado
+  para os bundles do Vite; um catch-all `GET /{path}` serve o index para rotas client-side
+  **sem** sombrear `/api|/media|/videos|/assets`. `front/dist` e `front/node_modules` são
+  gitignored — a SPA precisa ser buildada antes de `orchestrator serve`. Os testes que
+  faziam *grep* no HTML/JS do dashboard antigo foram removidos (cobriam código deletado);
+  `tests/test_web_spa.py` cobre o novo contrato de serviço; a lógica de backend
+  (`_build_item_update`, normalizadores, CRUD de `/api/prompts`) segue intacta.
+
+### D28 — Concepts/scripts antes do creator com gate humano de edição
+- **Contexto:** o script era gerado dentro do subgrafo por item, depois do roster de
+  creators. Isso impedia revisar, editar ou descartar conceitos antes de gastar creator,
+  voz e vídeo.
+- **Decisão:** a topologia passa a ser `concepts -> scripts -> concept_review -> roster
+  -> approval -> fan-out -> process_item -> feedback`. `node_scripts` escreve um script
+  por conceito em nível de batch usando `creator_ref="creator"` como placeholder
+  genérico. `node_concept_review` pausa quando `run.edit_concepts=true` e substitui a
+  lista por conceitos editados/incluídos. No fan-out, `concept["script"]` é movido para
+  `Item.script` e removido de `Item.concept`.
+- **Contrato web/UI:** `RunRequest.edit_concepts` tem default `True`; o backend emite
+  `awaiting_concept_edit` via SSE e aceita `POST /api/approve/{run_id}/concepts` com a
+  lista final. A tela React `/scripts` renderiza editor de concept+script durante a fase
+  `editing`, com checkbox de inclusão e submit "Save & Continue".
+- **Consequência:** o creator só roda depois da revisão humana de copy. Scripts deixam
+  de depender de uma persona específica; a persona real é atribuída depois no fan-out.

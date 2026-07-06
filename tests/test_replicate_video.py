@@ -168,3 +168,51 @@ async def test_generate_clip_raises_on_empty_string_output():
 
     with pytest.raises(RuntimeError, match="output.*empty"):
         await adapter.generate_clip("item-abc", "ltx", 8, 1)
+
+
+async def test_generate_clip_raises_on_empty_list_output():
+    """Lista vazia do SDK vira erro — não pode indexar output[0] inexistente."""
+    adapter, _ = _make_adapter(output=[])
+
+    with pytest.raises(RuntimeError, match="output list is empty"):
+        await adapter.generate_clip("item-abc", "ltx", 8, 1)
+
+
+async def test_generate_clip_normalizes_dict_key_with_list_value():
+    """Chave de vídeo cujo valor é lista → pega o primeiro elemento."""
+    adapter, _ = _make_adapter(output={"video": ["https://cdn.replicate.com/keylist.mp4"]})
+
+    artifact = await adapter.generate_clip("item-abc", "ltx", 8, 1)
+
+    assert artifact.uri == "https://cdn.replicate.com/keylist.mp4"
+
+
+async def test_generate_clip_raises_on_empty_dict_output():
+    adapter, _ = _make_adapter(output={})
+
+    with pytest.raises(RuntimeError, match="output dict is empty"):
+        await adapter.generate_clip("item-abc", "ltx", 8, 1)
+
+
+async def test_generate_clip_fallback_dict_first_value_empty_list_raises():
+    """Dict sem chave de vídeo conhecida: fallback pega o primeiro valor; lista vazia é erro."""
+    adapter, _ = _make_adapter(output={"other": []})
+
+    with pytest.raises(RuntimeError, match="fallback list is empty"):
+        await adapter.generate_clip("item-abc", "ltx", 8, 1)
+
+
+async def test_generate_clip_fallback_dict_first_value_list():
+    adapter, _ = _make_adapter(output={"other": ["https://cdn.replicate.com/fallbacklist.mp4"]})
+
+    artifact = await adapter.generate_clip("item-abc", "ltx", 8, 1)
+
+    assert artifact.uri == "https://cdn.replicate.com/fallbacklist.mp4"
+
+
+async def test_generate_clip_fallback_dict_first_value_string():
+    adapter, _ = _make_adapter(output={"other": "https://cdn.replicate.com/fallbackstr.mp4"})
+
+    artifact = await adapter.generate_clip("item-abc", "ltx", 8, 1)
+
+    assert artifact.uri == "https://cdn.replicate.com/fallbackstr.mp4"

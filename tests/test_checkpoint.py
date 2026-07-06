@@ -30,6 +30,25 @@ async def test_run_state_is_persisted_and_readable(tmp_path, run_config):
         assert len(snap.values["results"]) == 4
 
 
+async def test_alist_yields_checkpoints_for_thread(tmp_path, run_config):
+    """A fachada async ``alist`` itera os checkpoints gravados de um thread."""
+    db = tmp_path / "state.sqlite"
+    pipeline = run_config["configurable"]["pipeline"]
+    thread = {
+        "configurable": dict(run_config["configurable"], thread_id="run-list"),
+        "max_concurrency": 4,
+        "recursion_limit": 50,
+    }
+
+    async with open_checkpointer(db) as cp:
+        app = build_graph(pipeline, checkpointer=cp)
+        await app.ainvoke({"run_id": "run-list", "config": {"batch_size": 2}}, thread)
+
+        rows = [row async for row in cp.alist({"configurable": {"thread_id": "run-list"}})]
+
+    assert len(rows) >= 1
+
+
 async def test_resume_with_fresh_app_instance_reads_checkpoint(tmp_path, run_config):
     # "Continuar de onde parou": nova instância do app, mesmo arquivo/thread.
     db = tmp_path / "state.sqlite"

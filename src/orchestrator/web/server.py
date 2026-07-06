@@ -43,6 +43,28 @@ from orchestrator.registry import build_adapter_from_providers
 
 app = FastAPI(title="UGC Orchestrator")
 
+# Front-end SPA ("Kinetic Command", Vite+React) built into front/dist. Repo layout:
+#   <repo>/front/dist/            ← this file is <repo>/src/orchestrator/web/server.py
+_FRONT_DIST = Path(__file__).resolve().parents[3] / "front" / "dist"
+
+
+def _front_index() -> Optional[Path]:
+    idx = _FRONT_DIST / "index.html"
+    return idx if idx.exists() else None
+
+
+_UNBUILT_FALLBACK = (
+    "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
+    "<title>Orchestrator AI</title></head><body style=\"font-family:system-ui;"
+    "max-width:640px;margin:80px auto;padding:0 24px;color:#191c1e\">"
+    "<h1>Front-end not built</h1><p>The React UI lives in <code>front/</code>. "
+    "Build it once, then reload:</p>"
+    "<pre style=\"background:#f2f4f6;padding:16px;border-radius:8px\">"
+    "cd front\nnpm install\nnpm run build</pre>"
+    "<p>During development you can instead run <code>npm run dev</code> "
+    "(Vite proxies the API to this server).</p></body></html>"
+)
+
 # Serve os bytes persistidos do creator (imagem/voz baixadas pelo media_store) em
 # /media/{run_id}/{creator_id}/...; _is_renderable_uri já trata esses paths.
 _media_root = default_media_path()
@@ -53,11 +75,21 @@ _videos_root = default_videos_path()
 _videos_root.mkdir(parents=True, exist_ok=True)
 app.mount("/videos", StaticFiles(directory=str(_videos_root)), name="videos")
 
+# Hashed JS/CSS emitted by Vite (front/dist/assets). Mounted unconditionally with
+# check_dir=False so import works in a Node-less CI/test env (unbuilt front); requests
+# just 404 until `npm run build` populates the directory.
+app.mount(
+    "/assets",
+    StaticFiles(directory=str(_FRONT_DIST / "assets"), check_dir=False),
+    name="assets",
+)
+
 # run_id → {queues: list[Queue], buffer: list[dict], done: bool}
 _runs: dict[str, dict[str, Any]] = {}
 
 PIPELINE_NODES = {
-    "roster", "approval", "concepts", "process_item", "feedback",
+    "roster", "approval", "concepts", "scripts", "concept_review",
+    "process_item", "feedback",
     "script", "ltx", "kling", "seedance",
     "product_demo", "qc", "assembly", "drop",
 }
@@ -72,6 +104,8 @@ NODE_LABELS: dict[str, str] = {
     "roster": "Creator Roster",
     "approval": "Aceite Human",
     "concepts": "Conceitos",
+    "scripts": "Scripts",
+    "concept_review": "Edição de Conceitos",
     "process_item": "Item",
     "feedback": "Feedback",
     "script": "Script",
@@ -459,6 +493,7 @@ async def _execute_run(
     creator_prompt: Optional[str] = None,
     video_prompt: Optional[str] = None,
     approve_creators: bool = True,
+    edit_concepts: bool = True,
 ) -> None:
     """Roda a pipeline completa, emitindo eventos para os subscribers SSE.
 
@@ -500,6 +535,9 @@ async def _execute_run(
                     # creators (imagem + voz) estrelam os vídeos; opt-out via
                     # approve_creators=False no POST /api/run.
                     "approve_creators": approve_creators,
+                    # Default: pausa ANTES do creator para o usuário editar/descartar
+                    # concept+script; opt-out via edit_concepts=False no POST /api/run.
+                    "edit_concepts": edit_concepts,
                 },
                 "thread_id": run_id,
             },
@@ -577,7 +615,25 @@ async def _execute_run(
                 snap = await graph.aget_state(cfg)
                 all_interrupts = [i for t in snap.tasks for i in getattr(t, "interrupts", ())]
                 if snap.next and all_interrupts:
-                    intr_payload = all_interrupts[0].value  # {"type":"approve_creators",...}
+                    intr_payload = all_interrupts[0].value  # {"type": ...}
+                    # Gate de edição de concept+script (ANTES do creator).
+                    if intr_payload.get("type") == "edit_concepts":
+                        concepts = [
+                            _safe_serialize(c) for c in intr_payload.get("concepts", [])
+                        ]
+                        await _emit(run_id, {
+                            "type": "awaiting_concept_edit",
+                            "run_id": run_id,
+                            "concepts": concepts,
+                        })
+                        cfut: asyncio.Future = asyncio.get_event_loop().create_future()
+                        run_state_ref = _runs.get(run_id)
+                        if run_state_ref is not None:
+                            run_state_ref["concept_edit"] = cfut
+                            run_state_ref["pending_concepts"] = concepts
+                        cdecision = await cfut
+                        resume_input = Command(resume=cdecision)
+                        continue
                     # NÃO usar **intr_payload aqui: ele carrega seu próprio "type"
                     # ("approve_creators") que sobrescreveria o "awaiting_approval".
                     await _emit(run_id, {
@@ -609,6 +665,11 @@ async def _execute_run(
                     )
                     resume_input = Command(resume=decision)
                     continue
+                # Em fluxos com subgrafo + interrupts, o último evento "LangGraph"
+                # observado em astream_events pode ser um output intermediário. O
+                # snapshot raiz é a fonte correta para o resumo público do run.
+                if snap.values:
+                    final_output = dict(snap.values)
                 break
 
         summary = runner.summarize({**final_output, "run_id": run_id}) if final_output else {}
@@ -639,12 +700,16 @@ class RunRequest(BaseModel):
     creator_prompt: Optional[str] = None
     video_prompt: Optional[str] = None
     approve_creators: bool = True
+    edit_concepts: bool = True
 
 
 @app.get("/", response_class=HTMLResponse)
 async def dashboard() -> HTMLResponse:
-    html_path = Path(__file__).parent / "static" / "index.html"
-    return HTMLResponse(html_path.read_text(encoding="utf-8"))
+    """Serve o SPA React (front/dist) ou um fallback quando ainda não foi buildado."""
+    idx = _front_index()
+    if idx is not None:
+        return HTMLResponse(idx.read_text(encoding="utf-8"))
+    return HTMLResponse(_UNBUILT_FALLBACK)
 
 
 @app.post("/api/run")
@@ -662,7 +727,7 @@ async def start_run(req: RunRequest, background_tasks: BackgroundTasks) -> dict[
     background_tasks.add_task(
         _execute_run,
         run_id, req.offer, req.batch, req.platform, req.config_dir, db_path,
-        req.creator_prompt, req.video_prompt, req.approve_creators,
+        req.creator_prompt, req.video_prompt, req.approve_creators, req.edit_concepts,
     )
     return {"run_id": run_id}
 
@@ -708,6 +773,22 @@ async def approve(run_id: str, req: ApproveRequest) -> dict[str, Any]:
         "creators": list((st or {}).get("pending_creators") or []),
     })
     return {"ok": True}
+
+
+class ConceptEditRequest(BaseModel):
+    # Conceitos editados e INCLUÍDOS (os excluídos simplesmente não vêm na lista).
+    # Cada item é o dict do conceito com o campo "script" já editado.
+    concepts: list[dict[str, Any]] = []
+
+
+@app.post("/api/approve/{run_id}/concepts")
+async def submit_concepts(run_id: str, req: ConceptEditRequest) -> dict[str, Any]:
+    st = _runs.get(run_id)
+    fut = (st or {}).get("concept_edit")
+    if not fut or fut.done():
+        raise HTTPException(409, "nenhuma edição de conceitos pendente")
+    fut.set_result({"concepts": req.concepts})
+    return {"ok": True, "count": len(req.concepts)}
 
 
 class PromptTemplateRequest(BaseModel):
@@ -762,6 +843,15 @@ async def creators_history() -> dict[str, Any]:
         "store_path": str(store_path),
         "exists": store_path.exists(),
     }
+
+
+@app.get("/api/integrations")
+async def integrations_index(config_dir: Optional[str] = None) -> dict[str, Any]:
+    """Mapa stage → adapter lido de providers.yaml (fonte da tela Integrations Hub)."""
+    providers = load_providers(config_dir)
+    adapters = (providers or {}).get("adapters", {}) or {}
+    stages = {str(k): str(v) for k, v in adapters.items()}
+    return {"stages": stages}
 
 
 @app.get("/api/stream/{run_id}")
@@ -823,3 +913,22 @@ async def run_status(run_id: str, config_dir: Optional[str] = None, db: Optional
     if state is None:
         raise HTTPException(status_code=404, detail=f"run {run_id!r} not found")
     return runner.summarize({**state, "run_id": run_id})
+
+
+# --------------------------------------------------------------------------- #
+# SPA fallback: rotas client-side (/campaigns, /analytics, …) devem servir o     #
+# index do SPA para que refresh/deep-link funcionem. Registrado por último para #
+# não sombrear /api, /media, /videos, /assets — esses continuam com seu 404/JSON.#
+# --------------------------------------------------------------------------- #
+
+_NON_SPA_PREFIXES = ("api/", "media/", "videos/", "assets/")
+
+
+@app.get("/{full_path:path}", response_class=HTMLResponse)
+async def spa_fallback(full_path: str) -> HTMLResponse:
+    if full_path.startswith(_NON_SPA_PREFIXES):
+        raise HTTPException(status_code=404, detail="not found")
+    idx = _front_index()
+    if idx is not None:
+        return HTMLResponse(idx.read_text(encoding="utf-8"))
+    return HTMLResponse(_UNBUILT_FALLBACK)

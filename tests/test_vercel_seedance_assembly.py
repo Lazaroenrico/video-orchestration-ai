@@ -2,7 +2,11 @@
 from __future__ import annotations
 
 import base64
+import json
+from pathlib import Path
 from typing import Any
+
+import pytest
 
 from orchestrator.adapters.vercel_seedance_assembly import VercelSeedanceAssemblyAdapter
 from orchestrator.adapters import vercel_seedance_assembly as seedance
@@ -178,3 +182,244 @@ async def test_seedance_assembly_downloads_and_compresses_remote_reference_when_
     await adapter.assemble(item=item, platform="tiktok")
 
     assert calls[0]["image"] == {"kind": "path", "path": str(compressed)}
+
+
+# ------------------------------------------------------------------ #
+# build_vercel_seedance_assembly_adapter / _tier                     #
+# ------------------------------------------------------------------ #
+
+def test_build_adapter_falls_back_to_default_cost_when_no_seedance_tier():
+    adapter = seedance.build_vercel_seedance_assembly_adapter({"tiers": []})
+    assert adapter.cost_per_second == seedance.DEFAULT_COST_PER_SECOND
+
+
+def test_build_adapter_reads_seedance_tier_cost():
+    adapter = seedance.build_vercel_seedance_assembly_adapter(
+        {"tiers": [{"name": "seedance", "cost_per_second": 0.25}]}
+    )
+    assert adapter.cost_per_second == 0.25
+
+
+def test_tier_returns_empty_when_absent():
+    assert seedance._tier({"tiers": [{"name": "ltx"}]}, "seedance") == {}
+
+
+# ------------------------------------------------------------------ #
+# _reference_image_payload                                           #
+# ------------------------------------------------------------------ #
+
+def test_reference_image_payload_none_returns_none():
+    assert seedance._reference_image_payload(None) is None
+
+
+def test_reference_image_payload_data_uri():
+    assert seedance._reference_image_payload("data:image/png;base64,QUJD") == {
+        "kind": "data_uri",
+        "uri": "data:image/png;base64,QUJD",
+    }
+
+
+def test_reference_image_payload_http_url():
+    assert seedance._reference_image_payload("https://cdn.example/x.png") == {
+        "kind": "url",
+        "uri": "https://cdn.example/x.png",
+    }
+
+
+def test_reference_image_payload_local_below_limit_passes_through(tmp_path):
+    p = tmp_path / "small.png"
+    p.write_bytes(b"tiny")
+    assert seedance._reference_image_payload(str(p)) == {"kind": "path", "path": str(p)}
+
+
+async def test_prepare_reference_image_payload_none_returns_none():
+    assert await seedance._prepare_reference_image_payload(None) is None
+
+
+# ------------------------------------------------------------------ #
+# _download_reference_image (httpx via monkeypatch, sem rede)         #
+# ------------------------------------------------------------------ #
+
+class _FakeResponse:
+    def __init__(self, content: bytes, *, status_ok: bool = True):
+        self.content = content
+        self._status_ok = status_ok
+
+    def raise_for_status(self):
+        if not self._status_ok:
+            import httpx
+
+            raise httpx.HTTPStatusError("boom", request=None, response=None)
+
+
+class _FakeAsyncClient:
+    def __init__(self, response: _FakeResponse):
+        self._response = response
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def get(self, uri: str):
+        return self._response
+
+
+async def test_download_reference_image_writes_bytes(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        seedance.httpx, "AsyncClient",
+        lambda *a, **kw: _FakeAsyncClient(_FakeResponse(b"IMG")),
+    )
+    path = await seedance._download_reference_image("https://cdn.example/pic.png")
+    try:
+        assert path.read_bytes() == b"IMG"
+        assert path.suffix == ".png"
+    finally:
+        path.unlink(missing_ok=True)
+
+
+async def test_download_reference_image_cleans_up_on_http_error(monkeypatch):
+    captured: dict[str, Path] = {}
+    real_named = seedance.tempfile.NamedTemporaryFile
+
+    def spy_named(*a, **kw):
+        handle = real_named(*a, **kw)
+        captured["path"] = Path(handle.name)
+        return handle
+
+    monkeypatch.setattr(seedance.tempfile, "NamedTemporaryFile", spy_named)
+    monkeypatch.setattr(
+        seedance.httpx, "AsyncClient",
+        lambda *a, **kw: _FakeAsyncClient(_FakeResponse(b"", status_ok=False)),
+    )
+
+    import httpx
+
+    with pytest.raises(httpx.HTTPStatusError):
+        await seedance._download_reference_image("https://cdn.example/pic.png")
+    assert not captured["path"].exists()
+
+
+# ------------------------------------------------------------------ #
+# _local_path_for_reference                                          #
+# ------------------------------------------------------------------ #
+
+def test_local_path_for_reference_media_prefix():
+    path = seedance._local_path_for_reference("/media/run/items/item-abc/clip-0.png")
+    assert str(path).endswith(".orchestrator/media/run/items/item-abc/clip-0.png")
+
+
+def test_local_path_for_reference_plain_path():
+    assert seedance._local_path_for_reference("/abs/pic.png") == Path("/abs/pic.png")
+
+
+# ------------------------------------------------------------------ #
+# _compress_image_for_gateway (Pillow real)                          #
+# ------------------------------------------------------------------ #
+
+def _write_big_png(path: Path) -> None:
+    from PIL import Image
+
+    # Gradiente suave em RGBA: acima de 2048px (força thumbnail), modo != RGB
+    # (força convert), mas compressível o suficiente para caber no limite de teste.
+    img = Image.new("RGBA", (2600, 2600))
+    px = img.load()
+    for y in range(2600):
+        row = (y * 255) // 2600
+        for x in range(2600):
+            px[x, y] = ((x * 255) // 2600, row, (x + y) % 256, 255)
+    img.save(path, format="PNG")
+
+
+def test_compress_image_for_gateway_produces_small_jpeg(tmp_path):
+    src = tmp_path / "big.png"
+    _write_big_png(src)
+    limit = 400_000
+    out = seedance._compress_image_for_gateway(src, max_bytes=limit)
+    try:
+        assert out.suffix == ".jpg"
+        assert out.stat().st_size <= limit
+        # thumbnail respeita a dimensão máxima do gateway
+        from PIL import Image
+
+        with Image.open(out) as im:
+            assert max(im.size) <= seedance.GATEWAY_IMAGE_MAX_DIMENSION
+    finally:
+        out.unlink(missing_ok=True)
+
+
+def test_compress_image_for_gateway_raises_when_cannot_fit(tmp_path):
+    src = tmp_path / "big.png"
+    _write_big_png(src)
+    with pytest.raises(RuntimeError, match="não foi possível compactar"):
+        seedance._compress_image_for_gateway(src, max_bytes=10)
+
+
+# ------------------------------------------------------------------ #
+# _run_node_bridge (subprocess via monkeypatch, sem node real)       #
+# ------------------------------------------------------------------ #
+
+class _FakeProc:
+    def __init__(self, *, stdout: bytes, stderr: bytes = b"", returncode: int = 0):
+        self._stdout = stdout
+        self._stderr = stderr
+        self.returncode = returncode
+
+    async def communicate(self, _input: bytes):
+        return self._stdout, self._stderr
+
+
+def _patch_subprocess(monkeypatch, proc: _FakeProc, *, sink: dict | None = None):
+    async def fake_exec(*args, **kwargs):
+        if sink is not None:
+            sink["args"] = args
+        return proc
+
+    monkeypatch.setattr(seedance.asyncio, "create_subprocess_exec", fake_exec)
+
+
+async def test_run_node_bridge_success_reads_output_file(monkeypatch, tmp_path):
+    out_file = tmp_path / "out.mp4"
+    out_file.write_bytes(b"FINAL-MP4")
+    monkeypatch.setattr(seedance, "_temp_output_path", lambda: out_file)
+    _patch_subprocess(monkeypatch, _FakeProc(stdout=json.dumps({"ok": True}).encode()))
+
+    data = await seedance._run_node_bridge({"model": "m", "promptText": "p"})
+
+    assert data == b"FINAL-MP4"
+    assert not out_file.exists()  # limpo no finally
+
+
+async def test_run_node_bridge_non_json_stdout_raises(monkeypatch, tmp_path):
+    out_file = tmp_path / "out.mp4"
+    out_file.write_bytes(b"x")
+    monkeypatch.setattr(seedance, "_temp_output_path", lambda: out_file)
+    _patch_subprocess(monkeypatch, _FakeProc(stdout=b"not json", stderr=b"trace"))
+
+    with pytest.raises(RuntimeError, match="non-JSON stdout"):
+        await seedance._run_node_bridge({"model": "m"})
+    assert not out_file.exists()
+
+
+async def test_run_node_bridge_failure_returncode_raises(monkeypatch, tmp_path):
+    out_file = tmp_path / "out.mp4"
+    out_file.write_bytes(b"x")
+    monkeypatch.setattr(seedance, "_temp_output_path", lambda: out_file)
+    _patch_subprocess(
+        monkeypatch,
+        _FakeProc(stdout=json.dumps({"ok": False, "error": "gateway 500"}).encode(), returncode=1),
+    )
+
+    with pytest.raises(RuntimeError, match="gateway 500"):
+        await seedance._run_node_bridge({"model": "m"})
+    assert not out_file.exists()
+
+
+def test_temp_output_path_is_mp4(tmp_path):
+    path = seedance._temp_output_path()
+    try:
+        assert path.exists()
+        assert path.suffix == ".mp4"
+    finally:
+        path.unlink(missing_ok=True)

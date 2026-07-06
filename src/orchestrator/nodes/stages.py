@@ -334,6 +334,50 @@ async def node_concepts(state: dict[str, Any], config: RunnableConfig) -> dict[s
     return {"concepts": concepts}
 
 
+@traced("node.scripts", run_type="chain", step=2)
+async def node_scripts(state: dict[str, Any], config: RunnableConfig) -> dict[str, Any]:
+    """Step 2 — escreve o script de cada conceito (batch-level, ANTES do creator).
+
+    O script fica guardado em ``concept["script"]``; o creator ainda não existe, então
+    ``write_script`` recebe um ``creator_ref`` genérico. O fan-out atribui o creator a
+    cada item e move o script (``concept["script"]`` -> ``Item.script``) depois.
+    """
+    adapter = get_adapter(config)
+    run_cfg = config["configurable"].get("run", {})
+    platform = run_cfg.get("platform", "tiktok")
+    concepts = state.get("concepts") or []
+    add_trace_metadata(step=2, stage="scripts", batch_size=len(concepts), platform=platform)
+
+    async def _write(concept: dict[str, Any]) -> dict[str, Any]:
+        script = await adapter.write_script(
+            concept=concept, creator_ref="creator", platform=platform,
+        )
+        return {**concept, "script": script}
+
+    # gather preserva a ordem dos conceitos; determinístico no mock.
+    scripted = await asyncio.gather(*(_write(c) for c in concepts))
+    return {"concepts": list(scripted)}
+
+
+@traced("node.concept_review", run_type="chain", step=2)
+async def node_concept_review(state: dict[str, Any], config: RunnableConfig) -> dict[str, Any]:
+    """Gate humano de edição de concept+script (Step 2.5). Pausa só quando run.edit_concepts.
+
+    No resume, ``decision["concepts"]`` substitui a lista — o usuário pode ter editado
+    campos/script e excluído conceitos (produção segue só com os incluídos).
+    """
+    run_cfg = config["configurable"].get("run", {})
+    concepts = state.get("concepts") or []
+    add_trace_metadata(step=2, stage="concept_review", batch_size=len(concepts))
+    if not run_cfg.get("edit_concepts") or not concepts:
+        return {}  # passthrough: CLI/testes inalterados
+    decision = interrupt({"type": "edit_concepts", "concepts": concepts})
+    edited = (decision or {}).get("concepts")
+    if edited is None:
+        return {}  # sem decisão explícita → mantém os conceitos como estão
+    return {"concepts": list(edited)}
+
+
 @traced("node.feedback", run_type="chain", step=10)
 async def node_feedback(state: dict[str, Any], config: RunnableConfig) -> dict[str, Any]:
     """Step 10 — agrega resultados (store que o Step 1 leria no próximo ciclo)."""
@@ -407,20 +451,6 @@ def _assembly_prompt(item: Item, run_prompt: str | None, *, platform: str) -> st
         parts.append("Concept context: " + "; ".join(concept_bits))
     parts.append("No mock footage. No placeholder frames. No captions burned into the video.")
     return "\n\n".join(parts)
-
-@traced("node.script", run_type="chain", step=2)
-async def node_script(state: Any, config: RunnableConfig) -> dict[str, Any]:
-    """Step 2 — escreve o script no voice do creator, calibrado por plataforma."""
-    item = as_item(state)
-    adapter = get_adapter(config)
-    run_cfg = config["configurable"].get("run", {})
-    platform = run_cfg.get("platform", "tiktok")
-    add_trace_metadata(step=2, stage="script", item_id=item.id, platform=platform)
-    script = await adapter.write_script(
-        concept=item.concept, creator_ref=item.creator_ref or "creator-0", platform=platform
-    )
-    return {"script": script}
-
 
 def make_gen_node(tier: str):
     """Fabrica o node de geração de talking-head (Step 4) para um tier."""

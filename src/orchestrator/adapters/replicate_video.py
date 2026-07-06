@@ -140,7 +140,7 @@ class ReplicateVideoAdapter:
                 value = output.get(key)
                 if value:
                     if isinstance(value, list):
-                        if not value:
+                        if not value:  # pragma: no cover - inalcançável: `if value` acima já garante lista não-vazia
                             raise RuntimeError(f"Replicate video output key {key!r} is empty")
                         return str(value[0])
                     return str(value)

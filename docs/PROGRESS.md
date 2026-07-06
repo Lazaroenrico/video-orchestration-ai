@@ -1,11 +1,49 @@
 # PROGRESS — handoff
 
-Estado em **2026-07-06**. Suíte: **415 passando, 2 skips** (testes `--live` opt-in,
+Estado em **2026-07-06**. Suíte: **537 passando, 2 skips** (testes `--live` opt-in,
 pulados sem `JUDGE_GATEWAY_URL`) + 2 warnings conhecidos/benignos (LangSmith
 deprecation em import; LangGraph resume parcial — ver falha #5).
+Cobertura: **100%** com gate `fail_under=100` (ver seção abaixo).
 Rodar: `rtk proxy python -m pytest`.
 
 > Nota: a falha que estava em aberto em `_SAFE_CREATOR_PROMPT` foi corrigida — ver falha #10.
+
+## Cobertura completa de testes + gate fail_under=100 (2026-07-06)
+
+Objetivo: fechar as lacunas de cobertura (91% → **100%**) e travar um gate permanente
+que quebra o pytest se a cobertura cair. Os buracos estavam concentrados nos **adapters
+reais** e nos **caminhos de erro/streaming** que os `MockAdapter` do v1 não exercitam.
+
+Como foram testes de **caracterização** (o código já existia, verde na 1ª passada), a
+proteção é contra regressão futura. Tudo offline/determinístico: bridge Node e downloads
+via monkeypatch de `asyncio.create_subprocess_exec`/`httpx`; branches de "client próprio"
+dos adapters HTTP cobertos capturando o construtor real de `httpx` **antes** de patchar o
+módulo (evita recursão, já que `module.httpx` é o módulo global compartilhado).
+
+Arquivos de teste novos/estendidos: `test_replicate_video.py`,
+`test_vercel_seedance_assembly.py`, `test_anthropic_llm.py`, `test_tracing.py`,
+`test_stages_coverage.py` (novo), `test_web_endpoints.py` (novo), `test_small_gaps.py`
+(novo), `test_creator_real.py`, `test_judge_eval.py`, `test_checkpoint.py`, `test_cli.py`.
+
+Config: `addopts` passou a incluir `--cov=orchestrator --cov-report=term-missing` e
+`[tool.coverage.report]` com `fail_under = 100` + `exclude_lines` para os pragmas.
+
+### Achado (dead code) durante a caracterização
+
+- `adapters/replicate_video.py::_coerce_output`: o guard interno `if not value:` para uma
+  chave de vídeo que é lista é **inalcançável** — o `if value:` acima já garante lista
+  não-vazia. Marcado `# pragma: no cover` (não é comportamento errado, é defesa morta).
+
+### `# pragma: no cover` adicionados (ramos genuinamente inatingíveis neste ambiente)
+
+- `tracing.py` L27-28 — `except` do import do `langsmith` (a lib está instalada).
+- `vercel_seedance_assembly.py` — `ImportError` do Pillow (instalado).
+- `replicate_video.py` — o guard morto acima.
+- `cli.py` — `except ImportError` do uvicorn (é dep `[web]` instalada) e o
+  `if __name__ == "__main__"` (só roda via `python -m`).
+
+Esses pragmas são o que torna `fail_under=100` **atingível e estável**. Verificação:
+`rtk proxy python -m pytest` → `Required test coverage of 100.0% reached`, 537 passed.
 
 ## Retry de 429 nos adapters HTTP puros do creator + erro claro em shape inesperado (2026-07-06)
 
@@ -844,3 +882,86 @@ orchestrator run --batch 2 --offer "test product" --platform tiktok
       tocável). Regressões: novos casos em `tests/test_creator_real.py`,
       `tests/test_registry_composite.py`, `tests/test_stages_reroll.py` e
       `tests/test_web_item_updates.py`. Suíte completa verde (358 passed, 2 skips `--live`).
+
+---
+
+## Nova UI "Kinetic Command" (front/ React SPA) — substitui o dashboard dark
+
+**O quê:** implementação da UI/UX do projeto Stitch `2394034031028131565` (design system
+"Kinetic Command", tema claro) — 12 telas navegáveis, substituindo o `static/index.html`
+dark de página única. Frontend em **Vite + React + TypeScript + Tailwind** numa árvore
+própria em `front/` (fonte em `front/src/`), buildado para `front/dist/` e servido pelo
+FastAPI. Decisões do usuário: todas as 12 telas, ligadas a dados reais onde há backend;
+stack React; substituir a UI antiga.
+
+**Telas e wiring:**
+- Reais via API/SSE: Dashboard, Campaigns (lista), Campaign Detail (pipeline + gate de
+  aprovação de creators com reroll de voz), Create Campaign (wizard → `POST /api/run`),
+  Concepts & Scripts, Creators Library (`/api/creators`), Job Queue e Video Review & QC
+  (ambos via `/api/stream/{run_id}`), Integrations (`GET /api/integrations`, novo).
+- Fiéis ao design com dados parciais/estáticos: Analytics (agrega `/api/status`),
+  Settings (paths reais de stores), Publishing Calendar (fora de escopo — distribuição).
+
+**Backend (`src/orchestrator/web/server.py`):** `GET /` serve `front/dist/index.html`
+(fallback HTML instruindo `npm run build` quando não buildado — mantém CI sem Node verde);
+mount `/assets` (check_dir=False) para os bundles do Vite; catch-all `GET /{path}` serve o
+index para rotas client-side **sem** sombrear `/api|/media|/videos|/assets` (esses seguem
+com 404/JSON). Novo `GET /api/integrations` lê `providers.yaml` (mapa stage→adapter). O
+antigo `static/index.html` foi removido.
+
+**Testes:** novo `tests/test_web_spa.py` (fallback, serviço do index buildado, catch-all
+não-sombreando, `_front_index` em ambos os ramos, integrations). Suíte completa verde
+(**537 passed, 2 skips `--live`, cobertura 100%**). Frontend: `tsc --noEmit` + `vite build`
+sem erros.
+
+- Testes obsoletos removidos (integridade): as asserções que faziam *grep* no HTML/JS do
+  dashboard antigo (`test_ui_*` em `tests/test_web_item_updates.py` e `tests/test_web_prompts.py`)
+  testavam o artefato deletado. Como a UI foi substituída por decisão do usuário, esses
+  testes cobriam código removido — foram apagados; os comportamentos reais equivalentes
+  (texto DOM-safe, reroll no servidor, preview de voz, prompt builder) vivem agora nos
+  componentes React (cobertos por `tsc` + build). Os testes de **lógica de backend**
+  (`_build_item_update`, normalizadores, `/api/prompts` CRUD etc.) foram mantidos intactos.
+
+**Como buildar/rodar:** `cd front && npm install && npm run build` → `orchestrator serve`
+(dashboard em `http://localhost:8000/`). Dev: `cd front && npm run dev` (Vite faz proxy de
+`/api`,`/media`,`/videos` para :8000).
+
+---
+
+## Gate de edição de Concepts & Scripts antes do creator
+
+**O quê:** a pipeline agora gera `concepts` e `scripts` antes do roster de creators e
+pausa em um gate humano opcional para editar campos do conceito, editar o script e
+descartar conceitos antes de gastar creator/vídeo.
+
+**Backend/grafo:** `graph/builder.py` foi reordenado para
+`concepts -> scripts -> concept_review -> roster -> approval -> fan-out`. O subgrafo
+per-item não tem mais node `script`; ele entra direto no roteamento de tier. O fan-out
+move `concept["script"]` para `Item.script` e remove a chave do concept. `stages.py`
+ganhou `node_scripts` batch-level e `node_concept_review` com passthrough quando
+`run.edit_concepts` é falso.
+
+**Web/UI:** `RunRequest.edit_concepts` default `True`; `_execute_run` emite
+`awaiting_concept_edit` e retoma via `POST /api/approve/{run_id}/concepts`. O front
+tipa `EditableConcept`, adiciona fase `editing`, guarda `editConcepts` na stream e a tela
+Concepts & Scripts renderiza editor com textareas por campo, textarea grande para
+`script`, checkbox de inclusão/exclusão e submit para continuar.
+
+**Falha investigada no smoke dos dois gates:**
+- Sintoma: com `edit_concepts=True` e `approve_creators=True`, o item era processado e o
+  script editado chegava aos `item_update`, mas o evento `run_end.summary` vinha com
+  `produced=0`.
+- Causa raiz: `_execute_run` montava o summary a partir do último evento `LangGraph`
+  observado em `astream_events`; com subgrafo + interrupts, esse evento pode ser output
+  intermediário/subgrafo, não o estado raiz final.
+- Correção: ao sair do loop sem interrupt pendente, `_execute_run` agora lê
+  `graph.aget_state(cfg).values` e usa esse snapshot raiz como `final_output`.
+  Regressão: `test_dashboard_run_summary_after_concept_edit_and_creator_approval`.
+
+**Testes/verificação:** suíte backend verde com `rtk proxy python -m pytest`
+(**537 passed, 2 skips, cobertura 100%**). Frontend verde com `npm run build`
+(`tsc --noEmit` + Vite build). Smoke in-process do fluxo web com `config-mock`: gate
+`awaiting_concept_edit` antes de qualquer creator, gate `awaiting_approval`, `produced=1`
+e script editado propagado. O smoke por porta TCP local foi bloqueado pelo sandbox de
+socket entre sessões, então a verificação usou o app ASGI/funções de endpoint no mesmo
+processo.

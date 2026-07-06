@@ -24,7 +24,7 @@ try:
     from langsmith.run_helpers import get_current_run_tree
     from langsmith.wrappers import wrap_anthropic as _ls_wrap_anthropic
     _HAS_LS = True
-except Exception:  # lib ausente ou falha de import → tudo vira no-op
+except Exception:  # pragma: no cover - lib ausente ou falha de import → tudo vira no-op
     _HAS_LS = False
 
 

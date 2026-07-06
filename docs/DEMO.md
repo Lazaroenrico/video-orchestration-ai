@@ -21,12 +21,12 @@ Confirme que a suíte está verde (especificação executável do motor):
 
 ```bash
 pytest
-# 87 passed, 1 skipped, 1 warning
+# 537 passed, 2 skipped, 2 warnings (cobertura 100%, gate fail_under=100)
 ```
 
-O único skip é o teste `--live` do LLM Judge (opt-in, exige um gateway externo). O warning
-é benigno (comportamento interno do LangGraph ao cancelar tasks no resume parcial — ver
-`docs/PROGRESS.md`, falha #5).
+Os 2 skips são testes `--live` (opt-in, exigem gateway externo). Os warnings são benignos
+(deprecation de import do LangSmith; comportamento interno do LangGraph ao cancelar tasks no
+resume parcial — ver `docs/PROGRESS.md`, falha #5).
 
 > Nota: o hook do `rtk` colapsa a saída do pytest. Para ver o resultado real, rode
 > `rtk proxy python -m pytest`.

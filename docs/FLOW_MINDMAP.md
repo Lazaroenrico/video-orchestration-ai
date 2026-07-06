@@ -10,16 +10,21 @@ externas cada stage dispara hoje segundo `config/providers.yaml`.
 mindmap
   root((Pipeline AI UGC))
     Grafo de topo BatchState
+      concepts Step1
+        generate_concepts LLM
+      scripts Step2
+        write_script por conceito
+      concept_review Step2.5
+        interrupt humano opcional
       roster Step3
         build_creator x N paralelo
         persist_creator_media
         voice_preview
       approval Step3.5
         interrupt humano opcional
-      concepts Step1
-        generate_concepts LLM
       fan-out Send
         1 Item por concepto
+        move concept script para Item.script
         creator_ref round-robin do roster
         creator_image_uri para video image-to-video
       process_item
@@ -29,8 +34,6 @@ mindmap
         salva feedback_store
         alimenta bias do proximo ciclo
     Subgrafo per-item Item
-      script Step2
-        write_script LLM
       route_after_script
         escolhe tier conforme attempts
       gen tier Step4
@@ -51,13 +54,20 @@ mindmap
       drop
         marca dropped true
     Camada web FastAPI
+      SPA React front dist
+        GET serve index Kinetic Command 12 telas
+        catch-all rotas client-side sem sombrear api media videos assets
       POST /api/run
         dispara _execute_run em background
       GET /api/stream/run_id
         SSE token_cb via stream_bus
       POST /api/approve/run_id
         resolve o interrupt de approval
+      POST /api/approve/run_id/creators/creator_id/reroll-voice
       GET /api/creators
+      GET /api/prompts POST DELETE
+      GET /api/integrations
+        mapa stage adapter de providers.yaml
       GET /api/runs
       GET /api/status/run_id
     Adapters e requisicoes externas hoje
@@ -72,9 +82,10 @@ mindmap
       video replicate
         LTX 2.3 Fast sem audio
         Kling e Seedance fallback mock
-      qc mock
-        determinístico por fail_rate
-      assembly mock
+      qc integrity_qc
+        bloqueia midia mock ou fallback antes da montagem
+      assembly vercel_seedance_assembly
+        video final Seedance 2.0 via Vercel AI Gateway
       judge gateway
         JudgePort via HTTP configurável judge.yaml
 ```
@@ -91,6 +102,16 @@ sequenceDiagram
     participant MEDIA as media_store (disco local)
 
     U->>G: run(offer, batch, platform, creator_prompt, video_prompt)
+    G->>LLM: generate_concepts(offer, n, seed, bias)
+    LLM-->>G: concepts[]
+    par scripts por conceito
+        G->>LLM: write_script(concept, creator_ref="creator", platform)
+        LLM-->>G: script
+    end
+    opt run.edit_concepts
+        G-->>U: interrupt edit_concepts (concept + script)
+        U-->>G: conceitos editados/incluidos
+    end
     G->>IMG: generate_face(index, system_prompt) [roster, N vezes em paralelo]
     IMG-->>G: primary (data URI) + angles
     G->>REP: upscale(primary) [real-esrgan]
@@ -98,16 +119,12 @@ sequenceDiagram
     G->>REP: create_voice(index) [ElevenLabs TTS]
     REP-->>G: voice_id
     G->>MEDIA: persist_creator_media (baixa bytes, reescreve URIs locais)
-    G->>LLM: generate_concepts(offer, n, seed, bias)
-    LLM-->>G: concepts[]
     par fan-out por item (max_concurrency)
-        G->>LLM: write_script(concept, creator_ref, platform)
-        LLM-->>G: script
         G->>REP: generate_clip LTX 2.3 Fast (image-to-video, sem audio)
         REP-->>G: clip mp4
-        G->>G: qc_check (mock determinístico)
+        G->>G: qc_check (integrity_qc: bloqueia mídia mock/fallback)
         G->>MEDIA: persist_item_media (clips, assembled)
-        G->>G: assemble (mock)
+        G->>LLM: assemble → Seedance 2.0 (vercel_seedance_assembly, vídeo final)
     end
     G-->>U: feedback (summary agregando resultados do batch)
 ```
@@ -116,14 +133,15 @@ sequenceDiagram
 
 | Step | Node | Provider configurado | Requisição externa? |
 |------|------|----------------------|----------------------|
+| 1 | `node_concepts` | `vercel_gateway_llm` | Sim — Claude Opus 4.8 via Vercel AI Gateway |
+| 2 | `node_scripts` | `vercel_gateway_llm` | Sim — Claude Opus 4.8 via Vercel AI Gateway |
+| 2.5 | `node_concept_review` | — | `interrupt()` humano (opcional, `run.edit_concepts`) |
 | 3 | `node_roster` → `build_creator` | `creator_real_replicate` | Sim — Vercel Gateway (GPT Image 2), Replicate (upscale + ElevenLabs TTS) |
 | 3.5 | `node_approval` | — | `interrupt()` humano (opcional, `run.approve_creators`) |
-| 1 | `node_concepts` | `vercel_gateway_llm` | Sim — Claude Opus 4.8 via Vercel AI Gateway |
-| 2 | `node_script` | `vercel_gateway_llm` | Sim — Claude Opus 4.8 via Vercel AI Gateway |
 | 4 | `make_gen_node(tier)` | `replicate` | Sim para `ltx` — LTX 2.3 Fast image-to-video sem áudio; `kling`/`seedance` fallback mock |
 | 5 | `node_product_demo` | `replicate` | Sim — LTX 2.3 Fast image-to-video sem áudio |
-| 7 | `node_qc` | `mock` | Não — determinístico via `fail_rate` |
-| 8 | `node_assembly` | `mock` | Não — mock |
+| 7 | `node_qc` | `integrity_qc` | Não — valida mídia real e bloqueia URIs mock/fallback antes da montagem |
+| 8 | `node_assembly` | `vercel_seedance_assembly` | Sim — vídeo final Seedance 2.0 (`bytedance/seedance-2.0`) via Vercel AI Gateway |
 | — | `JudgePort` (gateway) | `gateway` | Sim, quando usado — HTTP configurável (`config/judge.yaml`) |
 
 ## 4. Notas de arquitetura

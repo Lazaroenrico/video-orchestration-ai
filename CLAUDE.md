@@ -45,6 +45,11 @@ orchestrator status <run_id> --config-dir config
 orchestrator resume <run_id> --config-dir config
 orchestrator list
 
+# UI web "Kinetic Command" (React SPA em front/, servida pelo FastAPI)
+cd front && npm install && npm run build   # gera front/dist (servido em GET /)
+orchestrator serve                         # dashboard em http://localhost:8000/
+cd front && npm run dev                    # dev: Vite faz proxy /api,/media,/videos -> :8000
+
 pytest                                 # suíte (determinística, offline)
 pytest tests/test_judge_eval.py        # LLM Judge via cassette
 pytest tests/test_judge_eval.py --live # LLM Judge contra o gateway real (regrava cassette)

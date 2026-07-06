@@ -270,6 +270,111 @@ def test_wrap_anthropic_client_returns_same_object_when_lib_unavailable():
     assert result is dummy, "Deve retornar o mesmo objeto quando lib unavailable"
 
 
+# --------------------------------------------------------------------------- #
+# _sanitize_string — truncamento de strings gigantes                          #
+# --------------------------------------------------------------------------- #
+
+def test_sanitize_string_truncates_huge_strings():
+    from orchestrator.tracing import _MAX_TRACE_STRING, _sanitize_string
+
+    long = "a" * (_MAX_TRACE_STRING + 500)
+    out = _sanitize_string(long)
+
+    assert out.endswith("…[truncated]")
+    assert out.startswith("a" * 10)
+    assert len(out) == _MAX_TRACE_STRING + len("…[truncated]")
+
+
+# --------------------------------------------------------------------------- #
+# Ramos ativos (tracing on): wrapper síncrono, wrap_anthropic, run tree        #
+# --------------------------------------------------------------------------- #
+
+def test_traced_sync_wrapper_calls_langsmith_when_on(monkeypatch):
+    """Função síncrona decorada com @traced usa o wrapper LangSmith quando tracing on."""
+    import orchestrator.tracing as tracing_mod
+
+    captured: dict[str, bool] = {}
+
+    def fake_traceable(**kwargs):
+        def deco(fn):
+            def wrapped(*a, **k):
+                captured["called"] = True
+                return fn(*a, **k)
+
+            return wrapped
+
+        return deco
+
+    monkeypatch.setenv("LANGSMITH_TRACING", "true")
+    monkeypatch.setattr(tracing_mod, "_HAS_LS", True)
+    monkeypatch.setattr(tracing_mod, "_ls_traceable", fake_traceable)
+
+    @tracing_mod.traced("sync.span")
+    def sample(x: int) -> int:
+        return x * 2
+
+    assert sample(3) == 6
+    assert captured.get("called") is True
+
+
+def test_traced_sync_wrapper_passthrough_when_off(monkeypatch):
+    """Função síncrona decorada é passthrough puro quando tracing off."""
+    import orchestrator.tracing as tracing_mod
+
+    monkeypatch.setenv("LANGSMITH_TRACING", "false")
+
+    @tracing_mod.traced("sync.off.span")
+    def sample(x: int) -> int:
+        return x + 1
+
+    assert sample(41) == 42
+    assert sample.__trace_name__ == "sync.off.span"
+
+
+def test_wrap_anthropic_client_wraps_when_tracing_on(monkeypatch):
+    import orchestrator.tracing as tracing_mod
+
+    sentinel = object()
+    monkeypatch.setenv("LANGSMITH_TRACING", "true")
+    monkeypatch.setattr(tracing_mod, "_HAS_LS", True)
+    monkeypatch.setattr(tracing_mod, "_ls_wrap_anthropic", lambda c: sentinel)
+
+    assert tracing_mod.wrap_anthropic_client(object()) is sentinel
+
+
+def test_add_trace_metadata_updates_active_run_tree(monkeypatch):
+    import orchestrator.tracing as tracing_mod
+
+    class _RT:
+        def __init__(self) -> None:
+            self.metadata: dict = {}
+
+    rt = _RT()
+    monkeypatch.setenv("LANGSMITH_TRACING", "true")
+    monkeypatch.delenv("LANGSMITH_REDACT_PROMPTS", raising=False)
+    monkeypatch.setattr(tracing_mod, "_HAS_LS", True)
+    monkeypatch.setattr(tracing_mod, "get_current_run_tree", lambda: rt)
+
+    tracing_mod.add_trace_metadata(step=3, offer="visible-by-default")
+
+    assert rt.metadata["step"] == 3
+    assert rt.metadata["offer"] == "visible-by-default"
+
+
+def test_add_trace_metadata_swallows_run_tree_errors(monkeypatch):
+    """Erro ao acessar a run tree nunca propaga — é chamado no meio de API real."""
+    import orchestrator.tracing as tracing_mod
+
+    def boom():
+        raise RuntimeError("sem run tree")
+
+    monkeypatch.setenv("LANGSMITH_TRACING", "true")
+    monkeypatch.setattr(tracing_mod, "_HAS_LS", True)
+    monkeypatch.setattr(tracing_mod, "get_current_run_tree", boom)
+
+    tracing_mod.add_trace_metadata(step=1)  # não deve levantar
+
+
 def test_wrap_anthropic_client_does_not_raise():
     """wrap_anthropic_client não lança exceção com qualquer objeto quando _HAS_LS=False."""
     import unittest.mock as mock

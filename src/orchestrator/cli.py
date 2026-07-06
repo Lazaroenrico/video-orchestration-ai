@@ -123,7 +123,7 @@ def serve(host, port, reload):
     """Inicia o servidor web com dashboard em tempo real (SSE + streaming LLM)."""
     try:
         import uvicorn
-    except ImportError:
+    except ImportError:  # pragma: no cover - uvicorn faz parte das deps [web] instaladas
         raise click.ClickException(
             "uvicorn não instalado. Execute: uv pip install -e '.[web]'"
         )
@@ -139,5 +139,5 @@ def serve(host, port, reload):
     )
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # pragma: no cover - entrypoint executado só via `python -m`
     cli()

@@ -50,24 +50,40 @@ def test_sub_config_propagates_trace_lineage_and_drops_checkpoint_keys():
 def test_item_graph_has_expected_nodes(pipeline_cfg):
     app = build_item_graph(pipeline_cfg)
     nodes = set(app.get_graph().nodes)
-    for n in ("script", "ltx", "kling", "seedance", "product_demo", "qc", "assembly", "drop"):
+    for n in ("ltx", "kling", "seedance", "product_demo", "qc", "assembly", "drop"):
         assert n in nodes
+    # O script agora é gerado em nível de batch (antes do creator); o subgrafo
+    # per-item recebe o Item com o script já pronto, sem um node "script".
+    assert "script" not in nodes
     assert "distribution" not in nodes
 
 
 def test_top_graph_has_expected_nodes(pipeline_cfg):
     app = build_graph(pipeline_cfg)
     nodes = set(app.get_graph().nodes)
-    for n in ("roster", "concepts", "process_item", "feedback"):
+    for n in (
+        "concepts", "scripts", "concept_review", "roster", "approval",
+        "process_item", "feedback",
+    ):
         assert n in nodes
 
 
-def test_top_graph_routes_concepts_via_conditional_send(pipeline_cfg):
+def test_top_graph_orders_scripts_and_review_before_creator(pipeline_cfg):
+    app = build_graph(pipeline_cfg)
+    edges = {(e.source, e.target) for e in app.get_graph().edges}
+    # concepts -> scripts -> concept_review (gate) -> roster (creator) -> approval
+    assert ("concepts", "scripts") in edges
+    assert ("scripts", "concept_review") in edges
+    assert ("concept_review", "roster") in edges
+    assert ("roster", "approval") in edges
+
+
+def test_top_graph_routes_approval_via_conditional_send(pipeline_cfg):
     app = build_graph(pipeline_cfg)
     edges = app.get_graph().edges
     matching = [
         edge for edge in edges
-        if edge.source == "concepts" and edge.target == "process_item"
+        if edge.source == "approval" and edge.target == "process_item"
     ]
     assert len(matching) == 1
     assert matching[0].conditional is True
@@ -96,15 +112,36 @@ async def test_fan_out_attaches_creator_image_uri_from_roster():
     assert item_payload["creator_image_local_path"] == "/tmp/run/creator-0/image.png"
 
 
+async def test_fan_out_moves_concept_script_into_item():
+    """O script gerado em batch (concept["script"]) vira Item.script; concept fica limpo."""
+    fan_out = make_fan_out_node()
+    sends = await fan_out(
+        {
+            "concepts": [{"id": "concept-1", "hook": "h", "script": "HOOK: ...\nCTA: ..."}],
+            "roster": [{"id": "creator-0"}],
+        }
+    )
+    assert len(sends) == 1
+    item_payload = sends[0].arg
+    assert item_payload["script"] == "HOOK: ...\nCTA: ..."
+    # o campo script não deve vazar de volta para dentro do concept
+    assert "script" not in item_payload["concept"]
+
+
 async def test_item_subgraph_runs_one_item_to_assembly(adapter, pipeline_cfg):
     app = build_item_graph(pipeline_cfg)
     cfg = {"configurable": {"adapter": adapter, "pipeline": pipeline_cfg, "run": {"platform": "tiktok"}}}
-    item = Item(concept={"hook": "h", "hook_style": "problem", "offer": "x"}, creator_ref="creator-0")
+    # O script já vem pronto no Item (gerado antes do creator); o subgrafo o preserva.
+    item = Item(
+        concept={"hook": "h", "hook_style": "problem", "offer": "x"},
+        creator_ref="creator-0",
+        script="HOOK: h\nBODY: ...\nCTA: ...",
+    )
     out = await asyncio.wait_for(app.ainvoke(item.model_dump(), cfg), timeout=5)
     result = Item.model_validate(out)
     # terminou montado OU descartado (nunca preso no meio)
     assert result.assembled is not None or result.dropped
-    assert result.script is not None
+    assert result.script == "HOOK: h\nBODY: ...\nCTA: ..."
     assert result.cost_usd > 0
 
 

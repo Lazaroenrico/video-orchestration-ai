@@ -14,6 +14,20 @@ def _invoke(cr: CliRunner, args):
     return cr.invoke(cli, args, env=CLI_OFFLINE_ENV)
 
 
+def test_serve_command_invokes_uvicorn(monkeypatch):
+    """`orchestrator serve` configura logging e delega para uvicorn.run (patched)."""
+    import uvicorn
+
+    calls: dict = {}
+    monkeypatch.setattr(uvicorn, "run", lambda *a, **k: calls.setdefault("kwargs", k))
+
+    result = CliRunner().invoke(cli, ["serve", "--port", "9123"], env=CLI_OFFLINE_ENV)
+
+    assert result.exit_code == 0, result.output
+    assert calls["kwargs"]["port"] == 9123
+    assert calls["kwargs"]["host"] == "0.0.0.0"
+
+
 def _mock_config_dir(tmp_path):
     cfg = tmp_path / "config"
     cfg.mkdir()

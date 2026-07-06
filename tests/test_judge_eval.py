@@ -70,6 +70,47 @@ def test_judge_cassette_miss_is_explicit(judge_config):
         j.judge(DEFAULT_QC_CRITERIA, {"id": "nao-existe"}, key="nao-existe")
 
 
+def test_judge_requires_key_or_subject_id(judge_config):
+    j = GatewayJudge(judge_config, cassette=Cassette(CASSETTE), live=False)
+    with pytest.raises(ValueError, match="precisa de 'id'"):
+        j.judge(DEFAULT_QC_CRITERIA, {})  # sem id e sem key
+
+
+def test_judge_verdict_none_when_verdict_path_missing(judge_config, tmp_path):
+    """Resposta sem o campo de verdict não quebra — cai no threshold sobre o score."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"output": {"score": 0.9}})  # sem verdict
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    j = GatewayJudge(judge_config, cassette=Cassette(tmp_path / "r.json"), live=True, client=client)
+
+    v = j.judge(DEFAULT_QC_CRITERIA, {"id": "clip-z"}, key="clip-z")
+
+    assert v.score == 0.9
+    assert v.passed is True  # verdict ausente → decide pelo threshold
+
+
+def test_judge_live_path_uses_own_client(judge_config, tmp_path, monkeypatch):
+    """Sem client injetado, o gateway cria (e fecha) o próprio httpx.Client."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"output": {"score": 0.77, "verdict": "pass"}})
+
+    import orchestrator.adapters.judge as judge_mod
+
+    real_client = httpx.Client  # captura antes de patchar (módulo httpx é global)
+    monkeypatch.setattr(
+        judge_mod.httpx, "Client",
+        lambda *a, **k: real_client(transport=httpx.MockTransport(handler)),
+    )
+    j = GatewayJudge(judge_config, cassette=Cassette(tmp_path / "r.json"), live=True)  # sem client
+
+    v = j.judge(DEFAULT_QC_CRITERIA, {"id": "clip-o"}, key="clip-o")
+
+    assert v.score == 0.77
+
+
 def test_evaluate_judge_accuracy_is_deterministic(judge_config):
     j = GatewayJudge(judge_config, cassette=Cassette(CASSETTE), live=False)
     report = evaluate_judge(j, DATASET)
