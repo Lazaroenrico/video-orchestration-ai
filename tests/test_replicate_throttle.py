@@ -231,7 +231,11 @@ async def test_throttle_applies_to_each_retry_attempt(monkeypatch):
 
 
 def test_replicate_factories_share_the_global_throttle(monkeypatch, pipeline_cfg):
-    """Voz, upscale e vídeo dividem o MESMO orçamento de rate limit do processo."""
+    """Voz e vídeo dividem o MESMO orçamento de rate limit do processo.
+
+    (O upscale de imagem saiu do creator — o upscale agora é do vídeo final e não usa
+    Replicate no perfil live; ver papel ``upscale``/``passthrough_upscale``.)
+    """
     from orchestrator.adapters.creator_real import build_real_creator_replicate_adapter
     from orchestrator.registry import _build_replicate
 
@@ -243,6 +247,5 @@ def test_replicate_factories_share_the_global_throttle(monkeypatch, pipeline_cfg
     video = _build_replicate(pipeline_cfg)
 
     shared = get_replicate_throttle()
-    assert creator.topaz._throttle is shared
     assert creator.voice._throttle is shared
     assert video._throttle is shared

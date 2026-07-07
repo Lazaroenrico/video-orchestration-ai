@@ -140,6 +140,17 @@ class VideoPort(Protocol):
 
 
 @runtime_checkable
+class UpscalePort(Protocol):
+    """Upscale do vídeo final (pós-montagem, Step 8) — sobre o entregável, não a imagem.
+
+    Mesma assinatura dos upscalers de imagem (``upscale(url) -> url``), de propósito:
+    um upscaler de vídeo real pluga aqui trocando só o nome em ``providers.yaml``.
+    """
+
+    async def upscale(self, media_uri: str) -> str: ...
+
+
+@runtime_checkable
 class QCPort(Protocol):
     """QC sistematizado (Step 7)."""
 

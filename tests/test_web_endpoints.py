@@ -396,6 +396,55 @@ async def test_run_state_merges_runtime_snapshots_and_skips_invalid(tmp_path, mo
     assert state["items"][0]["script"] == "SCRIPT"
 
 
+async def test_run_state_surfaces_orphaned_pending_items_with_error(tmp_path, monkeypatch):
+    """Item que quebrou na montagem (fora de `results`) mas tem clips reais deve
+    aparecer no /api/state com seus artifacts + o motivo do erro."""
+    from orchestrator.graph.state import Item
+
+    run_id = "orphan-web"
+
+    async def fake_get_status(pipeline, *, db_path, run_id):
+        return {"results": []}  # canal results vazio
+
+    async def fake_get_pending_items(pipeline, *, db_path, run_id):
+        return [Item(
+            id="concept-0001",
+            concept={"hook": "h"},
+            clips=[Artifact(kind="clip", uri="/videos/orphan-web/items/concept-0001/clip-0.mp4")],
+            error="assembly: Seedance bridge failed: input image may contain real person",
+        )]
+
+    monkeypatch.setattr(web_server.runner, "get_status", fake_get_status)
+    monkeypatch.setattr(web_server.runner, "get_pending_items", fake_get_pending_items)
+
+    state = await web_server.run_state(run_id, config_dir="config-mock", db=str(tmp_path / "cp.db"))
+
+    assert len(state["items"]) == 1
+    item = state["items"][0]
+    assert item["id"] == "concept-0001"
+    assert "real person" in item["error"]
+    assert item["assembled"] is None
+    assert any(a["media_type"] == "video" for a in item["artifacts"])
+
+
+async def test_run_state_tolerates_pending_recovery_failure(tmp_path, monkeypatch):
+    """Se a recuperação de órfãos falhar, /api/state degrada para os results normais."""
+    run_id = "orphan-fail"
+
+    async def fake_get_status(pipeline, *, db_path, run_id):
+        return {"results": [{"id": "concept-a", "concept": {}, "script": "ok"}]}
+
+    async def boom_pending(pipeline, *, db_path, run_id):
+        raise RuntimeError("checkpoint ilegível")
+
+    monkeypatch.setattr(web_server.runner, "get_status", fake_get_status)
+    monkeypatch.setattr(web_server.runner, "get_pending_items", boom_pending)
+
+    state = await web_server.run_state(run_id, config_dir="config-mock", db=str(tmp_path / "cp.db"))
+
+    assert [it["id"] for it in state["items"]] == ["concept-a"]
+
+
 async def test_run_state_returns_pending_creators_during_approval_gate(tmp_path):
     run_id = "runtime-awaiting"
     fut = asyncio.get_running_loop().create_future()

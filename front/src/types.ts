@@ -42,6 +42,7 @@ export interface Item {
   artifacts: Artifact[];
   assembled?: Artifact | null;
   dropped: boolean;
+  error?: string | null;
 }
 
 // runner.summarize(...) — returned by GET /api/status/{run_id} and the run_end event.

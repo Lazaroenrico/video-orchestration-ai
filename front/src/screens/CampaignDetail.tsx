@@ -17,7 +17,7 @@ const STAGES: { key: string; label: string; nodes: string[] }[] = [
   { key: "script", label: "Scripts", nodes: ["script"] },
   { key: "video", label: "Video", nodes: ["ltx", "kling", "seedance", "product_demo"] },
   { key: "qc", label: "QC", nodes: ["qc"] },
-  { key: "assembly", label: "Assembly", nodes: ["assembly"] },
+  { key: "assembly", label: "Assembly", nodes: ["assembly", "upscale"] },
 ];
 
 function phasePill(phase: RunPhase): { status: Status; label: string } {
@@ -38,6 +38,7 @@ function phasePill(phase: RunPhase): { status: Status; label: string } {
 }
 
 function itemStatus(it: Item): { status: Status; label: string } {
+  if (it.error) return { status: "failed", label: "Assembly Failed" };
   if (it.dropped) return { status: "failed", label: "Failed QC" };
   if (it.assembled) return { status: "done", label: "Done" };
   if (it.qc) return { status: it.qc.passed ? "approved" : "review", label: it.qc.passed ? "QC Pass" : "QC Review" };
@@ -156,7 +157,7 @@ export function CampaignDetail() {
     return "pending";
   };
 
-  const doneItems = items.filter((i) => i.assembled || i.dropped).length;
+  const doneItems = items.filter((i) => i.assembled || i.dropped || i.error).length;
   const totalCost = items.reduce((a, i) => a + (i.cost_usd || 0), 0);
 
   return (

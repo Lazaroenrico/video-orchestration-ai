@@ -1015,3 +1015,71 @@ do SSE limpa `editing`/`awaiting` e volta para `running` no primeiro `node_start
 `rtk proxy python -m pytest --no-cov tests/test_web_item_updates.py tests/test_web_endpoints.py tests/test_stages_coverage.py tests/test_builder.py`
 → **95 passed, 1 warning**; `cd front && rtk npm run build` → verde; suíte final
 `rtk proxy python -m pytest` → **549 passed, 2 skipped**, cobertura **100%**.
+
+## Bugfix — assembly resiliente + itens órfãos na UI
+
+**Sintoma:** um vídeo real do Replicate (`.../tmpuwbfz9mf.mp4`) não aparecia na UI. O
+run `web-fc45f29e` ficou invisível por completo apesar de ter 2 clips reais no disco
+(`.orchestrator/videos/web-fc45f29e/items/concept-0001/clip-{0,1}.mp4`) e QC aprovado.
+
+**Causa (2 bugs):**
+1. **Assembly sem resiliência.** `node_assembly` chamava `adapter.assemble` sem
+   try/except; o assembler live (Seedance via Vercel Gateway) recusou a imagem
+   ("input image may contain real person") e levantou `RuntimeError`. Exceção num node
+   do subgrafo aborta `process_item.ainvoke` **antes** do write em `results`
+   (`builder.py:135`), matando o item.
+2. **Itens falhos somem da UI.** `runner.get_status`/`summarize` e o branch
+   checkpoint-only de `/api/state` liam só o canal `results`. Sem o item lá → 0 itens,
+   mesmo com os clips no disco. Os clips ficavam órfãos no estado do subgrafo per-item
+   (checkpoint_ns `process_item:<task_id>`), nunca lido.
+
+**Correção:**
+1. `node_assembly` (`nodes/stages.py`) passou a envolver `assemble` em try/except +
+   `_ensure_artifact` (valida shape antes de usar — regra
+   `adapter-composition-must-validate-shape`). Falha → item completa sem `assembled`,
+   com `Item.error` (novo campo em `graph/state.py`), preservando os clips → entra em
+   `results`. Knob opt-in `assembly.allow_mock_fallback` (default off) degrada para um
+   final mock com `fallback_reason` em vez de surfar o erro.
+2. `runner.get_pending_items` recupera itens em voo/falhos direto do checkpoint via
+   `aget_state(subgraphs=True)` (usa o hook `aget_tuple`/subgraph state antes inerte),
+   com clips + erro da task limpo (`_clean_task_error`). `/api/state` faz merge desses
+   órfãos com `results` (dedupe por id; results vence). `error` propagado em
+   `_snapshot_from_item`/`_complete_item_payload` e no `types.ts`/`VideoReview`/
+   `CampaignDetail` (badge "Assembly Failed" + motivo; clips continuam tocáveis).
+
+**Verificação:** TDD (red→green) por bug; run real `web-fc45f29e` volta a aparecer no
+`/api/state` com 2 artifacts de vídeo + erro **sem re-rodar**; `cd front && npm run
+build` → verde; suíte `rtk proxy python -m pytest` → **560 passed, 2 skipped**,
+cobertura **100%**.
+
+## Mudança — upscale movido da imagem para o vídeo final
+
+**Pedido:** "o upscale só no vídeo, não na imagem."
+
+**Antes:** o upscale vivia dentro do creator (`RealCreatorAdapter.build_creator` chamava
+`TopazUpscaleAdapter`/`ReplicateUpscaleAdapter` na face → `upscaled_base`). O vídeo nunca
+era upscalado. Efeito colateral: uma face mais fotorrealista aumenta a chance da rejeição
+"input image may contain real person" no gerador de vídeo (ver bugfix anterior).
+
+**Depois:**
+- **Creator não upscala a imagem.** `build_creator` usa a face crua como `upscaled_base`
+  (nome mantido por compat). Fábricas (`build_real_creator_*`) deixam de construir o
+  upscaler de imagem; `topaz` vira param opcional/ignorado só por compat de assinatura.
+- **Novo papel `upscale` + `node_upscale`** rodam pós-montagem, uma vez, sobre o
+  `assembled` (Step 8): `assembly → upscale → END` no subgrafo. Best-effort (montagem
+  ausente/passthrough/erro → mantém o vídeo montado). Marca `meta.upscaled=True` e
+  `meta.upscaled_from`.
+- **Adapters:** `MockAdapter.upscale` (determinístico, config-mock) e novo
+  `PassthroughUpscaleAdapter` (no-op, perfil live até plugar um upscaler de vídeo real).
+  `UpscalePort` em `adapters/base.py` reusa a assinatura `upscale(url)->url` dos
+  upscalers de imagem — um upscaler de vídeo real pluga trocando o nome em
+  `providers.yaml`. Registry: `ROLES += "upscale"`, `CompositeAdapter.upscale`.
+- **Config:** `config/providers.yaml → upscale: passthrough_upscale`;
+  `config-mock → upscale: mock`.
+- **UI:** node `upscale` entra em `PIPELINE_NODES`/`ITEM_UPDATE_NODES`, `NODE_LABELS`
+  ("Upscale (vídeo)") e no grupo "Assembly" do `CampaignDetail`.
+
+**Verificação:** TDD (node_upscale, mock.upscale, passthrough, roteamento do composite);
+e2e mock (`test_final_video_is_upscaled_not_the_image`) confirma `assembled.meta.upscaled`
+e a base do creator crua. Suíte `rtk proxy python -m pytest` → **568 passed, 2 skipped**,
+cobertura **100%**; `cd front && npm run build` → verde.

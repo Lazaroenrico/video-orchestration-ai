@@ -12,6 +12,7 @@ import type { Item } from "../types";
 import { usd } from "../lib/format";
 
 function itemStatus(it: Item): { status: Status; label: string } {
+  if (it.error) return { status: "failed", label: "Assembly Failed" };
   if (it.dropped) return { status: "failed", label: "QC Failed" };
   if (it.qc?.passed) return { status: "approved", label: "QC Passed" };
   if (it.qc) return { status: "review", label: "Needs Review" };
@@ -75,6 +76,12 @@ export function VideoReview() {
                     </div>
                   </div>
                   <StatusPill {...itemStatus(current)} />
+                </div>
+              )}
+              {current?.error && (
+                <div className="mx-4 mb-4 flex items-start gap-2 p-3 rounded-lg bg-error-container font-body-md text-body-md text-on-error-container">
+                  <Icon name="error" size={18} className="mt-0.5 shrink-0" />
+                  <span>{current.error}</span>
                 </div>
               )}
             </Card>

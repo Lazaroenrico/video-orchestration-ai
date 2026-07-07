@@ -368,14 +368,6 @@ async def test_real_creator_build_creator_returns_correct_shape() -> None:
             base_url=BASE_OPENAI,
         ),
     )
-    topaz_adapter = TopazUpscaleAdapter(
-        base_url=BASE_TOPAZ,
-        token=FAKE_TOKEN,
-        client=httpx.AsyncClient(
-            transport=_make_topaz_transport(expected_image_url=FAKE_FACE_URL),
-            base_url=BASE_TOPAZ,
-        ),
-    )
     voice_adapter = ElevenLabsVoiceAdapter(
         base_url=BASE_ELEVENLABS,
         token=FAKE_TOKEN,
@@ -385,39 +377,35 @@ async def test_real_creator_build_creator_returns_correct_shape() -> None:
         ),
     )
 
-    creator = RealCreatorAdapter(image=image_adapter, topaz=topaz_adapter, voice=voice_adapter)
+    creator = RealCreatorAdapter(image=image_adapter, voice=voice_adapter)
     result = await creator.build_creator(index)
 
     assert result["id"] == "creator-2"
     assert result["angles"] == ["front", "3/4", "profile", "smile", "neutral"]
-    assert result["upscaled_base"] == FAKE_UPSCALED_URL
+    # A face crua (sem upscale) é a base do creator.
+    assert result["upscaled_base"] == FAKE_FACE_URL
     assert result["voice_id"] == FAKE_VOICE_ID
 
 
-async def test_real_creator_composes_sub_adapters_correctly() -> None:
-    """A URL primary do OpenAI deve ser passada para o Topaz (orquestração correta)."""
-    primary_received_by_topaz: list[str] = []
+async def test_real_creator_does_not_upscale_the_image() -> None:
+    """A face crua vira ``upscaled_base``: nenhum upscaler de imagem é chamado."""
+    topaz_calls: list[str] = []
 
     def openai_handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"data": [{"url": "https://openai.example.com/face.png"}]})
 
-    def topaz_handler(request: httpx.Request) -> httpx.Response:
-        body = json.loads(request.content)
-        primary_received_by_topaz.append(body["image_url"])
-        return httpx.Response(200, json={"output_url": "https://topaz.example.com/upscaled.png"})
-
     def elevenlabs_handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"voice_id": "v-xyz"})
+
+    class _SpyUpscale:
+        async def upscale(self, image_url: str) -> str:
+            topaz_calls.append(image_url)
+            return "https://topaz.example.com/upscaled.png"
 
     image_adapter = OpenAIImageAdapter(
         base_url=BASE_OPENAI,
         token=FAKE_TOKEN,
         client=httpx.AsyncClient(transport=httpx.MockTransport(openai_handler), base_url=BASE_OPENAI),
-    )
-    topaz_adapter = TopazUpscaleAdapter(
-        base_url=BASE_TOPAZ,
-        token=FAKE_TOKEN,
-        client=httpx.AsyncClient(transport=httpx.MockTransport(topaz_handler), base_url=BASE_TOPAZ),
     )
     voice_adapter = ElevenLabsVoiceAdapter(
         base_url=BASE_ELEVENLABS,
@@ -425,10 +413,12 @@ async def test_real_creator_composes_sub_adapters_correctly() -> None:
         client=httpx.AsyncClient(transport=httpx.MockTransport(elevenlabs_handler), base_url=BASE_ELEVENLABS),
     )
 
-    creator = RealCreatorAdapter(image=image_adapter, topaz=topaz_adapter, voice=voice_adapter)
-    await creator.build_creator(0)
+    # Mesmo passando um upscaler (compat), ele NÃO deve ser chamado.
+    creator = RealCreatorAdapter(image=image_adapter, voice=voice_adapter, topaz=_SpyUpscale())
+    result = await creator.build_creator(0)
 
-    assert primary_received_by_topaz == ["https://openai.example.com/face.png"]
+    assert topaz_calls == []  # imagem não é upscalada
+    assert result["upscaled_base"] == "https://openai.example.com/face.png"
 
 
 async def test_real_creator_infers_voice_profile_from_system_prompt() -> None:
@@ -522,7 +512,7 @@ async def test_build_real_creator_adapter_factory() -> None:
     adapter = build_real_creator_adapter({})
     assert isinstance(adapter, RealCreatorAdapter)
     assert isinstance(adapter.image, OpenAIImageAdapter)
-    assert isinstance(adapter.topaz, TopazUpscaleAdapter)
+    assert adapter.topaz is None  # imagem não é mais upscalada
     assert isinstance(adapter.voice, ElevenLabsVoiceAdapter)
 
 
@@ -555,12 +545,9 @@ class _FakeImage:
         return {"primary": self.primary, "angles": ["front", "3/4", "profile", "smile", "neutral"]}
 
 
-class _BoomUpscale:
-    async def upscale(self, image_url: str) -> str:
-        raise RuntimeError("upscale indisponível")
-
-
 class _OkUpscale:
+    """Upscaler de imagem que NÃO deve mais ser chamado pelo creator (compat)."""
+
     async def upscale(self, image_url: str) -> str:
         return "https://cdn/upscaled.png"
 
@@ -575,19 +562,19 @@ class _OkVoice:
         return "voice-xyz"
 
 
-async def test_build_creator_falls_back_to_generated_face_when_upscale_fails() -> None:
-    """Upscale falha → usa a face gerada (não-upscalada); creator não levanta."""
-    creator = RealCreatorAdapter(image=_FakeImage(), topaz=_BoomUpscale(), voice=_OkVoice())
+async def test_build_creator_uses_raw_face_as_base() -> None:
+    """A face gerada é a base do creator — sem upscale de imagem."""
+    creator = RealCreatorAdapter(image=_FakeImage(), voice=_OkVoice())
     result = await creator.build_creator(0)
     assert result["upscaled_base"] == "data:image/png;base64,AAAA"
     assert result["voice_id"] == "voice-xyz"
 
 
 async def test_build_creator_falls_back_to_empty_voice_when_voice_fails() -> None:
-    """Voz falha → voice_id vazio; imagem preservada, creator não levanta."""
-    creator = RealCreatorAdapter(image=_FakeImage(), topaz=_OkUpscale(), voice=_BoomVoice())
+    """Voz falha → voice_id vazio; imagem (crua) preservada, creator não levanta."""
+    creator = RealCreatorAdapter(image=_FakeImage(), voice=_BoomVoice())
     result = await creator.build_creator(0)
-    assert result["upscaled_base"] == "https://cdn/upscaled.png"
+    assert result["upscaled_base"] == "data:image/png;base64,AAAA"
     assert result["voice_id"] == ""
 
 
@@ -1147,5 +1134,5 @@ def test_build_real_creator_vercel_adapter_wires_subadapters(monkeypatch):
 
     assert isinstance(adapter, RealCreatorAdapter)
     assert isinstance(adapter.image, OpenAIImageAdapter)
-    assert isinstance(adapter.topaz, TopazUpscaleAdapter)
+    assert adapter.topaz is None  # imagem não é mais upscalada
     assert isinstance(adapter.voice, ElevenLabsVoiceAdapter)

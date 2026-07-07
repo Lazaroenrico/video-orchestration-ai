@@ -30,6 +30,7 @@ from orchestrator.nodes.stages import (
     node_qc,
     node_roster,
     node_scripts,
+    node_upscale,
 )
 from orchestrator.tracing import add_trace_metadata, traced
 
@@ -48,6 +49,7 @@ def build_item_graph(pipeline: dict[str, Any]):
 
     sg.add_node("qc", make_qc_route_node(tns, max_attempts), destinations=qc_map)
     sg.add_node("assembly", node_assembly)
+    sg.add_node("upscale", node_upscale)
     sg.add_node("drop", node_drop)
 
     # O script já vem pronto no Item (batch-level, antes do creator): o subgrafo entra
@@ -58,7 +60,8 @@ def build_item_graph(pipeline: dict[str, Any]):
     for t in tns:
         sg.add_edge(t, "product_demo")
     sg.add_edge("product_demo", "qc")
-    sg.add_edge("assembly", END)
+    sg.add_edge("assembly", "upscale")
+    sg.add_edge("upscale", END)
     sg.add_edge("drop", END)
     return sg.compile()
 

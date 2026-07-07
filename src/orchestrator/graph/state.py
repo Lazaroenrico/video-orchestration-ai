@@ -74,6 +74,7 @@ class Item(BaseModel):
     attempts: int = 0
     assembled: Optional[Artifact] = None
     dropped: bool = False
+    error: Optional[str] = None
     cost_usd: float = 0.0
 
 

@@ -87,6 +87,29 @@ def test_composite_hides_reroll_when_creator_role_lacks_it(pipeline_cfg):
     assert getattr(comp, "reroll_creator_voice", None) is None
 
 
+async def test_composite_routes_upscale_to_upscale_role(pipeline_cfg):
+    class FakeUpscale:
+        async def upscale(self, media_uri):
+            return f"{media_uri}#4k"
+
+    register_adapter("fake_upscale", lambda pipeline: FakeUpscale())
+    comp = build_adapter_from_providers({"adapters": {"upscale": "fake_upscale"}}, pipeline_cfg)
+
+    out = await comp.upscale("data:video/mp4;base64,AAA")
+    assert out == "data:video/mp4;base64,AAA#4k"
+    assert isinstance(comp._by_role["assembly"], MockAdapter)  # demais papéis seguem mock
+
+
+async def test_live_upscale_role_is_passthrough(pipeline_cfg):
+    from orchestrator.adapters.passthrough_upscale import PassthroughUpscaleAdapter
+
+    comp = build_adapter_from_providers(
+        {"adapters": {"upscale": "passthrough_upscale"}}, pipeline_cfg
+    )
+    assert isinstance(comp._by_role["upscale"], PassthroughUpscaleAdapter)
+    assert await comp.upscale("/videos/run/assembled.mp4") == "/videos/run/assembled.mp4"
+
+
 def test_composite_exposes_voice_subadapter_of_creator_role(pipeline_cfg):
     class VoiceSub:
         pass

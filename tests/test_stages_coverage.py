@@ -10,7 +10,8 @@ import pytest
 
 from orchestrator.adapters import base
 from orchestrator.adapters.base import VoiceProfile
-from orchestrator.graph.state import Item, new_item
+from orchestrator.adapters.mock import MockAdapter
+from orchestrator.graph.state import Artifact, Item, QCResult, new_item
 from orchestrator.nodes import stages
 
 
@@ -207,6 +208,63 @@ async def test_node_drop_marks_item_dropped():
 
 
 # ------------------------------------------------------------------ #
+# node_upscale — upscale do vídeo final (pós-montagem)                #
+# ------------------------------------------------------------------ #
+
+def _assembled_item() -> Item:
+    item = new_item({"id": "concept-0", "hook": "h"})
+    return item.model_copy(update={
+        "assembled": Artifact(kind="video", uri="data:video/mp4;base64,QUJD", meta={"platform": "tiktok"}),
+    })
+
+
+def _upscale_config(adapter) -> dict:
+    return {"configurable": {"adapter": adapter, "run": {}, "thread_id": "run-x"}}
+
+
+async def test_node_upscale_replaces_final_with_upscaled(monkeypatch, tmp_path):
+    monkeypatch.setattr(stages, "default_videos_path", lambda: tmp_path)
+
+    class _Upscaler:
+        async def upscale(self, media_uri):
+            return "data:video/mp4;base64,VVBTQ0FMRUQ="
+
+    result = await stages.node_upscale(_assembled_item(), _upscale_config(_Upscaler()))
+    art = result["assembled"]
+    assert art is not None
+    assert art.meta.get("upscaled") is True
+    assert art.meta.get("upscaled_from") == "data:video/mp4;base64,QUJD"
+
+
+async def test_node_upscale_noop_for_passthrough():
+    class _Passthrough:
+        async def upscale(self, media_uri):
+            return media_uri  # inalterada
+
+    result = await stages.node_upscale(_assembled_item(), _upscale_config(_Passthrough()))
+    assert result == {}  # nada muda → não repersiste
+
+
+async def test_node_upscale_skips_when_no_assembled():
+    item = new_item({"id": "concept-0", "hook": "h"})  # assembled None
+
+    class _Boom:
+        async def upscale(self, media_uri):
+            raise AssertionError("não deve ser chamado sem assembled")
+
+    assert await stages.node_upscale(item, _upscale_config(_Boom())) == {}
+
+
+async def test_node_upscale_best_effort_on_failure():
+    class _Boom:
+        async def upscale(self, media_uri):
+            raise RuntimeError("upscaler fora do ar")
+
+    result = await stages.node_upscale(_assembled_item(), _upscale_config(_Boom()))
+    assert result == {}  # preserva o vídeo montado, não derruba o item
+
+
+# ------------------------------------------------------------------ #
 # node_scripts — escreve script por conceito (batch, antes do creator) #
 # ------------------------------------------------------------------ #
 
@@ -268,3 +326,96 @@ async def test_node_concept_review_keeps_concepts_when_no_decision(monkeypatch):
     state = {"concepts": [{"id": "c-0", "script": "orig"}]}
 
     assert await stages.node_concept_review(state, config) == {}
+
+
+# ------------------------------------------------------------------ #
+# node_assembly — resiliência: falha do assembler não mata o item     #
+# ------------------------------------------------------------------ #
+
+def _assembly_item() -> Item:
+    """Item já com clip gerado e QC aprovado, pronto p/ montagem."""
+    item = new_item({"id": "concept-0", "hook": "h", "offer": "serum X"})
+    return item.model_copy(update={
+        "clips": [Artifact(
+            kind="clip",
+            uri="/videos/run-x/items/concept-0/clip-0.mp4",
+            meta={"tier": "ltx", "cost_usd": 0.08},
+        )],
+        "qc": QCResult(passed=True, score=1.0, reasons=[]),
+    })
+
+
+def _assembly_config(adapter, *, allow_mock_fallback: bool = False) -> dict:
+    return {
+        "configurable": {
+            "adapter": adapter,
+            "pipeline": {"assembly": {"allow_mock_fallback": allow_mock_fallback}},
+            "run": {"platform": "tiktok"},
+            "thread_id": "run-x",
+        }
+    }
+
+
+class _BoomAssembler:
+    async def assemble(self, **kwargs):
+        raise RuntimeError(
+            "Seedance bridge failed: input image may contain real person"
+        )
+
+
+async def test_node_assembly_surfaces_error_and_does_not_raise():
+    result = await stages.node_assembly(_assembly_item(), _assembly_config(_BoomAssembler()))
+    assert result["assembled"] is None
+    assert "real person" in result["error"]
+    # Não toca em clips: o reducer preserva os clips já gerados.
+    assert "clips" not in result
+
+
+async def test_node_assembly_treats_invalid_shape_as_error():
+    class _BadAssembler:
+        async def assemble(self, **kwargs):
+            return None  # shape inválida — precisa virar erro, não estourar
+
+    result = await stages.node_assembly(_assembly_item(), _assembly_config(_BadAssembler()))
+    assert result["assembled"] is None
+    assert result["error"]
+
+
+async def test_node_assembly_success_clears_error(monkeypatch, tmp_path):
+    monkeypatch.setattr(stages, "default_videos_path", lambda: tmp_path)
+    result = await stages.node_assembly(_assembly_item(), _assembly_config(MockAdapter(tiers=[])))
+    assert result["assembled"] is not None
+    assert result.get("error") is None
+
+
+async def test_node_assembly_accepts_dict_shaped_artifact(monkeypatch, tmp_path):
+    monkeypatch.setattr(stages, "default_videos_path", lambda: tmp_path)
+
+    class _DictAssembler:
+        async def assemble(self, **kwargs):
+            return {"kind": "video", "uri": "data:video/mp4;base64,AAAA", "meta": {}}
+
+    result = await stages.node_assembly(_assembly_item(), _assembly_config(_DictAssembler()))
+    assert result["assembled"] is not None
+    assert result.get("error") is None
+
+
+async def test_node_assembly_dict_without_uri_is_error():
+    class _BadDictAssembler:
+        async def assemble(self, **kwargs):
+            return {"kind": "video"}  # sem uri → shape inválida
+
+    result = await stages.node_assembly(_assembly_item(), _assembly_config(_BadDictAssembler()))
+    assert result["assembled"] is None
+    assert result["error"]
+
+
+async def test_node_assembly_mock_fallback_when_enabled(monkeypatch, tmp_path):
+    monkeypatch.setattr(stages, "default_videos_path", lambda: tmp_path)
+    result = await stages.node_assembly(
+        _assembly_item(), _assembly_config(_BoomAssembler(), allow_mock_fallback=True)
+    )
+    assert result["assembled"] is not None
+    assert result["assembled"].meta.get("fallback_reason") == "assembly_gateway_rejected"
+    assert result["assembled"].meta.get("provider") == "mock"
+    assert result.get("error") is None

@@ -1,6 +1,7 @@
 """Orquestração de alto nível: roda/retoma/inspeciona um run do grafo."""
 from __future__ import annotations
 
+import re
 import sqlite3
 import uuid
 from pathlib import Path
@@ -123,6 +124,57 @@ async def get_status(
         app = build_graph(pipeline, checkpointer=cp)
         snap = await app.aget_state({"configurable": {"thread_id": run_id}})
     return snap.values if snap and snap.values else None
+
+
+def _clean_task_error(err: Any) -> str:
+    """Extrai a mensagem útil do erro de uma task (str repr ``ExcType('msg\\n...')``).
+
+    Descarta o stack trace (Python ou o do bridge Node, que chega com ``\\n    at ...``
+    literais) e o wrapper ``ExcType('...')``, deixando só a primeira linha da mensagem.
+    """
+    text = str(err or "").strip()
+    if not text:
+        return "task falhou"
+    text = text.replace("\\n", "\n")                    # \n literais do repr -> quebra real
+    first = text.split("\n", 1)[0].strip()              # corta o stack multi-linha
+    first = re.split(r"\s+at\s+\S+\s*\(", first)[0].strip()  # corta stack inline "   at fn ("
+    first = re.sub(r"^[A-Za-z_][\w.]*\((['\"])", "", first)  # tira o "RuntimeError('"
+    first = re.sub(r"(['\"])\)?$", "", first)                # tira o "')" final, se houver
+    return first or "task falhou"
+
+
+async def get_pending_items(
+    pipeline: dict[str, Any], *, db_path: str | Path, run_id: str
+) -> list[Item]:
+    """Itens em voo/falhos que ainda **não** entraram em ``results``.
+
+    Um item que quebra num node fora do try/except (ex.: crash na montagem, processo
+    morto) nunca é escrito no canal ``results`` — some da UI mesmo com clips reais no
+    disco. Aqui recuperamos o estado do subgrafo per-item direto do checkpoint
+    (``aget_state(subgraphs=True)`` expõe cada ``process_item`` pendente com seu ``Item``
+    e o erro da task), para a UI voltar a mostrá-los sem re-rodar.
+    """
+    async with open_checkpointer(db_path) as cp:
+        app = build_graph(pipeline, checkpointer=cp)
+        snap = await app.aget_state(
+            {"configurable": {"thread_id": run_id}}, subgraphs=True
+        )
+    if snap is None:
+        return []
+    items: list[Item] = []
+    for task in snap.tasks or []:
+        state = getattr(task, "state", None)
+        values = getattr(state, "values", None)
+        if not isinstance(values, dict) or not values.get("id"):
+            continue
+        item = Item.model_validate(values)
+        task_error = getattr(task, "error", None)
+        if item.error is None and task_error is not None:
+            item = item.model_copy(update={"error": f"assembly: {_clean_task_error(task_error)}"})
+        # Só surfamos o que tem algo a mostrar: clips gerados ou um erro registrado.
+        if item.clips or item.error:
+            items.append(item)
+    return items
 
 
 def list_runs(db_path: str | Path) -> list[str]:

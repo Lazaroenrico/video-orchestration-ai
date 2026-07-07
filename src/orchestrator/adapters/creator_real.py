@@ -1,17 +1,19 @@
-"""RealCreatorAdapter — compõe OpenAIImage + TopazUpscale + ElevenLabsVoice,
-implementa o Protocol CreatorPort (src/orchestrator/adapters/base.py).
+"""RealCreatorAdapter — compõe OpenAIImage + ElevenLabsVoice, implementa o Protocol
+CreatorPort (src/orchestrator/adapters/base.py).
 
 Fluxo de ``build_creator(index)``:
 1. ``OpenAIImageAdapter.generate_face(index)`` → dict com ``primary`` (URL) e ``angles``
-2. ``TopazUpscaleAdapter.upscale(primary_url)`` → URL upscalada 4x
-3. ``ElevenLabsVoiceAdapter.create_voice(index)`` → voice_id
+2. ``ElevenLabsVoiceAdapter.create_voice(index)`` → voice_id
+
+A imagem NÃO é upscalada: a face crua vira ``upscaled_base`` (nome mantido por
+compat). O upscale foi movido para o vídeo final (papel ``upscale`` / ``node_upscale``).
 
 Retorna o mesmo shape que ``MockAdapter.build_creator``::
 
     {
         "id": f"creator-{index}",
         "angles": ["front", "3/4", "profile", "smile", "neutral"],
-        "upscaled_base": "<url upscalada>",
+        "upscaled_base": "<url da face crua>",
         "voice_id": "<voice_id>",
     }
 """
@@ -28,9 +30,7 @@ from orchestrator.adapters._throttle import get_replicate_throttle
 from orchestrator.adapters.base import VoicePort, VoiceProfile, resolve_voice_profile
 from orchestrator.adapters.elevenlabs_voice import ElevenLabsVoiceAdapter
 from orchestrator.adapters.openai_image import OpenAIImageAdapter, build_openai_image_vercel_adapter
-from orchestrator.adapters.replicate_upscale import ReplicateUpscaleAdapter
 from orchestrator.adapters.replicate_voice import ReplicateVoiceAdapter
-from orchestrator.adapters.topaz_upscale import TopazUpscaleAdapter
 from orchestrator.tracing import traced
 
 _log = logging.getLogger(__name__)
@@ -52,12 +52,15 @@ class RealCreatorAdapter:
     def __init__(
         self,
         image: Optional[OpenAIImageAdapter] = None,
-        topaz: Optional[TopazUpscaleAdapter] = None,
         voice: Optional[VoicePort] = None,
+        topaz: Optional[Any] = None,
     ) -> None:
         self.image = image if image is not None else OpenAIImageAdapter()
-        self.topaz = topaz if topaz is not None else TopazUpscaleAdapter()
         self.voice = voice if voice is not None else ElevenLabsVoiceAdapter()
+        # ``topaz`` foi o upscaler da IMAGEM; o upscale passou para o vídeo final
+        # (papel ``upscale`` / ``node_upscale``). Mantido só por compatibilidade de
+        # assinatura e NÃO é usado — a face crua vira o ``upscaled_base`` do creator.
+        self.topaz = topaz
 
     @traced("adapter.creator_real.build_creator", run_type="chain", step=3, provider="creator_real")
     async def build_creator(
@@ -89,13 +92,11 @@ class RealCreatorAdapter:
             raise RuntimeError(
                 f"Image adapter response is missing 'angles'. Keys present: {sorted(face)}"
             )
+        # A face gerada é usada CRUA como base do creator: não upscalamos a imagem.
+        # (Além de barato, uma face menos fotorrealista reduz rejeições de conteúdo
+        # tipo "may contain real person" no gerador de vídeo.) O upscale acontece
+        # depois, sobre o vídeo final montado (papel ``upscale`` / ``node_upscale``).
         primary = face["primary"]
-
-        try:
-            upscaled = await self.topaz.upscale(primary)
-        except Exception as exc:  # noqa: BLE001 — preserva a face; segue sem upscale
-            _log.error("upscale falhou (creator-%d): %s; usando imagem original", index, exc)
-            upscaled = primary
 
         try:
             voice_id = await self.voice.create_voice(index, voice_profile=resolved_voice)
@@ -106,7 +107,7 @@ class RealCreatorAdapter:
         creator = {
             "id": f"creator-{index}",
             "angles": face["angles"],
-            "upscaled_base": upscaled,
+            "upscaled_base": primary,
             "voice_id": voice_id,
         }
         if resolved_voice is not None:
@@ -146,12 +147,11 @@ class RealCreatorAdapter:
 def build_real_creator_adapter(pipeline: dict[str, Any]) -> RealCreatorAdapter:
     """Fábrica que monta o RealCreatorAdapter lendo tokens do ambiente.
 
-    Tokens vêm de variáveis de ambiente: ``OPENAI_API_KEY``,
-    ``TOPAZ_API_KEY``, ``ELEVENLABS_API_KEY``.
+    Tokens vêm de variáveis de ambiente: ``OPENAI_API_KEY``, ``ELEVENLABS_API_KEY``.
+    A imagem NÃO é upscalada — o upscale vive no papel ``upscale`` (vídeo final).
     """
     return RealCreatorAdapter(
         image=OpenAIImageAdapter(),
-        topaz=TopazUpscaleAdapter(),
         voice=ElevenLabsVoiceAdapter(),
     )
 
@@ -160,36 +160,34 @@ def build_real_creator_vercel_adapter(pipeline: dict[str, Any]) -> RealCreatorAd
     """Fábrica que monta RealCreatorAdapter com GPT Image 2 via Vercel AI Gateway.
 
     - OpenAI Image: roteado pelo Vercel Gateway (AI_GATEWAY_API_KEY).
-    - Topaz Upscale: chamada direta à API Topaz (TOPAZ_API_KEY).
     - ElevenLabs Voice: chamada direta à API ElevenLabs (ELEVENLABS_API_KEY).
+
+    A imagem NÃO é upscalada (upscale movido para o vídeo final).
     """
     return RealCreatorAdapter(
         image=build_openai_image_vercel_adapter(pipeline),
-        topaz=TopazUpscaleAdapter(),
         voice=ElevenLabsVoiceAdapter(),
     )
 
 
 def build_real_creator_replicate_adapter(pipeline: dict[str, Any]) -> RealCreatorAdapter:
-    """Fábrica que monta RealCreatorAdapter usando Replicate para upscale e ElevenLabs.
+    """Fábrica que monta RealCreatorAdapter com GPT Image 2 + voz ElevenLabs no Replicate.
 
     - OpenAI Image: roteado pelo Vercel Gateway (AI_GATEWAY_API_KEY).
-    - Upscale: Replicate nightmareai/real-esrgan (REPLICATE_API_TOKEN).
     - Voice: modelo ElevenLabs hospedado no Replicate (REPLICATE_ELEVENLABS_MODEL).
 
-    Usa um ``replicate.Client`` com timeout generoso — o rosto do GPT Image 2 vem
-    como data URI base64 (~2.7MB) e é enviado inline; com cold start do modelo, o
-    timeout padrão do client estoura (ReadTimeout).
+    A imagem NÃO é upscalada (upscale movido para o vídeo final). Usa um
+    ``replicate.Client`` com timeout generoso — o rosto do GPT Image 2 vem como data URI
+    base64 (~2.7MB) e é enviado inline; com cold start, o timeout padrão estoura.
     """
     rep_client = replicate.Client(
         api_token=os.environ.get("REPLICATE_API_TOKEN"),
         timeout=httpx.Timeout(600.0, connect=15.0),
     )
-    # Throttle global: upscale e voz dividem o orçamento de rate limit da conta
-    # com o adapter de vídeo (contas com crédito baixo têm burst 1).
+    # Throttle global: a voz divide o orçamento de rate limit da conta com o adapter
+    # de vídeo (contas com crédito baixo têm burst 1).
     throttle = get_replicate_throttle()
     return RealCreatorAdapter(
         image=build_openai_image_vercel_adapter(pipeline),
-        topaz=ReplicateUpscaleAdapter(runner=rep_client.async_run, throttle=throttle),
         voice=ReplicateVoiceAdapter(runner=rep_client.async_run, throttle=throttle),
     )

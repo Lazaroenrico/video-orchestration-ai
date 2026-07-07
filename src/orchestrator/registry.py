@@ -24,6 +24,7 @@ from orchestrator.adapters.creator_real import (
 from orchestrator.adapters.integrity_qc import build_integrity_qc_adapter
 from orchestrator.adapters.mock import MockAdapter
 from orchestrator.adapters._throttle import get_replicate_throttle
+from orchestrator.adapters.passthrough_upscale import build_passthrough_upscale_adapter
 from orchestrator.adapters.replicate_video import ReplicateVideoAdapter
 from orchestrator.adapters.vercel_seedance_assembly import (
     build_vercel_seedance_assembly_adapter,
@@ -31,7 +32,8 @@ from orchestrator.adapters.vercel_seedance_assembly import (
 from orchestrator.tracing import traced
 
 # Papéis que o grafo exerce (cada método de node mapeia para um destes).
-ROLES = ("llm", "creator", "video", "qc", "assembly")
+# ``upscale`` roda pós-montagem, sobre o vídeo final (não a imagem do creator).
+ROLES = ("llm", "creator", "video", "qc", "assembly", "upscale")
 
 
 def _build_replicate(pipeline: dict[str, Any]) -> ReplicateVideoAdapter:
@@ -59,6 +61,7 @@ _ADAPTERS: dict[str, Callable[[dict[str, Any]], Any]] = {
     "creator_real_replicate": build_real_creator_replicate_adapter,
     "integrity_qc": build_integrity_qc_adapter,
     "vercel_seedance_assembly": build_vercel_seedance_assembly_adapter,
+    "passthrough_upscale": build_passthrough_upscale_adapter,
 }
 
 
@@ -127,6 +130,11 @@ class CompositeAdapter:
     @traced("adapter.assembly.assemble", run_type="chain", role="assembly", step=8)
     async def assemble(self, *args: Any, **kwargs: Any) -> Any:
         return await self._by_role["assembly"].assemble(*args, **kwargs)
+
+    # --- upscale (pós-montagem, Step 8) ---
+    @traced("adapter.upscale.upscale", run_type="chain", role="upscale", step=8)
+    async def upscale(self, *args: Any, **kwargs: Any) -> Any:
+        return await self._by_role["upscale"].upscale(*args, **kwargs)
 
 
 def build_adapter_from_providers(

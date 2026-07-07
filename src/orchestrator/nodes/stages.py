@@ -12,7 +12,7 @@ import hashlib
 import logging
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 _log = logging.getLogger(__name__)
 
@@ -23,7 +23,7 @@ import orchestrator.feedback_store as _feedback_store
 from orchestrator import media_store, stream_bus
 from orchestrator.adapters.base import VoiceProfile, assign_voice_profile
 from orchestrator.config import default_media_path, default_videos_path
-from orchestrator.graph.state import Item, new_item
+from orchestrator.graph.state import Artifact, Item, new_item
 from orchestrator.nodes.base import as_item, get_adapter, get_pipeline
 from orchestrator.tracing import add_trace_metadata, traced
 
@@ -593,27 +593,118 @@ async def node_qc(state: Any, config: RunnableConfig) -> dict[str, Any]:
         return {"qc": qc}
     return {"qc": qc, "attempts": item.attempts + 1}
 
+def _ensure_artifact(art: Any) -> Optional[Artifact]:
+    """Valida o shape do retorno de ``assemble`` antes de usar.
+
+    Cumpre a regra de composição de adapters ("validate response shape before use"):
+    só aceita um ``Artifact`` (ou dict coercível) com ``uri`` não-vazia. Qualquer outra
+    coisa vira ``None`` e é tratada como falha de montagem — nunca levanta.
+    """
+    if isinstance(art, Artifact):
+        return art if art.uri else None
+    if isinstance(art, dict):
+        try:
+            coerced = Artifact.model_validate(art)
+        except Exception:  # noqa: BLE001 — shape inválida é falha, não crash
+            return None
+        return coerced if coerced.uri else None
+    return None
+
+
+async def _mock_assembled(item: Item, *, platform: str, system_prompt: str) -> Artifact:
+    """Vídeo final mock para o fallback opt-in de assembly, marcado como degradado."""
+    from orchestrator.adapters.mock import MockAdapter
+
+    mock_art = await MockAdapter(tiers=[]).assemble(
+        item=item, platform=platform, system_prompt=system_prompt,
+    )
+    meta = {**mock_art.meta, "provider": "mock", "fallback_reason": "assembly_gateway_rejected"}
+    return mock_art.model_copy(update={"meta": meta})
+
+
 @traced("node.assembly", run_type="chain", step=8)
 async def node_assembly(state: Any, config: RunnableConfig) -> dict[str, Any]:
-    """Step 8 — montagem/edição do clip aprovado em vídeo final."""
+    """Step 8 — montagem/edição do clip aprovado em vídeo final.
+
+    Resiliente: uma falha do assembler (ex.: gateway do Seedance recusa a imagem por
+    "real person") **não mata o item**. Por padrão o item completa sem vídeo final,
+    carregando os clips já gerados + ``error``; com ``assembly.allow_mock_fallback``
+    ligado, degrada para um final mock marcado com ``fallback_reason``.
+    """
     item = as_item(state)
     adapter = get_adapter(config)
+    pipeline = get_pipeline(config)
     run_cfg = config["configurable"].get("run", {})
     platform = run_cfg.get("platform", "tiktok")
+    system_prompt = _assembly_prompt(item, run_cfg.get("video_prompt"), platform=platform)
     add_trace_metadata(step=8, stage="assembly", item_id=item.id, platform=platform)
-    art = await adapter.assemble(
-        item=item,
-        platform=platform,
-        system_prompt=_assembly_prompt(
-            item, run_cfg.get("video_prompt"), platform=platform
-        ),
-    )
+
+    reason: Optional[str] = None
+    try:
+        art = _ensure_artifact(
+            await adapter.assemble(
+                item=item, platform=platform, system_prompt=system_prompt,
+            )
+        )
+        if art is None:
+            reason = "assembler retornou shape inválida (esperado Artifact com uri)"
+    except Exception as exc:  # noqa: BLE001 — assembly best-effort; falha vira erro no item
+        art = None
+        reason = str(exc)
+
+    if art is None:
+        allow_fallback = bool((pipeline.get("assembly") or {}).get("allow_mock_fallback", False))
+        if not allow_fallback:
+            add_trace_metadata(step=8, stage="assembly_failed", item_id=item.id, error=reason)
+            return {"assembled": None, "error": f"assembly: {reason}"}
+        art = await _mock_assembled(item, platform=platform, system_prompt=system_prompt)
+        add_trace_metadata(
+            step=8, stage="assembly_fallback", item_id=item.id,
+            fallback_reason="assembly_gateway_rejected", error=reason,
+        )
+
     run_id = config["configurable"].get("thread_id", "run")
     videos_root = default_videos_path()
     updated = item.model_copy(update={"assembled": art})
     persisted = await media_store.persist_item_media(
         updated, run_id=run_id, videos_root=videos_root,
     )
+    return {"assembled": persisted.assembled, "error": None}
+
+
+@traced("node.upscale", run_type="chain", step=8)
+async def node_upscale(state: Any, config: RunnableConfig) -> dict[str, Any]:
+    """Step 8 (pós-montagem) — upscale do vídeo final entregue.
+
+    O upscale foi movido da imagem do creator para cá: roda uma vez, sobre o
+    ``assembled``. Best-effort — se a montagem falhou (``assembled is None``), se o
+    adapter é passthrough (uri inalterada) ou se o upscale levanta, mantém o vídeo
+    montado sem derrubar o item.
+    """
+    item = as_item(state)
+    if item.assembled is None:  # montagem não completou → nada a escalar
+        return {}
+    adapter = get_adapter(config)
+    add_trace_metadata(step=8, stage="upscale", item_id=item.id)
+    try:
+        upscaled_uri = await adapter.upscale(item.assembled.uri)
+    except Exception as exc:  # noqa: BLE001 — upscale best-effort; preserva o montado
+        add_trace_metadata(step=8, stage="upscale_failed", item_id=item.id, error=str(exc))
+        return {}
+    if not upscaled_uri or upscaled_uri == item.assembled.uri:
+        return {}  # passthrough/no-op: nada a persistir
+    # ``upscaled_from`` guarda o vídeo pré-upscale; não reuso ``source_uri`` porque o
+    # persist_item_media o sobrescreve com a proveniência de download da nova uri.
+    art = item.assembled.model_copy(update={
+        "uri": upscaled_uri,
+        "meta": {**item.assembled.meta, "upscaled": True, "upscaled_from": item.assembled.uri},
+    })
+    run_id = config["configurable"].get("thread_id", "run")
+    updated = item.model_copy(update={"assembled": art})
+    persisted = await media_store.persist_item_media(
+        updated, run_id=run_id, videos_root=default_videos_path(),
+    )
+    add_trace_metadata(step=8, stage="upscale_done", item_id=item.id)
     return {"assembled": persisted.assembled}
 
 

@@ -8,4 +8,5 @@ adapters:
   video: replicate              # LTX 2.3 Fast via Replicate; áudio fica para etapa posterior
   qc: integrity_qc              # checa mídia real e bloqueia mock/fallback antes da montagem
   assembly: vercel_seedance_assembly  # vídeo final via Vercel AI Gateway / Seedance 2.0
+  upscale: passthrough_upscale  # upscale do vídeo final (não da imagem); no-op até plugar upscaler de vídeo real
   judge: gateway

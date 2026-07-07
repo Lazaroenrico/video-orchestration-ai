@@ -217,3 +217,11 @@ async def test_assemble_returns_video_artifact(adapter):
     norm = _normalize_artifact({"kind": art.kind, "uri": art.uri})
     assert norm["media_type"] == "video"
     assert norm["renderable"] is True
+
+
+async def test_upscale_returns_distinct_deterministic_video(adapter):
+    src = "data:video/mp4;base64,QUJD"
+    out = await adapter.upscale(src)
+    assert out.startswith("data:video/mp4;base64,")
+    assert out != src                                  # de fato "escala" (uri distinta)
+    assert out == await adapter.upscale(src)            # determinístico por hash da entrada

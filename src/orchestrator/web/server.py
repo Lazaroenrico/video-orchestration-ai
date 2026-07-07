@@ -91,12 +91,12 @@ PIPELINE_NODES = {
     "roster", "approval", "concepts", "scripts", "concept_review",
     "process_item", "feedback",
     "script", "ltx", "kling", "seedance",
-    "product_demo", "qc", "assembly", "drop",
+    "product_demo", "qc", "assembly", "upscale", "drop",
 }
 
 ITEM_UPDATE_NODES = {
     "script", "ltx", "kling", "seedance",
-    "product_demo", "qc", "assembly", "drop",
+    "product_demo", "qc", "assembly", "upscale", "drop",
     "process_item",
 }
 
@@ -115,6 +115,7 @@ NODE_LABELS: dict[str, str] = {
     "product_demo": "Product Demo",
     "qc": "QC",
     "assembly": "Montagem",
+    "upscale": "Upscale (vídeo)",
     "drop": "Descartado",
 }
 
@@ -390,7 +391,7 @@ def _snapshot_from_item(item: Any) -> dict[str, Any]:
     snap: dict[str, Any] = {}
     for key in (
         "id", "creator_ref", "concept", "script", "tier",
-        "attempts", "cost_usd", "dropped",
+        "attempts", "cost_usd", "dropped", "error",
     ):
         if key in item:
             snap[key] = _safe_serialize(item[key])
@@ -454,6 +455,7 @@ def _complete_item_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
         "artifacts": snapshot.get("artifacts") or [],
         "assembled": snapshot.get("assembled"),
         "dropped": snapshot.get("dropped", False),
+        "error": snapshot.get("error"),
     }
 
 
@@ -1002,6 +1004,22 @@ async def run_state(run_id: str, config_dir: Optional[str] = None, db: Optional[
                 break
 
     checkpoint_results = (checkpoint_state or {}).get("results") or []
+    # Itens que quebraram/ficaram em voo nunca entram em `results` (o node levanta antes
+    # do write). Recuperamos do checkpoint os `process_item` pendentes — com seus clips e
+    # o motivo do erro — para não sumirem da UI. Dedup por id: `results` sempre vence.
+    if checkpoint_state is not None:
+        existing_ids = {
+            str(plain["id"])
+            for r in checkpoint_results
+            if isinstance((plain := _to_plain(r)), dict) and plain.get("id")
+        }
+        try:
+            pending = await runner.get_pending_items(pipeline, db_path=db_path, run_id=run_id)
+        except Exception:  # noqa: BLE001 — recuperação best-effort, nunca derruba o /api/state
+            pending = []
+        orphans = [p for p in pending if str(getattr(p, "id", "")) not in existing_ids]
+        if orphans:
+            checkpoint_results = list(checkpoint_results) + orphans
     runtime_snapshots = (
         (runtime_state or {}).get("item_snapshots")
         if runtime_state is not None else None

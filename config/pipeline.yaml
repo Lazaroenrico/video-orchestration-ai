@@ -44,6 +44,7 @@ assembly:
   aspect_ratio: "9:16"
   generate_audio: false
   timeout_ms: 900000
+  allow_mock_fallback: false # live: falha de montagem surfa o erro no item (com clips); on = final mock degradado
 
 roster:
   creators: 2               # quantos creators reutilizáveis no roster (Step 3)

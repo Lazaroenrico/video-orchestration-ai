@@ -297,5 +297,15 @@ class MockAdapter:
             meta={"captions": True, "broll": True, "platform": platform},
         )
 
+    # --- Step 8 (pós-montagem): upscale do vídeo final ---
+    @traced("adapter.mock.upscale", run_type="tool", step=8, provider="mock")
+    async def upscale(self, media_uri: str) -> str:
+        """Upscale determinístico do vídeo final: deriva uma nova uri de ``media_uri``.
+
+        Distinta da entrada (o node consegue provar que rodou), reprodutível por hash.
+        """
+        await self._tick()
+        return _mp4_data_uri("upscaled", media_uri)
+
 def build_mock_adapter(tiers: list[dict[str, Any]], latency: Optional[float] = None) -> MockAdapter:
     return MockAdapter(tiers=tiers, latency=latency or 0.0)
