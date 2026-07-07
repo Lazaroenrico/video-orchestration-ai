@@ -21,6 +21,19 @@ Runner = Callable[..., Awaitable[Any]]
 _VIDEO_OUTPUT_KEYS = ("video", "video_url", "output")
 
 
+def _first_uri(value: Any, empty_msg: str) -> str:
+    """Coage um valor do SDK (escalar/FileOutput ou lista deles) para uma URI.
+
+    Lista vazia é erro (``empty_msg``): indexar ``value[0]`` estouraria, e coagir
+    ``[]`` para ``str`` produziria ``"[]"`` — uma URI-lixo que só falharia no QC.
+    """
+    if isinstance(value, list):
+        if not value:
+            raise RuntimeError(empty_msg)
+        value = value[0]
+    return str(value)
+
+
 class ReplicateVideoAdapter:
     """Implementa VideoPort chamando Replicate LTX 2.3 Fast para o tier ``ltx``."""
 
@@ -132,26 +145,15 @@ class ReplicateVideoAdapter:
         if output is None:
             raise RuntimeError("Replicate video output is empty")
         if isinstance(output, list):
-            if not output:
-                raise RuntimeError("Replicate video output list is empty")
-            return str(output[0])
+            return _first_uri(output, "Replicate video output list is empty")
         if isinstance(output, dict):
-            for key in _VIDEO_OUTPUT_KEYS:
-                value = output.get(key)
-                if value:
-                    if isinstance(value, list):
-                        if not value:  # pragma: no cover - inalcançável: `if value` acima já garante lista não-vazia
-                            raise RuntimeError(f"Replicate video output key {key!r} is empty")
-                        return str(value[0])
-                    return str(value)
             if not output:
                 raise RuntimeError("Replicate video output dict is empty")
+            for key in _VIDEO_OUTPUT_KEYS:
+                if output.get(key):
+                    return _first_uri(output[key], f"Replicate video output key {key!r} is empty")
             first = next(iter(output.values()))
-            if isinstance(first, list):
-                if not first:
-                    raise RuntimeError("Replicate video output fallback list is empty")
-                return str(first[0])
-            return str(first)
+            return _first_uri(first, "Replicate video output fallback list is empty")
         uri = str(output).strip()
         if not uri:
             raise RuntimeError("Replicate video output is empty")

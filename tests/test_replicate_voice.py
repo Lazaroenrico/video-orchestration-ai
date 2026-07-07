@@ -223,3 +223,17 @@ async def test_create_voice_raises_on_empty_dict_output():
     adapter, _ = _make_adapter(output={})
     with pytest.raises(RuntimeError, match="output.*empty"):
         await adapter.create_voice(0)
+
+
+async def test_create_voice_raises_on_dict_known_key_null_value():
+    """Chave de áudio conhecida com valor nulo não pode virar voice_id "None"."""
+    adapter, _ = _make_adapter(output={"audio_out": None})
+    with pytest.raises(RuntimeError, match="output.*empty"):
+        await adapter.create_voice(0)
+
+
+async def test_create_voice_raises_on_dict_fallback_null_value():
+    """Fallback (sem chave conhecida) com primeiro valor nulo também é erro."""
+    adapter, _ = _make_adapter(output={"something": None})
+    with pytest.raises(RuntimeError, match="output.*empty"):
+        await adapter.create_voice(0)

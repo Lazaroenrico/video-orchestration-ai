@@ -173,10 +173,13 @@ class ReplicateVoiceAdapter:
             if not output:
                 raise RuntimeError("Replicate voice output dict is empty")
             for key in _AUDIO_KEYS:
-                if key in output:
+                if output.get(key):
                     return str(output[key])
-            # fallback: primeiro valor do dict
-            return str(next(iter(output.values())))
+            # fallback: primeiro valor do dict (nulo/vazio é erro, não "None")
+            first = next(iter(output.values()))
+            if not first:
+                raise RuntimeError("Replicate voice output is empty")
+            return str(first)
         uri = str(output).strip()
         if not uri:
             raise RuntimeError("Replicate voice output is empty")
