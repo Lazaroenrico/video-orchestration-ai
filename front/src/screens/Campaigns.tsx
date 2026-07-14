@@ -13,20 +13,27 @@ import { usd, num, pct, shortRun } from "../lib/format";
 async function loadCampaigns() {
   const idx = await api.getRuns();
   const activeSet = new Set(idx.active);
+  const erroredSet = new Set(idx.errored);
   const rows = await Promise.all(
     idx.runs.map(async (id) => {
       const s = await api.getStatus(id).catch(() => null);
-      return { id, active: activeSet.has(id), summary: s };
+      return { id, active: activeSet.has(id), errored: erroredSet.has(id), summary: s };
     })
   );
-  // Include active runs that have no checkpointed status yet.
-  for (const id of idx.active) {
-    if (!rows.some((r) => r.id === id)) rows.push({ id, active: true, summary: null });
+  // Include active/errored runs that have no checkpointed status yet.
+  for (const id of [...idx.active, ...idx.errored]) {
+    if (!rows.some((r) => r.id === id))
+      rows.push({ id, active: activeSet.has(id), errored: erroredSet.has(id), summary: null });
   }
   return rows;
 }
 
-function rowStatus(active: boolean, s: RunSummary | null): { status: Status; label: string } {
+function rowStatus(
+  active: boolean,
+  errored: boolean,
+  s: RunSummary | null,
+): { status: Status; label: string } {
+  if (errored) return { status: "failed", label: "Failed" };
   if (active) return { status: "generating", label: "Generating" };
   if (!s) return { status: "draft", label: "Draft" };
   if (s.dropped > 0 && s.approved === 0) return { status: "failed", label: "Failed" };
@@ -77,7 +84,7 @@ export function Campaigns() {
                 const s = r.summary;
                 const total = s?.produced ?? 0;
                 const done = s ? s.approved + s.dropped : 0;
-                const st = rowStatus(r.active, s);
+                const st = rowStatus(r.active, r.errored, s);
                 return (
                   <tr
                     key={r.id}

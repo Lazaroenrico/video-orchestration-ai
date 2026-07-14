@@ -1,5 +1,47 @@
 # PROGRESS — handoff
 
+## Caminho A — tool layer foundation (2026-07-14)
+
+Objetivo: entregar a primeira fundação do Caminho A sem `AgentRuntime`: o LangGraph
+continua coordenando a pipeline, mas os nodes agora chamam tools tipadas que delegam
+para o `CompositeAdapter` já resolvido em `RunnableConfig`.
+
+### Red → Green (TDD)
+- RED: `tests/test_tools.py` especificou o novo pacote `orchestrator.tools`, o
+  `ToolContext`, validações de shape (`ToolOutputError`), trace markers offline e a
+  delegação dos nodes para tools. A primeira execução falhou com
+  `ModuleNotFoundError: No module named 'orchestrator.tools'`.
+- GREEN:
+  - `src/orchestrator/tools/`: `base.py`, `concepts.py`, `scripts.py`,
+    `creators.py`, `video.py`, `qc.py`, `assembly.py` e `registry.py`.
+  - Tools são finas: recebem `ToolContext`, adicionam metadata mínima de tracing,
+    chamam o método correspondente do adapter e validam o output antes de devolver.
+  - `nodes/stages.py` trocou chamadas diretas a adapter por
+    `generate_concepts_tool`, `write_script_tool`, `build_creator_tool`,
+    `generate_clip_tool`, `qc_check_tool`, `assemble_video_tool` e
+    `upscale_video_tool`, preservando persistência de mídia, SSE, gates humanos,
+    seed creator e fallback de assembly.
+
+### Falha investigada nesta fase
+- Sintoma: após criar as tools, `tests/test_tools.py` ainda falhava em um caso de
+  erro claro.
+  - Causa: bug no teste; o texto esperado `non-empty list[dict` foi usado como regex
+    sem escapar `[` e o pytest rejeitou o padrão.
+  - Correção: usar `re.escape(expected_shape)` no `match`.
+- Sintoma: a primeira suíte completa passou todos os testes funcionais, mas falhou no
+  gate de cobertura: `total of 99 is less than fail-under=100`.
+  - Causa: `nodes/base.py::get_adapter` virou dead code depois da troca para
+    `ToolContext`; dois ramos de erro dos validators novos ainda não eram exercitados.
+  - Correção: remover `get_adapter` e adicionar testes explícitos para `Artifact` com
+    `uri` vazia e QC output não-mapping.
+
+Verificação: `rtk proxy .venv/bin/python -m pytest --no-cov tests/test_tools.py
+tests/test_stages_coverage.py tests/test_builder.py tests/test_registry_composite.py`
+→ 73 passed; `rtk proxy .venv/bin/python -m pytest` → 596 passed, 2 skipped,
+cobertura 100%; `rtk proxy env LANGSMITH_TRACING=false LANGSMITH_API_KEY=
+.venv/bin/orchestrator run --batch 1 --offer "serum X" --config-dir config-mock`
+→ dry-run mock aprovado (1 produzido, 1 aprovado).
+
 Estado em **2026-07-06**. Suíte: **537 passando, 2 skips** (testes `--live` opt-in,
 pulados sem `JUDGE_GATEWAY_URL`) + 2 warnings conhecidos/benignos (LangSmith
 deprecation em import; LangGraph resume parcial — ver falha #5).
@@ -1083,3 +1125,71 @@ era upscalado. Efeito colateral: uma face mais fotorrealista aumenta a chance da
 e2e mock (`test_final_video_is_upscaled_not_the_image`) confirma `assembled.meta.upscaled`
 e a base do creator crua. Suíte `rtk proxy python -m pytest` → **568 passed, 2 skipped**,
 cobertura **100%**; `cd front && npm run build` → verde.
+
+## Falha de run inteiro agora visível na UI (fase "error" + lista "Failed")
+
+**Sintoma:** quando a pipeline quebrava, a falha não era demonstrada na interface de forma
+persistente. O erro só aparecia no evento SSE `error` e apenas se o usuário estivesse
+assistindo o run ao vivo no `CampaignDetail`. Ao reconectar, navegar ou olhar a lista de
+campanhas, a falha sumia.
+
+**Causa (`src/orchestrator/web/server.py`):**
+- `_execute_run` (`except`) emitia o evento SSE mas **não gravava** o erro; o `finally` só
+  setava `state["done"]=True`.
+- `_runtime_phase` retornava **"done"** para um run quebrado (done=True), então `/api/state`
+  hidratava a fase como "done" e a falha desaparecia na reconexão.
+- O `RunDetail` de `/api/state` não tinha campo `error` — a caixa de erro do `CampaignDetail`
+  ficava vazia mesmo se a fase fosse "error".
+- `/api/runs` reportava `active = list(_runs.keys())`; runs quebrados continuavam em `_runs`,
+  logo apareciam como "Generating" para sempre na lista. `rowStatus` (Campaigns) só marcava
+  "Failed" para `dropped>0 && approved===0`, nunca para um crash.
+
+**Correção:**
+- `_execute_run`: grava `state["error"] = str(exc)` no runtime além de emitir o SSE.
+- `_runtime_phase`: retorna "error" quando `state["error"]` (checado antes de "done").
+- `run_state` (`/api/state`): inclui `"error"` no payload.
+- `list_runs_endpoint` (`/api/runs`): `active` = só o que está realmente rodando (sem `error`
+  nem `done`); novo campo `errored`. De quebra, para de rotular runs concluídos como
+  "Generating".
+- Front: `RunsIndex.errored` e `RunDetail.error` em `types.ts`; `hydrate` propaga `error`;
+  `Campaigns.rowStatus` marca "Failed" para runs em `errored`.
+
+**Limitação conhecida:** o erro de run inteiro vive só no runtime in-session (`_runs`); um
+restart do servidor o perde (o node quebra antes de escrever no checkpoint). Falhas **por
+item** seguem persistidas via recuperação de órfãos (`runner.get_pending_items`).
+
+**Verificação:** TDD — `test_runtime_phase_branches` (ramo error vence done),
+`test_run_state_surfaces_run_crash_error`, `test_list_runs_endpoint_reports_errored_and_excludes_from_active`.
+Suíte `rtk proxy python -m pytest` → **572 passed, 2 skipped**; `cd front && npm run build`
+→ verde.
+
+## Reutilização de creator com adapters reais gerava "outra pessoa"
+
+**Sintoma:** ao reutilizar um creator específico (tela Creators → draft), com adapters
+reais o vídeo saía com um creator **diferente** do escolhido.
+
+**Causa:** a referência de imagem do creator reutilizado chegava ao provider como um
+**path local** `/media/{run}/{creator}/image.png`, que o serviço externo (Replicate) não
+consegue baixar → a referência era efetivamente perdida e o modelo de vídeo gerava outra
+face. Cadeia: `persist_creator_media` reescreve `upscaled_base` para o path `/media/...`
+e guarda a origem em `image_source_uri`; o store (`creator_store`) só persiste o path
+local; na reutilização o seed carrega só esse path e o fan-out
+(`builder.py`: `image_source_uri or upscaled_base`) o repassa cru ao adapter de vídeo.
+
+**Correção:** reconstruir uma referência **buscável pelo provider** a partir do arquivo
+local em disco, na reutilização.
+- `media_store.data_uri_from_media_path(uri, media_root)` — novo helper: mapeia um path
+  `/media/...` para o arquivo em disco e devolve um `data:` URI (durável, não expira);
+  `None` para URIs remotas/data: (não precisam) ou arquivo inexistente.
+- `nodes/stages._ensure_seed_reference_image` — no `node_roster` (caminho do seed), quando
+  a referência do seed não é http(s)/`data:`, reconstrói `image_source_uri` a partir do
+  arquivo local. No-op quando já é buscável (mantém data:/http do seed).
+
+**Limitação conhecida:** depende do arquivo local ainda existir sob `media_root`. Se a
+mídia foi limpa, a referência permanece o path `/media/...` e a geração falha — agora
+**visível** na UI (ver bugfix de falha de run acima).
+
+**Verificação:** TDD — `test_data_uri_from_media_path_*` (media_store),
+`test_node_roster_seed_reconstructs_reference_from_local_media` e
+`test_node_roster_seed_keeps_remote_reference_untouched` (stages). Suíte
+`rtk proxy python -m pytest` → **576 passed, 2 skipped**, cobertura 100%.

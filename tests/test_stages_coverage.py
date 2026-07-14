@@ -160,6 +160,78 @@ def test_normalize_seed_creator_returns_none_without_id():
     assert stages._normalize_seed_creator({"image_uri": "data:image/png;base64,SEED"}) is None
 
 
+@pytest.mark.asyncio
+async def test_node_roster_seed_reconstructs_reference_from_local_media(tmp_path, monkeypatch):
+    """Reutilizar um creator cuja imagem só existe como path local /media/... deve
+    dar ao fan-out uma referência buscável pelo provider (data: URI reconstruído do
+    disco) — senão o adapter de vídeo real ignora a referência e gera outra pessoa."""
+    import base64
+
+    from orchestrator import media_store
+
+    media_root = tmp_path / "media"
+    face = media_root / "web-old" / "creator-0" / "image.png"
+    face.parent.mkdir(parents=True)
+    face.write_bytes(b"\x89PNG\r\n\x1a\nFAKE")
+    monkeypatch.setattr(stages, "default_media_path", lambda: media_root)
+
+    seed = {
+        "creator_id": "creator-0",
+        # Só o path local servível — como sai do store de um creator real.
+        "image_uri": "/media/web-old/creator-0/image.png",
+        "voice_ref": "el_voice_0",
+    }
+
+    class _BoomAdapter:
+        async def build_creator(self, *, index, system_prompt, voice_profile):
+            raise AssertionError("build_creator should not be called for seed creator")
+
+    config = {
+        "configurable": {
+            "adapter": _BoomAdapter(),
+            "pipeline": {"roster": {"creators": 2}},
+            "run": {"seed_creator": seed},
+            "thread_id": "run-reuse",
+        }
+    }
+
+    result = await stages.node_roster({}, config)
+
+    creator = result["roster"][0]
+    # A referência que o fan-out escolhe (`image_source_uri or upscaled_base`) precisa
+    # ser buscável pelo provider — não o path /media local.
+    ref = creator["image_source_uri"]
+    assert ref.startswith("data:image/png;base64,")
+    assert media_store._is_downloadable(ref)
+    assert base64.b64decode(ref.split(",", 1)[1]) == b"\x89PNG\r\n\x1a\nFAKE"
+
+
+@pytest.mark.asyncio
+async def test_node_roster_seed_keeps_remote_reference_untouched(monkeypatch):
+    """Se o seed já tem uma referência buscável (data:/http), não reconstrói nada."""
+    seed = {
+        "creator_id": "creator-fixed",
+        "image_uri": "data:image/png;base64,SEED",
+        "voice_ref": "voice-fixed",
+    }
+
+    class _BoomAdapter:
+        async def build_creator(self, *, index, system_prompt, voice_profile):
+            raise AssertionError("build_creator should not be called for seed creator")
+
+    config = {
+        "configurable": {
+            "adapter": _BoomAdapter(),
+            "pipeline": {"roster": {"creators": 2}},
+            "run": {"seed_creator": seed},
+            "thread_id": "run-seed",
+        }
+    }
+
+    result = await stages.node_roster({}, config)
+    assert result["roster"][0]["image_source_uri"] == "data:image/png;base64,SEED"
+
+
 # ------------------------------------------------------------------ #
 # node_approval — aprova todos quando não há seleção explícita        #
 # ------------------------------------------------------------------ #

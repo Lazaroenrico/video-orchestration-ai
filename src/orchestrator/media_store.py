@@ -71,6 +71,28 @@ def _ext_from_url(uri: str) -> Optional[str]:
     return None
 
 
+def data_uri_from_media_path(uri: str, media_root: Path) -> Optional[str]:
+    """Reconstrói um ``data:`` URI a partir de um arquivo servido em ``/media/...``.
+
+    Um path web ``/media/{run}/{creator}/image.png`` é servível pelo dashboard, mas
+    NÃO é acessível por um provider externo (Replicate etc.). Ao reutilizar um creator
+    cuja única referência de imagem é esse path local, o provider precisa dos bytes:
+    lê o arquivo do disco (``media_root`` + resto do path) e devolve um data URI.
+
+    Retorna ``None`` quando ``uri`` não é um path ``/media/`` local, ou o arquivo
+    não existe — nesses casos não há o que reconstruir.
+    """
+    if not isinstance(uri, str) or not uri.startswith("/media/"):
+        return None
+    rel = uri[len("/media/"):]
+    path = media_root / rel
+    if not path.is_file():
+        return None
+    mime = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+    payload = base64.b64encode(path.read_bytes()).decode("ascii")
+    return f"data:{mime};base64,{payload}"
+
+
 def _decode_data_uri(uri: str) -> tuple[bytes, str]:
     """Decodifica ``data:<mime>;base64,<payload>`` -> (bytes, ext)."""
     header, _, payload = uri.partition(",")
