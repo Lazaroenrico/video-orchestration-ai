@@ -8,6 +8,7 @@ import { Drawer } from "../components/Drawer";
 import { Loading, ErrorState, EmptyState } from "../components/States";
 import { useAsync } from "../api/useAsync";
 import { api } from "../api/client";
+import { mediaUrl } from "../api/urls";
 import type { Creator } from "../types";
 
 function playableVoice(c: Creator): string | null {
@@ -20,7 +21,7 @@ function CreatorCard({ c, onOpen }: { c: Creator; onOpen: () => void }) {
     <Card padded={false} className="overflow-hidden flex flex-col">
       <div className="aspect-[4/5] bg-surface-container overflow-hidden">
         {img ? (
-          <img src={img} alt={c.id} className="w-full h-full object-cover" />
+          <img src={mediaUrl(img)} alt={c.id} className="w-full h-full object-cover" />
         ) : (
           <div className="w-full h-full flex items-center justify-center text-on-surface-variant">
             <Icon name="person" size={48} />
@@ -53,7 +54,7 @@ function CreatorCard({ c, onOpen }: { c: Creator; onOpen: () => void }) {
           </Button>
           {playableVoice(c) && (
             <a
-              href={playableVoice(c)!}
+              href={mediaUrl(playableVoice(c)!)}
               target="_blank"
               rel="noreferrer"
               className="inline-flex items-center justify-center w-10 h-10 rounded-lg border border-surface-border text-ai-processing hover:bg-surface-container-low"
@@ -183,7 +184,7 @@ export function Creators() {
             <div className="aspect-[4/5] rounded-xl overflow-hidden bg-surface-container">
               {(selected.image_uri || selected.image) && (
                 <img
-                  src={selected.image_uri || selected.image || ""}
+                  src={mediaUrl(selected.image_uri || selected.image || "")}
                   alt={selected.id}
                   className="w-full h-full object-cover"
                 />
@@ -212,7 +213,7 @@ export function Creators() {
                 <span className="font-label-sm text-label-sm uppercase tracking-wider text-on-surface-variant">
                   Voice preview
                 </span>
-                <audio src={playableVoice(selected)!} controls className="w-full mt-2" />
+                <audio src={mediaUrl(playableVoice(selected)!)} controls className="w-full mt-2" />
               </div>
             )}
             <label className="block">

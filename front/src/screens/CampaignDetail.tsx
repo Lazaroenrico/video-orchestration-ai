@@ -7,6 +7,7 @@ import { StatusPill, type Status } from "../components/StatusPill";
 import { ProgressBar } from "../components/ProgressBar";
 import { useRunStream, type RunPhase } from "../api/useRunStream";
 import { api } from "../api/client";
+import { mediaUrl } from "../api/urls";
 import type { Creator, Item } from "../types";
 import { shortRun, usd, pct } from "../lib/format";
 
@@ -14,7 +15,7 @@ import { shortRun, usd, pct } from "../lib/format";
 const STAGES: { key: string; label: string; nodes: string[] }[] = [
   { key: "roster", label: "Creators", nodes: ["roster", "approval"] },
   { key: "concepts", label: "Concepts", nodes: ["concepts"] },
-  { key: "script", label: "Scripts", nodes: ["script"] },
+  { key: "scripts", label: "Scripts", nodes: ["scripts"] },
   { key: "video", label: "Video", nodes: ["ltx", "kling", "seedance", "product_demo"] },
   { key: "qc", label: "QC", nodes: ["qc"] },
   { key: "assembly", label: "Assembly", nodes: ["assembly", "upscale"] },
@@ -44,6 +45,14 @@ function itemStatus(it: Item): { status: Status; label: string } {
   if (it.qc) return { status: it.qc.passed ? "approved" : "review", label: it.qc.passed ? "QC Pass" : "QC Review" };
   if (it.script) return { status: "processing", label: "Rendering" };
   return { status: "generating", label: "Generating" };
+}
+
+function stageLabel(stage: string): string {
+  return stage
+    .split(/[_-]+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
 }
 
 function ApprovalPanel({ runId, creators }: { runId: string; creators: Creator[] }) {
@@ -106,7 +115,7 @@ function ApprovalPanel({ runId, creators }: { runId: string; creators: Creator[]
             >
               <div className="aspect-square rounded overflow-hidden bg-surface-container">
                 {(c.image_uri || c.image) && (
-                  <img src={c.image_uri || c.image || ""} alt={c.id} className="w-full h-full object-cover" />
+                  <img src={mediaUrl(c.image_uri || c.image || "")} alt={c.id} className="w-full h-full object-cover" />
                 )}
               </div>
               <div className="flex items-center justify-between">
@@ -118,7 +127,7 @@ function ApprovalPanel({ runId, creators }: { runId: string; creators: Creator[]
                 />
               </div>
               {voice && voice.startsWith("/") && (
-                <audio src={voice} controls className="w-full h-8" onClick={(e) => e.stopPropagation()} />
+                <audio src={mediaUrl(voice)} controls className="w-full h-8" onClick={(e) => e.stopPropagation()} />
               )}
               <button
                 onClick={(e) => {
@@ -312,6 +321,26 @@ export function CampaignDetail() {
 
         {/* Activity log */}
         <div className="col-span-12 lg:col-span-4">
+          {Object.values(run.llmByStage).length > 0 && (
+            <Card className="mb-gutter">
+              <SectionTitle title="AI Stream" />
+              <div className="flex flex-col gap-3 max-h-[360px] overflow-y-auto">
+                {Object.values(run.llmByStage).map((stream) => (
+                  <div key={stream.stage} className="rounded-lg border border-surface-border bg-surface-container-low p-3">
+                    <div className="flex items-center justify-between gap-3 mb-2">
+                      <span className="font-label-sm text-label-sm uppercase tracking-wider text-on-surface-variant">
+                        {stageLabel(stream.stage)}
+                      </span>
+                      {stream.active && <StatusPill status="processing" label="Streaming" />}
+                    </div>
+                    <pre className="whitespace-pre-wrap break-words font-mono text-label-sm text-on-surface-variant leading-relaxed">
+                      {stream.text || "Waiting for tokens..."}
+                    </pre>
+                  </div>
+                ))}
+              </div>
+            </Card>
+          )}
           <Card>
             <SectionTitle title="Recent Activity" />
             <div className="flex flex-col gap-3 max-h-[420px] overflow-y-auto">
