@@ -16,6 +16,7 @@ from orchestrator.adapters.anthropic_llm import (
     build_anthropic_llm_adapter,
     build_vercel_gateway_llm_adapter,
 )
+from orchestrator.adapters.gateway_llm import build_gateway_llm_adapter
 from orchestrator.adapters.creator_real import (
     build_real_creator_adapter,
     build_real_creator_replicate_adapter,
@@ -54,8 +55,12 @@ _ADAPTERS: dict[str, Callable[[dict[str, Any]], Any]] = {
         tiers=pipeline["tiers"], latency=float(pipeline.get("latency", 0.0))
     ),
     "replicate": _build_replicate,
+    # llm gateway-nativo (httpx OpenAI-compatible; sem SDK anthropic) — default live.
+    "vercel_gateway_llm": build_gateway_llm_adapter,
+    # SDK anthropic direto (legado opt-in): "anthropic" fala com api.anthropic.com;
+    # "anthropic_sdk_gateway" usa o SDK anthropic apontado para o gateway.
     "anthropic": build_anthropic_llm_adapter,
-    "vercel_gateway_llm": build_vercel_gateway_llm_adapter,
+    "anthropic_sdk_gateway": build_vercel_gateway_llm_adapter,
     "creator_real": build_real_creator_adapter,
     "creator_real_vercel": build_real_creator_vercel_adapter,
     "creator_real_replicate": build_real_creator_replicate_adapter,
@@ -94,10 +99,18 @@ class CompositeAdapter:
     # (ex.: MockAdapter) — por isso delegamos via __getattr__ em vez de métodos
     # fixos, que fariam o fallback nunca disparar.
     _OPTIONAL_CREATOR_ATTRS = frozenset({"reroll_creator_voice", "voice"})
+    # Port OPCIONAL do papel llm: execução agentic (Fase 7). Só existe quando o adapter
+    # llm o implementa; ausente (ex.: adapters futuros sem loop agentic) → o stage
+    # executor cai em passthrough. Delegado via __getattr__ para o fallback disparar.
+    _OPTIONAL_LLM_ATTRS = frozenset({"run_stage_agent"})
 
     def __getattr__(self, name: str) -> Any:
         if name in CompositeAdapter._OPTIONAL_CREATOR_ATTRS:
             value = getattr(self._by_role["creator"], name, None)
+            if value is not None:
+                return value
+        if name in CompositeAdapter._OPTIONAL_LLM_ATTRS:
+            value = getattr(self._by_role["llm"], name, None)
             if value is not None:
                 return value
         raise AttributeError(name)

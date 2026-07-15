@@ -154,6 +154,9 @@ def test_runtime_phase_branches():
     ) == "awaiting"
     assert web_server._runtime_phase({"approval": _Done(), "done": True}, None) == "done"
     assert web_server._runtime_phase({"done": False}, None) == "running"
+    # Um run que quebrou reporta "error", e o erro vence o "done" setado no finally.
+    assert web_server._runtime_phase({"error": "boom"}, None) == "error"
+    assert web_server._runtime_phase({"error": "boom", "done": True}, None) == "error"
 
 
 def test_build_item_update_none_for_untracked_node():
@@ -319,6 +322,21 @@ async def test_list_runs_endpoint_empty_for_missing_db(tmp_path):
     out = await web_server.list_runs_endpoint(db=str(tmp_path / "missing.db"))
     assert out["runs"] == []
     assert isinstance(out["active"], list)
+    assert out["errored"] == []
+
+
+async def test_list_runs_endpoint_reports_errored_and_excludes_from_active(tmp_path):
+    web_server._runs["running-run"] = {"queues": [], "buffer": [], "done": False}
+    web_server._runs["done-run"] = {"queues": [], "buffer": [], "done": True}
+    web_server._runs["errored-run"] = {
+        "queues": [], "buffer": [], "done": True, "error": "boom",
+    }
+
+    out = await web_server.list_runs_endpoint(db=str(tmp_path / "missing.db"))
+
+    # active = só o que está realmente rodando (nem concluído, nem quebrado).
+    assert out["active"] == ["running-run"]
+    assert out["errored"] == ["errored-run"]
 
 
 def test_runner_list_runs_handles_db_without_checkpoints_table(tmp_path):
@@ -369,6 +387,24 @@ async def test_run_state_returns_runtime_summary_without_checkpoint(tmp_path):
     assert state["phase"] == "done"
     assert state["summary"]["produced"] == 1
     assert state["items"] == []
+    assert state["error"] is None
+
+
+async def test_run_state_surfaces_run_crash_error(tmp_path):
+    """Quando a pipeline quebra, /api/state expõe phase="error" + a mensagem,
+    para que a falha persista após reconexão (não some com o fim do SSE)."""
+    run_id = "crashed-run"
+    web_server._runs[run_id] = {
+        "queues": [],
+        "buffer": [{"type": "error", "message": "adapter exploded"}],
+        "done": True,
+        "error": "adapter exploded",
+    }
+
+    state = await web_server.run_state(run_id, config_dir="config-mock", db=str(tmp_path / "cp.db"))
+
+    assert state["phase"] == "error"
+    assert state["error"] == "adapter exploded"
 
 
 async def test_run_state_merges_runtime_snapshots_and_skips_invalid(tmp_path, monkeypatch):

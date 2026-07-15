@@ -34,6 +34,7 @@ from orchestrator.config import (
     default_media_path,
     default_prompt_store_path,
     default_videos_path,
+    load_agent_catalog,
     load_pipeline,
     load_providers,
 )
@@ -491,6 +492,10 @@ def _runtime_phase(
     state: dict[str, Any] | None, summary: dict[str, Any] | None,
 ) -> str:
     if state is not None:
+        # Falha de run inteiro vence tudo: o `finally` marca done=True mesmo num
+        # crash, então o erro precisa ser checado antes para não virar "done".
+        if state.get("error"):
+            return "error"
         concept_future = state.get("concept_edit")
         if concept_future is not None and not getattr(concept_future, "done", lambda: False)():
             return "editing"
@@ -602,6 +607,7 @@ async def _execute_run(
     try:
         pipeline = load_pipeline(config_dir)
         providers = load_providers(config_dir)
+        agent_catalog = load_agent_catalog(config_dir)
         adapter = build_adapter_from_providers(providers, pipeline)
         run_state["adapter"] = adapter
 
@@ -609,6 +615,7 @@ async def _execute_run(
             "configurable": {
                 "adapter": adapter,
                 "pipeline": pipeline,
+                "agent_catalog": agent_catalog,
                 "run": {
                     "platform": platform,
                     "creator_prompt": creator_prompt,
@@ -759,6 +766,12 @@ async def _execute_run(
         await _emit(run_id, {"type": "run_end", "run_id": run_id, "summary": summary})
 
     except Exception as exc:  # noqa: BLE001
+        # Grava o erro no estado runtime além de emitir no SSE, para que a falha
+        # persista (fase "error" + mensagem) em reconexões e na lista de campanhas,
+        # não só no stream ao vivo.
+        state = _runs.get(run_id)
+        if state is not None:
+            state["error"] = str(exc)
         await _emit(run_id, {"type": "error", "message": str(exc)})
 
     finally:
@@ -943,9 +956,10 @@ async def creators_history() -> dict[str, Any]:
 async def integrations_index(config_dir: Optional[str] = None) -> dict[str, Any]:
     """Mapa stage → adapter lido de providers.yaml (fonte da tela Integrations Hub)."""
     providers = load_providers(config_dir)
+    agent_catalog = load_agent_catalog(config_dir)
     adapters = (providers or {}).get("adapters", {}) or {}
     stages = {str(k): str(v) for k, v in adapters.items()}
-    return {"stages": stages}
+    return {"stages": stages, "agents": agent_catalog.as_dict()}
 
 
 @app.get("/api/stream/{run_id}")
@@ -996,7 +1010,14 @@ async def stream_events(run_id: str) -> StreamingResponse:
 @app.get("/api/runs")
 async def list_runs_endpoint(db: Optional[str] = None) -> dict[str, Any]:
     db_path = db or str(default_db_path())
-    return {"runs": runner.list_runs(db_path), "active": list(_runs.keys())}
+    # `active` = só o que está realmente rodando; runs concluídos ou quebrados saem
+    # daqui (senão a lista os rotularia "Generating" para sempre). `errored` deixa a
+    # UI marcar os que falharam como "Failed".
+    errored = [rid for rid, s in _runs.items() if s.get("error")]
+    active = [
+        rid for rid, s in _runs.items() if not s.get("error") and not s.get("done")
+    ]
+    return {"runs": runner.list_runs(db_path), "active": active, "errored": errored}
 
 
 @app.get("/api/status/{run_id}")
@@ -1099,6 +1120,7 @@ async def run_state(run_id: str, config_dir: Optional[str] = None, db: Optional[
         "edit_concepts": edit_concepts,
         "awaiting": awaiting,
         "summary": summary,
+        "error": runtime_state.get("error") if runtime_state is not None else None,
     }
 
 

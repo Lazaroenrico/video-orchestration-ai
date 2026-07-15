@@ -1,0 +1,44 @@
+# Catalogo declarativo offline. Mantem dry-run deterministico e custo zero.
+stages:
+  concepts:
+    executor: tool
+    tools: [generate_concepts]
+    target_model: null
+    target_agent: null
+    agent_enabled: false
+  scripts:
+    executor: tool
+    tools: [write_script]
+    target_model: null
+    target_agent: null
+    agent_enabled: false
+  roster:
+    executor: tool
+    tools: [build_creator]
+    target_model: null
+    target_agent: null
+    agent_enabled: false
+  video:
+    executor: tool
+    tools: [generate_clip]
+    target_model: null
+    target_agent: null
+    agent_enabled: false
+  qc:
+    executor: tool
+    tools: [qc_check]
+    target_model: null
+    target_agent: null
+    agent_enabled: false
+  assembly:
+    executor: tool
+    tools: [assemble_video]
+    target_model: null
+    target_agent: null
+    agent_enabled: false
+  upscale:
+    executor: tool
+    tools: [upscale_video]
+    target_model: null
+    target_agent: null
+    agent_enabled: false

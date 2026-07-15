@@ -94,13 +94,22 @@ def test_install_cors_is_opt_in() -> None:
 
 @pytest.mark.asyncio
 async def test_integrations_reads_provider_adapters(monkeypatch) -> None:
+    from orchestrator.agent_catalog import default_agent_catalog
+
     monkeypatch.setattr(
         web_server,
         "load_providers",
         lambda config_dir=None: {"adapters": {"video": "replicate", "llm": "gateway"}},
     )
+    monkeypatch.setattr(
+        web_server,
+        "load_agent_catalog",
+        lambda config_dir=None: default_agent_catalog(),
+    )
     out = await web_server.integrations_index()
     assert out["stages"] == {"video": "replicate", "llm": "gateway"}
+    assert out["agents"]["stages"]["concepts"]["executor"] == "tool"
+    assert out["agents"]["stages"]["concepts"]["tools"] == ["generate_concepts"]
 
 
 @pytest.mark.asyncio

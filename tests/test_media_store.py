@@ -167,7 +167,29 @@ async def test_persist_creator_media_downloads_image_keeps_voice_id(tmp_path):
     # voice_id não é URL -> permanece referência, sem source uri
     assert out["voice_id"] == "el_voice_abc"
     assert "voice_source_uri" not in out
-    assert (tmp_path / "run-1" / "creator-0" / "image.png").read_bytes() == _PNG_BYTES
+
+
+def test_data_uri_from_media_path_reads_local_file(tmp_path):
+    """Reconstrói um data: URI (buscável pelo provider) a partir de um arquivo
+    servido em /media/... — o path web sozinho não é acessível externamente."""
+    f = tmp_path / "run-1" / "creator-0" / "image.png"
+    f.parent.mkdir(parents=True)
+    f.write_bytes(_PNG_BYTES)
+
+    uri = media_store.data_uri_from_media_path("/media/run-1/creator-0/image.png", tmp_path)
+
+    assert uri is not None
+    assert uri.startswith("data:image/png;base64,")
+    assert base64.b64decode(uri.split(",", 1)[1]) == _PNG_BYTES
+
+
+def test_data_uri_from_media_path_returns_none_for_non_local(tmp_path):
+    # URLs remotas / data: não precisam de reconstrução.
+    assert media_store.data_uri_from_media_path("https://x/y.png", tmp_path) is None
+    assert media_store.data_uri_from_media_path("data:image/png;base64,AAA", tmp_path) is None
+    # Path /media local, mas arquivo inexistente.
+    assert media_store.data_uri_from_media_path("/media/run-1/missing.png", tmp_path) is None
+    assert media_store.data_uri_from_media_path("", tmp_path) is None
 
 
 @pytest.mark.asyncio

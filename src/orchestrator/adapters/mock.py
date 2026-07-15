@@ -11,9 +11,9 @@ import base64
 import hashlib
 from typing import Any, Optional
 
-from orchestrator.adapters.base import VoiceProfile, resolve_voice_profile
+from orchestrator.adapters.base import StageToolRunner, VoiceProfile, resolve_voice_profile
 from orchestrator.graph.state import Artifact, Item, QCResult
-from orchestrator.tracing import traced
+from orchestrator.tracing import add_trace_metadata, traced
 
 _HOOK_STYLES = ["problem", "curiosity", "bold_claim", "emotional", "social_proof"]
 _QC_SUSPECTS = ["hands", "eyes", "lip_sync", "lighting", "skin_texture"]
@@ -137,18 +137,28 @@ class MockAdapter:
         n: int,
         seed: str,
         bias: Optional[list[str]] = None,
+        revision: Optional[str] = None,
     ) -> list[dict[str, Any]]:
         await self._tick()
         # bias = hooks vencedores do ciclo anterior (Step 10 -> 1). Uma fração dos
         # conceitos é puxada para esses estilos, mantendo determinismo e spread.
         bias = [b for b in (bias or []) if b in _HOOK_STYLES]
         bias_strength = 0.6
+        # revision (Fase 7): quando o agent pede refino, a diretiva entra no hash para
+        # produzir um output distinto e determinístico. None/"" mantém a saída base
+        # byte-idêntica ao modo tool (o part de revisão nem entra no hash).
         concepts: list[dict[str, Any]] = []
         for i in range(n):
-            style = _HOOK_STYLES[int(_unit(seed, offer, i) * len(_HOOK_STYLES))]
+            if revision:
+                style_parts: tuple[Any, ...] = (seed, offer, f"rev:{revision}", i)
+                tag_key = f"{seed}|{offer}|rev:{revision}|{i}"
+            else:
+                style_parts = (seed, offer, i)
+                tag_key = f"{seed}|{offer}|{i}"
+            style = _HOOK_STYLES[int(_unit(*style_parts) * len(_HOOK_STYLES))]
             if bias and _unit("bias", seed, offer, i) < bias_strength:
                 style = bias[i % len(bias)]
-            tag = hashlib.sha256(f"{seed}|{offer}|{i}".encode()).hexdigest()[:8]
+            tag = hashlib.sha256(tag_key.encode()).hexdigest()[:8]
             concepts.append(
                 {
                     "id": f"concept-{tag}",
@@ -163,16 +173,68 @@ class MockAdapter:
 
     # --- Step 2: scripts ---
     @traced("adapter.mock.write_script", run_type="chain", step=2, provider="mock")
-    async def write_script(self, concept: dict[str, Any], creator_ref: str, platform: str) -> str:
+    async def write_script(
+        self,
+        concept: dict[str, Any],
+        creator_ref: str,
+        platform: str,
+        revision: Optional[str] = None,
+    ) -> str:
         await self._tick()
         hook = concept.get("hook", "hook")
         pacing = "fast" if platform.lower() == "tiktok" else "medium"
-        return (
+        script = (
             f"HOOK: {hook}\n"
             f"BODY: ({platform} / pacing={pacing}) creator={creator_ref} fala sobre "
             f"{concept.get('offer', 'o produto')} no ângulo {concept.get('angle')}.\n"
             f"CTA: confere o link e testa hoje."
         )
+        # revision (Fase 7): refino do agent anexa uma linha determinística; None mantém
+        # o script base inalterado (backward-compatible com o modo tool).
+        if revision:
+            tag = hashlib.sha256(f"{hook}|{revision}".encode()).hexdigest()[:8]
+            script += f"\nREVISED[{tag}]: {revision}"
+        return script
+
+    # --- Fase 7: execução agentic (concepts/scripts) ---
+    async def run_stage_agent(
+        self,
+        *,
+        stage: str,
+        allowed_tools: tuple[str, ...],
+        run_tool: StageToolRunner,
+        inputs: dict[str, Any],
+        target_model: Optional[str] = None,
+    ) -> Any:
+        """Loop *critique -> refine* determinístico e offline (custo zero).
+
+        Gera o rascunho pela typed tool (via ``run_tool``), avalia com um heurístico
+        determinístico e, se pedir refino, regenera uma vez com a diretiva. Nunca chama
+        ``generate_concepts``/``write_script`` diretamente — só ``run_tool`` (fronteira D29).
+        """
+        draft = await run_tool(**inputs)
+        revision = self._agent_critique(stage, draft)
+        add_trace_metadata(
+            agent_backend="mock",
+            stage=stage,
+            allowed_tools=list(allowed_tools),
+            target_model=target_model,
+            agent_revised=bool(revision),
+        )
+        if not revision:
+            return draft
+        return await run_tool(**{**inputs, "revision": revision})
+
+    @staticmethod
+    def _agent_critique(stage: str, draft: Any) -> Optional[str]:
+        """Heurístico determinístico: metade dos rascunhos (por hash) pede um refino.
+
+        Retorno ``None`` = rascunho aceito; string = diretiva de refino.
+        """
+        fingerprint = hashlib.sha256(repr(draft).encode()).hexdigest()
+        if int(fingerprint[:2], 16) % 2 == 0:
+            return None
+        return f"Refine the {stage} output: strengthen the hook and tighten the CTA."
 
     # --- Step 3: creator reutilizável ---
     @traced("adapter.mock.build_creator", run_type="tool", step=3, provider="mock")

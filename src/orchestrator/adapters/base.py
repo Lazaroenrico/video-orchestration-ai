@@ -7,9 +7,14 @@ plugados via ``registry.py`` — sem mexer no grafo.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Literal, Optional, Protocol, runtime_checkable
+from typing import Any, Awaitable, Callable, Literal, Optional, Protocol, runtime_checkable
 
 from orchestrator.graph.state import Artifact, Item, JudgeVerdict, QCResult
+
+# Executor validado de uma typed tool, injetado pelo stage executor no agent.
+# Chamá-lo roda a tool tipada (com seus validators) — o agent nunca fala com o
+# adapter de domínio diretamente (fronteira D29).
+StageToolRunner = Callable[..., Awaitable[Any]]
 
 VoicePreset = Literal["male", "female", "neutral"]
 
@@ -100,11 +105,47 @@ class LLMPort(Protocol):
     """Claude — conceitos (Step 1), scripts (Step 2)."""
 
     async def generate_concepts(
-        self, offer: str, n: int, seed: str, bias: Optional[list[str]] = None
+        self,
+        offer: str,
+        n: int,
+        seed: str,
+        bias: Optional[list[str]] = None,
+        revision: Optional[str] = None,
     ) -> list[dict[str, Any]]:
-        """``bias`` = hooks vencedores do ciclo anterior (Step 10 -> 1), opcional."""
+        """``bias`` = hooks vencedores do ciclo anterior (Step 10 -> 1), opcional.
+
+        ``revision`` = diretiva de refino do agent (Fase 7). ``None`` = geração
+        base (comportamento inalterado); setado = incorpora a diretiva.
+        """
         ...
-    async def write_script(self, concept: dict[str, Any], creator_ref: str, platform: str) -> str: ...
+    async def write_script(
+        self,
+        concept: dict[str, Any],
+        creator_ref: str,
+        platform: str,
+        revision: Optional[str] = None,
+    ) -> str: ...
+
+
+@runtime_checkable
+class AgentPort(Protocol):
+    """Execução agentic de um stage LLM-only (Fase 7 do D29).
+
+    Um adapter LLM opcionalmente implementa ``run_stage_agent`` para rodar um loop
+    *critique -> refine* bounded. Recebe ``run_tool`` (a typed tool já validada) e só
+    fala com o domínio através dele — nunca chama ``generate_concepts``/``write_script``
+    diretamente. Adapters sem esse método caem em passthrough no stage executor.
+    """
+
+    async def run_stage_agent(
+        self,
+        *,
+        stage: str,
+        allowed_tools: tuple[str, ...],
+        run_tool: StageToolRunner,
+        inputs: dict[str, Any],
+        target_model: Optional[str] = None,
+    ) -> Any: ...
 
 
 @runtime_checkable

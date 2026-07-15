@@ -24,7 +24,15 @@ from orchestrator import media_store, stream_bus
 from orchestrator.adapters.base import VoiceProfile, assign_voice_profile
 from orchestrator.config import default_media_path, default_videos_path
 from orchestrator.graph.state import Artifact, Item, new_item
-from orchestrator.nodes.base import as_item, get_adapter, get_pipeline
+from orchestrator.nodes.base import as_item, get_pipeline
+from orchestrator.stage_executor import StageExecutionError, execute_stage_tool
+from orchestrator.tools.assembly import assemble_video_tool, upscale_video_tool
+from orchestrator.tools.base import tool_context_from_config
+from orchestrator.tools.concepts import generate_concepts_tool
+from orchestrator.tools.creators import build_creator_tool
+from orchestrator.tools.qc import qc_check_tool
+from orchestrator.tools.scripts import write_script_tool
+from orchestrator.tools.video import generate_clip_tool
 from orchestrator.tracing import add_trace_metadata, traced
 
 async def _build_voice_preview(
@@ -260,12 +268,30 @@ def _normalize_seed_creator(creator: dict[str, Any]) -> dict[str, Any] | None:
     return normalized
 
 
+def _ensure_seed_reference_image(creator: dict[str, Any], media_root: Path) -> None:
+    """Garante que a referência de imagem do creator reutilizado seja buscável pelo
+    provider (Step 6, vídeo real). O fan-out usa ``image_source_uri or upscaled_base``;
+    um creator vindo do store carrega só o path local ``/media/...`` (não acessível
+    externamente). Reconstrói um ``data:`` URI a partir do arquivo em disco quando a
+    referência atual não é http(s)/data:. No-op quando já é buscável (data:/http) ou
+    quando não há arquivo local (ex.: seed de teste sem mídia). Mutação in-place."""
+    ref = creator.get("image_source_uri")
+    if isinstance(ref, str) and media_store._is_downloadable(ref):
+        return
+    for candidate in (creator.get("image_source_uri"), creator.get("upscaled_base"),
+                      creator.get("image_uri"), creator.get("image")):
+        data_uri = media_store.data_uri_from_media_path(candidate, media_root) if candidate else None
+        if data_uri is not None:
+            creator["image_source_uri"] = data_uri
+            return
+
+
 # ===================== Top-graph (BatchState) =====================
 
 @traced("node.roster", run_type="chain", step=3)
 async def node_roster(state: dict[str, Any], config: RunnableConfig) -> dict[str, Any]:
     """Step 3 — constrói o roster de creators reutilizáveis (uma vez por run)."""
-    adapter = get_adapter(config)
+    tool_ctx = tool_context_from_config(config)
     pipeline = get_pipeline(config)
     run_cfg = config["configurable"].get("run", {})
     n = int(pipeline.get("roster", {}).get("creators", 5))
@@ -278,6 +304,7 @@ async def node_roster(state: dict[str, Any], config: RunnableConfig) -> dict[str
     if isinstance(seed_creator, dict):
         normalized_seed = _normalize_seed_creator(seed_creator)
         if normalized_seed is not None:
+            _ensure_seed_reference_image(normalized_seed, media_root)
             add_trace_metadata(step=3, stage="roster", creators=1, seeded=True)
             return {"roster": [normalized_seed]}
 
@@ -289,7 +316,12 @@ async def node_roster(state: dict[str, Any], config: RunnableConfig) -> dict[str
         # Perfil concreto por índice: garante paridade imagem↔voz e variedade de
         # gênero no roster mesmo quando o briefing não cita gênero.
         profile = assign_voice_profile(creator_prompt, None, index=i)
-        creator = await adapter.build_creator(
+        creator = await execute_stage_tool(
+            config,
+            tool_ctx,
+            catalog_stage="roster",
+            tool_name="build_creator",
+            tool_fn=build_creator_tool,
             index=i, system_prompt=creator_prompt, voice_profile=profile,
         )
         # Baixa e persiste os bytes (imagem/voz) e reescreve as URIs para caminhos
@@ -298,7 +330,7 @@ async def node_roster(state: dict[str, Any], config: RunnableConfig) -> dict[str
             creator, run_id=run_id, media_root=media_root,
         )
         creator["voice_preview_uri"] = await _build_voice_preview(
-            adapter, creator, run_id=run_id, media_root=media_root,
+            tool_ctx.adapter, creator, run_id=run_id, media_root=media_root,
         )
         # Emite assim que cada creator fica pronto, com a mídia real (imagem + voz),
         # para feedback imediato na UI. No-op fora do contexto de streaming web.
@@ -366,7 +398,7 @@ async def node_approval(state: dict[str, Any], config: RunnableConfig) -> dict[s
 @traced("node.concepts", run_type="chain", step=1)
 async def node_concepts(state: dict[str, Any], config: RunnableConfig) -> dict[str, Any]:
     """Step 1 — gera o batch de conceitos (data-driven, spread de hooks)."""
-    adapter = get_adapter(config)
+    tool_ctx = tool_context_from_config(config)
     pipeline = get_pipeline(config)
     run_cfg = state.get("config", {})
     offer = run_cfg.get("offer", "demo offer")
@@ -375,7 +407,17 @@ async def node_concepts(state: dict[str, Any], config: RunnableConfig) -> dict[s
     # Step 10 -> 1: vés pelos hooks vencedores do ciclo anterior (fecha o loop).
     bias = run_cfg.get("prior_winning_styles") or None
     add_trace_metadata(step=1, stage="concepts", batch_size=n, offer=offer)
-    concepts = await adapter.generate_concepts(offer=offer, n=n, seed=seed, bias=bias)
+    concepts = await execute_stage_tool(
+        config,
+        tool_ctx,
+        catalog_stage="concepts",
+        tool_name="generate_concepts",
+        tool_fn=generate_concepts_tool,
+        offer=offer,
+        n=n,
+        seed=seed,
+        bias=bias,
+    )
     return {"concepts": concepts}
 
 
@@ -387,14 +429,19 @@ async def node_scripts(state: dict[str, Any], config: RunnableConfig) -> dict[st
     ``write_script`` recebe um ``creator_ref`` genérico. O fan-out atribui o creator a
     cada item e move o script (``concept["script"]`` -> ``Item.script``) depois.
     """
-    adapter = get_adapter(config)
+    tool_ctx = tool_context_from_config(config)
     run_cfg = config["configurable"].get("run", {})
     platform = run_cfg.get("platform", "tiktok")
     concepts = state.get("concepts") or []
     add_trace_metadata(step=2, stage="scripts", batch_size=len(concepts), platform=platform)
 
     async def _write(concept: dict[str, Any]) -> dict[str, Any]:
-        script = await adapter.write_script(
+        script = await execute_stage_tool(
+            config,
+            tool_ctx,
+            catalog_stage="scripts",
+            tool_name="write_script",
+            tool_fn=write_script_tool,
             concept=concept, creator_ref="creator", platform=platform,
         )
         return {**concept, "script": script}
@@ -502,7 +549,7 @@ def make_gen_node(tier: str):
 
     async def _gen(state: Any, config: RunnableConfig) -> dict[str, Any]:
         item = as_item(state)
-        adapter = get_adapter(config)
+        tool_ctx = tool_context_from_config(config)
         pipeline = get_pipeline(config)
         run_cfg = config["configurable"].get("run", {})
         seconds = int(pipeline.get("clip", {}).get("duration_seconds", 8))
@@ -510,12 +557,18 @@ def make_gen_node(tier: str):
             step=4, stage="talking_head", item_id=item.id, tier=tier,
             attempt=item.attempts,
         )
-        clip = await adapter.generate_clip(
+        clip = await execute_stage_tool(
+            config,
+            tool_ctx,
+            catalog_stage="video",
+            tool_name="generate_clip",
+            tool_fn=generate_clip_tool,
             item_id=item.id, tier=tier, seconds=seconds, attempt=item.attempts,
             system_prompt=_video_prompt(
                 item, run_cfg.get("video_prompt"), stage="talking-head"
             ),
             reference_image_uri=item.creator_image_uri,
+            stage="talking_head",
         )
         # Surfaça se o clip veio do provider real (replicate) ou de fallback mock,
         # + o modelo e a URI de saída — responde "está gerando o vídeo mesmo?".
@@ -547,15 +600,21 @@ def make_gen_node(tier: str):
 async def node_product_demo(state: Any, config: RunnableConfig) -> dict[str, Any]:
     """Step 5 — clip de product demo (lean barato: LTX), anexado ao item."""
     item = as_item(state)
-    adapter = get_adapter(config)
+    tool_ctx = tool_context_from_config(config)
     pipeline = get_pipeline(config)
     run_cfg = config["configurable"].get("run", {})
     seconds = int(pipeline.get("clip", {}).get("duration_seconds", 8))
     add_trace_metadata(step=5, stage="product_demo", item_id=item.id, attempt=item.attempts)
-    demo = await adapter.generate_clip(
+    demo = await execute_stage_tool(
+        config,
+        tool_ctx,
+        catalog_stage="video",
+        tool_name="generate_clip",
+        tool_fn=generate_clip_tool,
         item_id=f"{item.id}:demo", tier="ltx", seconds=seconds, attempt=item.attempts,
         system_prompt=_video_prompt(item, run_cfg.get("video_prompt"), stage="product-demo"),
         reference_image_uri=item.creator_image_uri,
+        stage="product_demo",
     )
     add_trace_metadata(
         step=5, stage="product_demo_done", item_id=item.id,
@@ -581,10 +640,18 @@ async def node_product_demo(state: Any, config: RunnableConfig) -> dict[str, Any
 async def node_qc(state: Any, config: RunnableConfig) -> dict[str, Any]:
     """Step 7 — QC determinístico; reprova incrementa attempts (alimenta o gate)."""
     item = as_item(state)
-    adapter = get_adapter(config)
+    tool_ctx = tool_context_from_config(config)
     pipeline = get_pipeline(config)
     fail_rate = float(pipeline.get("qc", {}).get("fail_rate", 0.34))
-    qc = await adapter.qc_check(item=item, fail_rate=fail_rate)
+    qc = await execute_stage_tool(
+        config,
+        tool_ctx,
+        catalog_stage="qc",
+        tool_name="qc_check",
+        tool_fn=qc_check_tool,
+        item=item,
+        fail_rate=fail_rate,
+    )
     add_trace_metadata(
         step=7, stage="qc", item_id=item.id, attempt=item.attempts,
         qc_score=qc.score, qc_passed=qc.passed,
@@ -592,24 +659,6 @@ async def node_qc(state: Any, config: RunnableConfig) -> dict[str, Any]:
     if qc.passed:
         return {"qc": qc}
     return {"qc": qc, "attempts": item.attempts + 1}
-
-def _ensure_artifact(art: Any) -> Optional[Artifact]:
-    """Valida o shape do retorno de ``assemble`` antes de usar.
-
-    Cumpre a regra de composição de adapters ("validate response shape before use"):
-    só aceita um ``Artifact`` (ou dict coercível) com ``uri`` não-vazia. Qualquer outra
-    coisa vira ``None`` e é tratada como falha de montagem — nunca levanta.
-    """
-    if isinstance(art, Artifact):
-        return art if art.uri else None
-    if isinstance(art, dict):
-        try:
-            coerced = Artifact.model_validate(art)
-        except Exception:  # noqa: BLE001 — shape inválida é falha, não crash
-            return None
-        return coerced if coerced.uri else None
-    return None
-
 
 async def _mock_assembled(item: Item, *, platform: str, system_prompt: str) -> Artifact:
     """Vídeo final mock para o fallback opt-in de assembly, marcado como degradado."""
@@ -632,7 +681,7 @@ async def node_assembly(state: Any, config: RunnableConfig) -> dict[str, Any]:
     ligado, degrada para um final mock marcado com ``fallback_reason``.
     """
     item = as_item(state)
-    adapter = get_adapter(config)
+    tool_ctx = tool_context_from_config(config)
     pipeline = get_pipeline(config)
     run_cfg = config["configurable"].get("run", {})
     platform = run_cfg.get("platform", "tiktok")
@@ -641,13 +690,15 @@ async def node_assembly(state: Any, config: RunnableConfig) -> dict[str, Any]:
 
     reason: Optional[str] = None
     try:
-        art = _ensure_artifact(
-            await adapter.assemble(
-                item=item, platform=platform, system_prompt=system_prompt,
-            )
+        art = await execute_stage_tool(
+            config,
+            tool_ctx, item=item, platform=platform, system_prompt=system_prompt,
+            catalog_stage="assembly",
+            tool_name="assemble_video",
+            tool_fn=assemble_video_tool,
         )
-        if art is None:
-            reason = "assembler retornou shape inválida (esperado Artifact com uri)"
+    except StageExecutionError:  # erro de config, não falha do assembler → estoura alto
+        raise
     except Exception as exc:  # noqa: BLE001 — assembly best-effort; falha vira erro no item
         art = None
         reason = str(exc)
@@ -684,10 +735,19 @@ async def node_upscale(state: Any, config: RunnableConfig) -> dict[str, Any]:
     item = as_item(state)
     if item.assembled is None:  # montagem não completou → nada a escalar
         return {}
-    adapter = get_adapter(config)
+    tool_ctx = tool_context_from_config(config)
     add_trace_metadata(step=8, stage="upscale", item_id=item.id)
     try:
-        upscaled_uri = await adapter.upscale(item.assembled.uri)
+        upscaled_uri = await execute_stage_tool(
+            config,
+            tool_ctx,
+            catalog_stage="upscale",
+            tool_name="upscale_video",
+            tool_fn=upscale_video_tool,
+            media_uri=item.assembled.uri,
+        )
+    except StageExecutionError:  # erro de config, não falha do upscaler → estoura alto
+        raise
     except Exception as exc:  # noqa: BLE001 — upscale best-effort; preserva o montado
         add_trace_metadata(step=8, stage="upscale_failed", item_id=item.id, error=str(exc))
         return {}

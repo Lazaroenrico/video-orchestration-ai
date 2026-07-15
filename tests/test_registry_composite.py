@@ -1,5 +1,5 @@
 """CompositeAdapter: roteamento por papel + default mock (integração dos adapters reais)."""
-from orchestrator.adapters.anthropic_llm import AnthropicLLMAdapter
+from orchestrator.adapters.gateway_llm import GatewayLLMAdapter
 from orchestrator.adapters.integrity_qc import IntegrityQCAdapter
 from orchestrator.adapters.mock import MockAdapter
 from orchestrator.adapters.vercel_seedance_assembly import VercelSeedanceAssemblyAdapter
@@ -44,7 +44,7 @@ def test_vercel_gateway_llm_routes_only_llm_role(monkeypatch, pipeline_cfg):
         pipeline_cfg,
     )
 
-    assert isinstance(comp._by_role["llm"], AnthropicLLMAdapter)
+    assert isinstance(comp._by_role["llm"], GatewayLLMAdapter)
     assert isinstance(comp._by_role["creator"], MockAdapter)
     assert isinstance(comp._by_role["video"], MockAdapter)
     assert isinstance(comp._by_role["qc"], MockAdapter)

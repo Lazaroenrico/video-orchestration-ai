@@ -83,6 +83,7 @@ function hydrate(s: RunStreamState, detail: RunDetail): RunStreamState {
     editConcepts: mergeById(detail.edit_concepts, s.editConcepts),
     awaiting: mergeById(detail.awaiting, s.awaiting),
     summary: s.summary ?? detail.summary,
+    error: s.error ?? detail.error ?? null,
   };
 }
 

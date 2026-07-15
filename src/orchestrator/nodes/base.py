@@ -3,17 +3,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from langchain_core.runnables import RunnableConfig
-
 from orchestrator.graph.state import Item
 
 
-def get_adapter(config: RunnableConfig) -> Any:
-    """Adapter injetado via RunnableConfig['configurable']['adapter']."""
-    return config["configurable"]["adapter"]
-
-
-def get_pipeline(config: RunnableConfig) -> dict[str, Any]:
+def get_pipeline(config: dict[str, Any]) -> dict[str, Any]:
     """Knobs da pipeline (pipeline.yaml) injetados via config."""
     return config["configurable"]["pipeline"]
 

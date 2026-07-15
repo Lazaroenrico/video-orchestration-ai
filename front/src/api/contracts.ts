@@ -61,6 +61,7 @@ export type RunPhaseSnapshot = "idle" | "running" | "editing" | "awaiting" | "do
 export interface RunsIndex {
   runs: string[];
   active: string[];
+  errored: string[];
 }
 
 export interface CreatorsIndex {
@@ -114,6 +115,7 @@ export interface RunDetail {
   edit_concepts: EditableConcept[];
   awaiting: Creator[];
   summary: RunSummary | null;
+  error?: string | null;
 }
 
 export type StreamEvent =
