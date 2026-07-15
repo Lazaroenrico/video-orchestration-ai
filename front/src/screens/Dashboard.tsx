@@ -6,6 +6,7 @@ import { Button } from "../components/Button";
 import { Loading, ErrorState } from "../components/States";
 import { useAsync } from "../api/useAsync";
 import { api } from "../api/client";
+import { mediaUrl } from "../api/urls";
 import type { RunSummary } from "../types";
 import { usd, num, pct, shortRun } from "../lib/format";
 
@@ -150,7 +151,7 @@ export function Dashboard() {
                 >
                   {(c.image_uri || c.image) && (
                     <img
-                      src={c.image_uri || c.image || ""}
+                      src={mediaUrl(c.image_uri || c.image || "")}
                       alt={c.id}
                       className="w-full h-full object-cover"
                     />

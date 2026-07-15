@@ -11,12 +11,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import uuid
 from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import urlparse
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -43,6 +45,28 @@ from orchestrator.nodes.stages import reroll_creator_voice as reroll_creator_voi
 from orchestrator.registry import build_adapter_from_providers
 
 app = FastAPI(title="UGC Orchestrator")
+
+
+def _cors_origins_from_env() -> list[str]:
+    raw = os.environ.get("ORCH_CORS_ORIGINS", "")
+    return [origin.strip() for origin in raw.split(",") if origin.strip()]
+
+
+_cors_origins = _cors_origins_from_env()
+
+
+def _install_cors(app_: FastAPI, origins: list[str]) -> None:
+    if not origins:
+        return
+    app_.add_middleware(
+        CORSMiddleware,
+        allow_origins=origins,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+
+_install_cors(app, _cors_origins)
 
 # Front-end SPA ("Kinetic Command", Vite+React) built into front/dist. Repo layout:
 #   <repo>/front/dist/            ← this file is <repo>/src/orchestrator/web/server.py

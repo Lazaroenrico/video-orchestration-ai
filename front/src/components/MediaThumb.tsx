@@ -1,5 +1,6 @@
 import type { Artifact } from "../types";
 import { Icon } from "./Icon";
+import { mediaUrl } from "../api/urls";
 
 // Renders a renderable artifact (image/video/audio) or a neutral reference chip.
 export function MediaThumb({
@@ -18,16 +19,16 @@ export function MediaThumb({
     );
   }
   if (artifact.media_type === "image") {
-    return <img src={artifact.uri} alt="" className={`${base} object-cover w-full aspect-video`} />;
+    return <img src={mediaUrl(artifact.uri)} alt="" className={`${base} object-cover w-full aspect-video`} />;
   }
   if (artifact.media_type === "video") {
-    return <video src={artifact.uri} controls className={`${base} w-full aspect-video bg-black`} />;
+    return <video src={mediaUrl(artifact.uri)} controls className={`${base} w-full aspect-video bg-black`} />;
   }
   if (artifact.media_type === "audio") {
     return (
       <div className={`${base} p-3 flex items-center gap-2`}>
         <Icon name="graphic_eq" className="text-ai-processing" />
-        <audio src={artifact.uri} controls className="w-full" />
+        <audio src={mediaUrl(artifact.uri)} controls className="w-full" />
       </div>
     );
   }
