@@ -8,7 +8,8 @@ endpoint /api/integrations que lê providers.yaml.
 from __future__ import annotations
 
 import pytest
-from fastapi import HTTPException
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 
 from orchestrator.web import server as web_server
 
@@ -68,6 +69,27 @@ def test_front_index_returns_path_when_built(monkeypatch, tmp_path) -> None:
 def test_front_index_none_when_absent(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(web_server, "_FRONT_DIST", tmp_path / "nope")
     assert web_server._front_index() is None
+
+
+def test_cors_origins_from_env(monkeypatch) -> None:
+    monkeypatch.setenv(
+        "ORCH_CORS_ORIGINS",
+        "https://front.example.com, http://localhost:5173 ,,",
+    )
+    assert web_server._cors_origins_from_env() == [
+        "https://front.example.com",
+        "http://localhost:5173",
+    ]
+
+
+def test_install_cors_is_opt_in() -> None:
+    app = FastAPI()
+    web_server._install_cors(app, [])
+    assert app.user_middleware == []
+
+    web_server._install_cors(app, ["https://front.example.com"])
+    assert app.user_middleware[0].cls is CORSMiddleware
+    assert app.user_middleware[0].kwargs["allow_origins"] == ["https://front.example.com"]
 
 
 @pytest.mark.asyncio

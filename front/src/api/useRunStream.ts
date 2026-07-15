@@ -9,9 +9,11 @@ import type {
   RunSummary,
   StreamEvent,
 } from "../types";
+import { sseUrl } from "./urls";
 
 export type NodeState = { node: string; label: string; status: "running" | "done" };
 export type RunPhase = RunPhaseSnapshot;
+export type LlmStageStream = { stage: string; text: string; active: boolean };
 
 export interface RunStreamState {
   phase: RunPhase;
@@ -22,6 +24,7 @@ export interface RunStreamState {
   awaiting: Creator[];
   summary: RunSummary | null;
   llm: string;
+  llmByStage: Record<string, LlmStageStream>;
   log: { kind: string; text: string; ts: number }[];
   error: string | null;
 }
@@ -35,6 +38,7 @@ const initial: RunStreamState = {
   awaiting: [],
   summary: null,
   llm: "",
+  llmByStage: {},
   log: [],
   error: null,
 };
@@ -60,6 +64,10 @@ function mergeById<T extends { id: string }>(hydrated: T[], live: T[]): T[] {
 function clearGateOnResume(s: RunStreamState): Partial<RunStreamState> {
   if (s.phase !== "editing" && s.phase !== "awaiting") return {};
   return { phase: "running", editConcepts: [], awaiting: [] };
+}
+
+function llmStage(ev: Record<string, unknown>): string {
+  return typeof ev.stage === "string" && ev.stage.trim() ? ev.stage : "default";
 }
 
 function hydrate(s: RunStreamState, detail: RunDetail): RunStreamState {
@@ -124,10 +132,42 @@ function reduce(s: RunStreamState, ev: StreamEvent): RunStreamState {
         awaiting: s.awaiting.map((a) => (a.id === c.id ? c : a)),
       };
     }
-    case "llm_token":
-      return { ...s, llm: s.llm + (typeof ev.token === "string" ? ev.token : "") };
-    case "llm_end":
-      return { ...s, llm: s.llm + "\n" };
+    case "llm_start": {
+      const stage = llmStage(ev);
+      const current = s.llmByStage[stage] ?? { stage, text: "", active: false };
+      return {
+        ...s,
+        llmByStage: {
+          ...s.llmByStage,
+          [stage]: { ...current, active: true },
+        },
+      };
+    }
+    case "llm_token": {
+      const stage = llmStage(ev);
+      const token = typeof ev.token === "string" ? ev.token : "";
+      const current = s.llmByStage[stage] ?? { stage, text: "", active: true };
+      return {
+        ...s,
+        llm: s.llm + token,
+        llmByStage: {
+          ...s.llmByStage,
+          [stage]: { ...current, text: current.text + token, active: true },
+        },
+      };
+    }
+    case "llm_end": {
+      const stage = llmStage(ev);
+      const current = s.llmByStage[stage] ?? { stage, text: "", active: false };
+      return {
+        ...s,
+        llm: s.llm + "\n",
+        llmByStage: {
+          ...s.llmByStage,
+          [stage]: { ...current, active: false },
+        },
+      };
+    }
     case "run_end":
       return { ...s, phase: "done", summary: ev.summary, log: log(s, "run", "pipeline finished") };
     case "error":
@@ -169,7 +209,7 @@ export function useRunStream(runId: string | null) {
         /* The checkpoint can lag run creation; SSE remains the source of truth. */
       });
 
-    const es = new EventSource(`/api/stream/${encodeURIComponent(runId)}`);
+    const es = new EventSource(sseUrl(`/api/stream/${encodeURIComponent(runId)}`));
     esRef.current = es;
     es.onmessage = (msg) => {
       try {

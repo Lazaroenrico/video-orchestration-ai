@@ -9,10 +9,11 @@ import type {
   RunSummary,
   RunsIndex,
   StartRunBody,
-} from "../types";
+} from "./contracts";
+import { apiUrl } from "./urls";
 
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(path, {
+  const res = await fetch(apiUrl(path), {
     headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
     ...init,
   });
