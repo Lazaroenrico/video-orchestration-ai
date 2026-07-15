@@ -7,7 +7,12 @@ import click
 from dotenv import load_dotenv
 
 from orchestrator import runner
-from orchestrator.config import default_db_path, load_pipeline, load_providers
+from orchestrator.config import (
+    default_db_path,
+    load_agent_catalog,
+    load_pipeline,
+    load_providers,
+)
 from orchestrator.logging_config import configure_logging
 
 
@@ -31,11 +36,13 @@ def run(batch, offer, platform, run_id, dry_run, config_dir, db, feedback_store)
     """Roda a pipeline mock ponta a ponta."""
     pipeline = load_pipeline(config_dir)
     providers = load_providers(config_dir)
+    agent_catalog = load_agent_catalog(config_dir)
     db_path = db or default_db_path()
     rid, out = asyncio.run(
         runner.run_pipeline(
             pipeline, providers, db_path=db_path, run_id=run_id,
             batch=batch, offer=offer, platform=platform, feedback_store=feedback_store,
+            agent_catalog=agent_catalog,
         )
     )
     click.echo(runner.format_report({**out, "run_id": rid}))
@@ -54,12 +61,14 @@ def loop(cycles, batch, offer, platform, run_id_prefix, config_dir, db, feedback
     """Roda N ciclos encadeados; cada ciclo lê o feedback do anterior (close-the-loop)."""
     pipeline = load_pipeline(config_dir)
     providers = load_providers(config_dir)
+    agent_catalog = load_agent_catalog(config_dir)
     db_path = db or default_db_path()
     results = asyncio.run(
         runner.run_cycles(
             pipeline, providers, db_path=db_path, cycles=cycles,
             feedback_store=feedback_store, batch=batch, offer=offer,
             platform=platform, run_id_prefix=run_id_prefix,
+            agent_catalog=agent_catalog,
         )
     )
     for i, (rid, out) in enumerate(results, 1):
@@ -92,11 +101,13 @@ def resume(run_id, platform, config_dir, db, feedback_store):
     """Retoma um run interrompido (mesmo thread_id)."""
     pipeline = load_pipeline(config_dir)
     providers = load_providers(config_dir)
+    agent_catalog = load_agent_catalog(config_dir)
     db_path = db or default_db_path()
     rid, out = asyncio.run(
         runner.resume_pipeline(
             pipeline, providers, db_path=db_path, run_id=run_id,
             platform=platform, feedback_store=feedback_store,
+            agent_catalog=agent_catalog,
         )
     )
     click.echo(runner.format_report({**out, "run_id": rid}))

@@ -336,6 +336,47 @@ async def test_node_upscale_best_effort_on_failure():
     assert result == {}  # preserva o vídeo montado, não derruba o item
 
 
+async def test_node_upscale_propagates_stage_execution_error():
+    """A3: erro de config (catálogo sem o stage) não pode virar no-op best-effort."""
+    from orchestrator.agent_catalog import AgentCatalog
+    from orchestrator.stage_executor import StageExecutionError
+
+    class _Upscaler:
+        async def upscale(self, media_uri):
+            raise AssertionError("não deve ser chamado com catálogo inválido")
+
+    config = _upscale_config(_Upscaler())
+    config["configurable"]["agent_catalog"] = AgentCatalog(stages=())  # stage 'upscale' ausente
+
+    with pytest.raises(StageExecutionError, match="not configured"):
+        await stages.node_upscale(_assembled_item(), config)
+
+
+async def test_node_assembly_propagates_stage_execution_error(monkeypatch, tmp_path):
+    """A3: mesma regra para assembly — erro de config estoura, não vira erro por-item."""
+    from orchestrator.agent_catalog import AgentCatalog
+    from orchestrator.stage_executor import StageExecutionError
+
+    monkeypatch.setattr(stages, "default_videos_path", lambda: tmp_path)
+
+    class _Assembler:
+        async def assemble(self, **kwargs):
+            raise AssertionError("não deve ser chamado com catálogo inválido")
+
+    config = {
+        "configurable": {
+            "adapter": _Assembler(),
+            "pipeline": {},
+            "run": {"platform": "tiktok"},
+            "thread_id": "run-x",
+            "agent_catalog": AgentCatalog(stages=()),  # stage 'assembly' ausente
+        }
+    }
+
+    with pytest.raises(StageExecutionError, match="not configured"):
+        await stages.node_assembly(_assembled_item(), config)
+
+
 # ------------------------------------------------------------------ #
 # node_scripts — escreve script por conceito (batch, antes do creator) #
 # ------------------------------------------------------------------ #
@@ -344,7 +385,7 @@ async def test_node_scripts_writes_script_per_concept():
     seen: list[tuple[dict, str, str]] = []
 
     class _ScriptAdapter:
-        async def write_script(self, *, concept, creator_ref, platform):
+        async def write_script(self, *, concept, creator_ref, platform, revision=None):
             seen.append((concept, creator_ref, platform))
             return f"SCRIPT for {concept['id']} ({platform})"
 

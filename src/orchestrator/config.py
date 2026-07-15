@@ -8,6 +8,8 @@ from typing import Any
 
 import yaml
 
+from orchestrator.agent_catalog import AgentCatalog, build_agent_catalog, default_agent_catalog
+
 _ENV_RE = re.compile(r"\$\{([A-Z0-9_]+)(?::-([^}]*))?\}")
 
 
@@ -43,6 +45,13 @@ def load_providers(path: str | None = None) -> dict[str, Any]:
 def load_judge(path: str | None = None) -> dict[str, Any]:
     # judge.yaml tem placeholders de ambiente (url/key do gateway).
     return _load_yaml(config_dir(path) / "judge.yaml", expand=True)
+
+
+def load_agent_catalog(path: str | None = None) -> AgentCatalog:
+    catalog_path = config_dir(path) / "agents.yaml"
+    if not catalog_path.exists():
+        return default_agent_catalog()
+    return build_agent_catalog(_load_yaml(catalog_path))
 
 
 def default_db_path() -> Path:

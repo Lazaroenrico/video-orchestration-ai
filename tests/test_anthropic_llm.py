@@ -681,3 +681,103 @@ async def test_write_script_raises_when_no_text_block() -> None:
                "hook_style": "problem", "format": "talking_head"}
     with pytest.raises(RuntimeError, match="no text block for write_script"):
         await adapter.write_script(concept=concept, creator_ref="creator-0", platform="tiktok")
+
+
+# --------------------------------------------------------------------------- #
+# Fase 7 — revision (refino do agent) e execução agentic (legado SDK)          #
+# --------------------------------------------------------------------------- #
+
+
+def _sent_prompt(client: MagicMock) -> str:
+    return client.messages.create.call_args.kwargs["messages"][0]["content"]
+
+
+async def test_generate_concepts_revision_appended_to_prompt() -> None:
+    client = _make_fake_client(_make_response([_make_text_block(_concepts_json(1))]))
+    adapter = AnthropicLLMAdapter(client=client)
+
+    await adapter.generate_concepts(offer="o", n=1, seed="s", revision="punch up the hook")
+
+    prompt = _sent_prompt(client)
+    assert "REVISION DIRECTIVE" in prompt
+    assert "punch up the hook" in prompt
+
+
+async def test_write_script_revision_appended_to_prompt() -> None:
+    client = _make_fake_client(_make_response([_make_text_block("HOOK\nBODY\nCTA")]))
+    adapter = AnthropicLLMAdapter(client=client)
+
+    concept = {"id": "c", "offer": "o", "hook": "h", "angle": "problem",
+               "hook_style": "problem", "format": "talking_head"}
+    await adapter.write_script(
+        concept=concept, creator_ref="cr", platform="tiktok", revision="tighten CTA"
+    )
+
+    prompt = _sent_prompt(client)
+    assert "REVISION DIRECTIVE" in prompt
+    assert "tighten CTA" in prompt
+
+
+async def test_run_stage_agent_approves_does_single_tool_call() -> None:
+    client = _make_fake_client(_make_response([_make_text_block("APPROVE")]))
+    adapter = AnthropicLLMAdapter(client=client)
+
+    calls: list[dict[str, Any]] = []
+
+    async def run_tool(**inputs: Any) -> Any:
+        calls.append(inputs)
+        return ["draft"]
+
+    result = await adapter.run_stage_agent(
+        stage="concepts",
+        allowed_tools=("generate_concepts",),
+        run_tool=run_tool,
+        inputs={"offer": "o", "n": 1, "seed": "s"},
+    )
+
+    assert result == ["draft"]
+    assert len(calls) == 1
+    assert "revision" not in calls[0]
+
+
+async def test_run_stage_agent_refines_does_two_tool_calls() -> None:
+    client = _make_fake_client(_make_response([_make_text_block("Strengthen the hook.")]))
+    adapter = AnthropicLLMAdapter(client=client, model="claude-opus-4-8")
+
+    calls: list[dict[str, Any]] = []
+
+    async def run_tool(**inputs: Any) -> Any:
+        calls.append(inputs)
+        return f"draft/{inputs.get('revision', '')}"
+
+    result = await adapter.run_stage_agent(
+        stage="scripts",
+        allowed_tools=("write_script",),
+        run_tool=run_tool,
+        inputs={"concept": {"id": "c"}, "creator_ref": "cr", "platform": "tiktok"},
+        target_model="claude-opus-4-8",
+    )
+
+    assert len(calls) == 2
+    assert calls[1]["revision"] == "Strengthen the hook."
+    assert result == "draft/Strengthen the hook."
+
+
+async def test_agent_critique_refusal_returns_none() -> None:
+    response = _make_response([_make_text_block("whatever")], stop_reason="refusal")
+    adapter = AnthropicLLMAdapter(client=_make_fake_client(response))
+
+    assert await adapter._agent_critique("concepts", ["d"], model="m") is None
+
+
+async def test_agent_critique_no_text_block_returns_none() -> None:
+    response = _make_response([_make_thinking_block()])
+    adapter = AnthropicLLMAdapter(client=_make_fake_client(response))
+
+    assert await adapter._agent_critique("concepts", ["d"], model="m") is None
+
+
+async def test_agent_critique_empty_directive_returns_none() -> None:
+    adapter = AnthropicLLMAdapter(client=_make_fake_client(_make_response([_make_text_block("  ")])))
+
+    assert await adapter._agent_critique("concepts", ["d"], model="m") is None

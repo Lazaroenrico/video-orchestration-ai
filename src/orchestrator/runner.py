@@ -7,6 +7,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Optional
 
+from orchestrator.agent_catalog import AgentCatalog, default_agent_catalog
 from orchestrator.feedback_store import load_latest_feedback
 from orchestrator.graph.builder import build_graph
 from orchestrator.graph.checkpoint import open_checkpointer
@@ -21,11 +22,14 @@ def _build_config(
     run_id: str,
     platform: str,
     feedback_store: Optional[str | Path] = None,
+    agent_catalog: Optional[AgentCatalog] = None,
 ) -> dict[str, Any]:
     adapter = build_adapter_from_providers(providers, pipeline)
+    catalog = agent_catalog or default_agent_catalog()
     configurable: dict[str, Any] = {
         "adapter": adapter,
         "pipeline": pipeline,
+        "agent_catalog": catalog,
         "run": {"platform": platform},
         "thread_id": run_id,
     }
@@ -48,9 +52,10 @@ async def run_pipeline(
     offer: str = "demo offer",
     platform: str = "tiktok",
     feedback_store: Optional[str | Path] = None,
+    agent_catalog: Optional[AgentCatalog] = None,
 ) -> tuple[str, dict[str, Any]]:
     run_id = run_id or f"run-{uuid.uuid4().hex[:8]}"
-    cfg = _build_config(pipeline, providers, run_id, platform, feedback_store)
+    cfg = _build_config(pipeline, providers, run_id, platform, feedback_store, agent_catalog)
     cfg.update(run_trace_config(run_id, offer=offer, platform=platform, batch=batch))
     # Step 10 -> Step 1: lê o feedback do ciclo anterior (se houver) e o injeta no
     # estado inicial, fechando o loop (concepts pode usar isso como viés no futuro).
@@ -77,6 +82,7 @@ async def run_cycles(
     offer: str = "demo offer",
     platform: str = "tiktok",
     run_id_prefix: Optional[str] = None,
+    agent_catalog: Optional[AgentCatalog] = None,
 ) -> list[tuple[str, dict[str, Any]]]:
     """Roda *cycles* runs encadeados, fechando o loop a cada iteração.
 
@@ -95,6 +101,7 @@ async def run_cycles(
         rid, out = await run_pipeline(
             pipeline, providers, db_path=db_path, run_id=f"{prefix}-c{i}",
             batch=batch, offer=offer, platform=platform, feedback_store=feedback_store,
+            agent_catalog=agent_catalog,
         )
         results.append((rid, out))
     return results
@@ -108,8 +115,9 @@ async def resume_pipeline(
     run_id: str,
     platform: str = "tiktok",
     feedback_store: Optional[str | Path] = None,
+    agent_catalog: Optional[AgentCatalog] = None,
 ) -> tuple[str, dict[str, Any]]:
-    cfg = _build_config(pipeline, providers, run_id, platform, feedback_store)
+    cfg = _build_config(pipeline, providers, run_id, platform, feedback_store, agent_catalog)
     cfg.update(run_trace_config(run_id, platform=platform))
     async with open_checkpointer(db_path) as cp:
         app = build_graph(pipeline, checkpointer=cp)

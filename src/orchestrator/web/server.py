@@ -32,6 +32,7 @@ from orchestrator.config import (
     default_media_path,
     default_prompt_store_path,
     default_videos_path,
+    load_agent_catalog,
     load_pipeline,
     load_providers,
 )
@@ -582,6 +583,7 @@ async def _execute_run(
     try:
         pipeline = load_pipeline(config_dir)
         providers = load_providers(config_dir)
+        agent_catalog = load_agent_catalog(config_dir)
         adapter = build_adapter_from_providers(providers, pipeline)
         run_state["adapter"] = adapter
 
@@ -589,6 +591,7 @@ async def _execute_run(
             "configurable": {
                 "adapter": adapter,
                 "pipeline": pipeline,
+                "agent_catalog": agent_catalog,
                 "run": {
                     "platform": platform,
                     "creator_prompt": creator_prompt,
@@ -929,9 +932,10 @@ async def creators_history() -> dict[str, Any]:
 async def integrations_index(config_dir: Optional[str] = None) -> dict[str, Any]:
     """Mapa stage → adapter lido de providers.yaml (fonte da tela Integrations Hub)."""
     providers = load_providers(config_dir)
+    agent_catalog = load_agent_catalog(config_dir)
     adapters = (providers or {}).get("adapters", {}) or {}
     stages = {str(k): str(v) for k, v in adapters.items()}
-    return {"stages": stages}
+    return {"stages": stages, "agents": agent_catalog.as_dict()}
 
 
 @app.get("/api/stream/{run_id}")

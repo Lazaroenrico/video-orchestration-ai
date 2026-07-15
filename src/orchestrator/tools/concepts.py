@@ -21,6 +21,7 @@ async def generate_concepts_tool(
     n: int,
     seed: str,
     bias: Optional[list[str]] = None,
+    revision: Optional[str] = None,
 ) -> list[dict[str, Any]]:
     add_trace_metadata(
         tool_name="generate_concepts",
@@ -28,5 +29,7 @@ async def generate_concepts_tool(
         stage="concepts",
         run_id=ctx.run_id,
     )
-    concepts = await ctx.adapter.generate_concepts(offer=offer, n=n, seed=seed, bias=bias)
+    concepts = await ctx.adapter.generate_concepts(
+        offer=offer, n=n, seed=seed, bias=bias, revision=revision,
+    )
     return require_dict_list(concepts, tool_name="generate_concepts_tool")

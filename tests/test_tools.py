@@ -84,7 +84,13 @@ async def test_generate_concepts_tool_delegates_and_validates_output():
     assert adapter.calls == [
         (
             "generate_concepts",
-            {"offer": "serum", "n": 1, "seed": "run-tools", "bias": ["problem"]},
+            {
+                "offer": "serum",
+                "n": 1,
+                "seed": "run-tools",
+                "bias": ["problem"],
+                "revision": None,
+            },
         )
     ]
 
@@ -105,7 +111,12 @@ async def test_write_script_tool_delegates_and_requires_non_empty_script():
     assert adapter.calls == [
         (
             "write_script",
-            {"concept": concept, "creator_ref": "creator-0", "platform": "tiktok"},
+            {
+                "concept": concept,
+                "creator_ref": "creator-0",
+                "platform": "tiktok",
+                "revision": None,
+            },
         )
     ]
 
@@ -328,6 +339,78 @@ def test_tool_registry_lists_static_tool_specs():
     assert specs["generate_concepts"].role == "llm"
     assert specs["generate_clip"].role == "video"
     assert specs["upscale_video"].stage == "upscale"
+
+
+def test_tool_registry_specs_are_agent_routing_contract():
+    from orchestrator.tools.registry import TOOL_REGISTRY
+
+    names = [spec.name for spec in TOOL_REGISTRY]
+    assert len(names) == len(set(names))
+
+    for spec in TOOL_REGISTRY:
+        assert spec.name
+        assert spec.role
+        assert spec.stage
+        assert spec.description.strip()
+        assert spec.function_path.startswith("orchestrator.tools.")
+        assert spec.function_path.endswith(f"{spec.name}_tool")
+        assert spec.target_model is None
+        assert spec.target_agent is None
+        assert spec.agent_enabled is False
+        assert isinstance(spec.capabilities, tuple)
+
+
+def test_tool_registry_resolves_functions_and_matches_trace_metadata():
+    from orchestrator.tools.registry import TOOL_REGISTRY, resolve_tool_function
+
+    for spec in TOOL_REGISTRY:
+        fn = resolve_tool_function(spec)
+        assert getattr(fn, "__trace_name__") == f"tool.{spec.name}"
+        assert getattr(fn, "__trace_run_type__") == "tool"
+
+
+def test_tool_registry_rejects_specs_without_function_path():
+    from orchestrator.tools.registry import ToolSpec, resolve_tool_function
+
+    legacy_spec = ToolSpec(
+        name="legacy",
+        description="Legacy four-field construction remains import-compatible.",
+        role="llm",
+        stage="concepts",
+    )
+
+    with pytest.raises(ValueError, match="legacy"):
+        resolve_tool_function(legacy_spec)
+
+
+def test_tool_registry_lookup_by_name_and_stage():
+    from orchestrator.tools.registry import get_tool_spec, tool_specs_for_stage
+
+    assert get_tool_spec("generate_concepts").stage == "concepts"
+    assert [spec.name for spec in tool_specs_for_stage("concepts")] == [
+        "generate_concepts"
+    ]
+    assert [spec.name for spec in tool_specs_for_stage("scripts")] == ["write_script"]
+    assert tool_specs_for_stage("unknown") == ()
+
+    with pytest.raises(KeyError, match="unknown_tool"):
+        get_tool_spec("unknown_tool")
+
+
+def test_tool_registry_covers_tool_functions_imported_by_stage_nodes():
+    from orchestrator.nodes import stages
+    from orchestrator.tools.registry import TOOL_REGISTRY, resolve_tool_function
+
+    registered = {resolve_tool_function(spec) for spec in TOOL_REGISTRY}
+    stage_imports = {
+        value
+        for name, value in vars(stages).items()
+        if name.endswith("_tool")
+        and callable(value)
+        and getattr(value, "__module__", "").startswith("orchestrator.tools.")
+    }
+
+    assert stage_imports == registered
 
 
 def test_tools_have_trace_markers():

@@ -22,7 +22,8 @@ from typing import Any, Optional
 from anthropic import AsyncAnthropic
 
 from orchestrator import stream_bus
-from orchestrator.tracing import record_llm_usage, traced
+from orchestrator.adapters.base import StageToolRunner
+from orchestrator.tracing import add_trace_metadata, record_llm_usage, traced
 
 _HOOK_STYLES = ["problem", "curiosity", "bold_claim", "emotional", "social_proof"]
 _FORMATS = ["talking_head", "demo", "reaction"]
@@ -92,12 +93,16 @@ class AnthropicLLMAdapter:
         n: int,
         seed: str,
         bias: Optional[list[str]] = None,
+        revision: Optional[str] = None,
     ) -> list[dict[str, Any]]:
         """Gera ``n`` conceitos de UGC via Claude com Structured Outputs.
 
         ``bias`` (opcional) — lista de hook_styles vencedores do ciclo anterior
         (Step 10 → 1). Se não-vazio, o prompt orienta ~60 % dos conceitos para
         esses estilos mantendo spread nos demais.
+
+        ``revision`` (opcional, Fase 7) — diretiva de refino do agent; quando setada,
+        é anexada ao prompt para regenerar o batch atendendo à crítica.
         """
         valid_bias = [b for b in (bias or []) if b in _HOOK_STYLES]
 
@@ -127,6 +132,11 @@ class AnthropicLLMAdapter:
             f"- format: one of {_FORMATS}\n\n"
             f"Return exactly {n} items in the 'concepts' array."
         )
+
+        if revision:
+            user_prompt += (
+                f"\n\nREVISION DIRECTIVE (address this in the regenerated concepts): {revision}"
+            )
 
         api_kwargs: dict[str, Any] = dict(
             model=self.model,
@@ -186,10 +196,13 @@ class AnthropicLLMAdapter:
         concept: dict[str, Any],
         creator_ref: str,
         platform: str,
+        revision: Optional[str] = None,
     ) -> str:
         """Escreve o script de UGC para um conceito, calibrado por plataforma.
 
         Plataformas como TikTok pedem pacing rápido; outras aceitam ritmo médio.
+
+        ``revision`` (opcional, Fase 7) — diretiva de refino do agent anexada ao prompt.
         """
         platform_lower = platform.lower()
         if platform_lower == "tiktok":
@@ -221,6 +234,11 @@ class AnthropicLLMAdapter:
             f"  Format: {concept.get('format', '')}\n\n"
             "Structure the script with clearly labeled sections: HOOK, BODY, CTA."
         )
+
+        if revision:
+            user_prompt += (
+                f"\n\nREVISION DIRECTIVE (address this in the rewritten script): {revision}"
+            )
 
         api_kwargs = dict(
             model=self.model,
@@ -258,6 +276,69 @@ class AnthropicLLMAdapter:
             )
 
         return text_block.text
+
+    # ------------------------------------------------------------------ #
+    # Fase 7 — execução agentic (concepts/scripts) pelo AI gateway         #
+    # ------------------------------------------------------------------ #
+
+    async def run_stage_agent(
+        self,
+        *,
+        stage: str,
+        allowed_tools: tuple[str, ...],
+        run_tool: StageToolRunner,
+        inputs: dict[str, Any],
+        target_model: Optional[str] = None,
+    ) -> Any:
+        """Loop *critique -> refine* bounded, com o modelo servido pelo AI gateway.
+
+        Gera o rascunho pela typed tool (``run_tool``), pede ao modelo uma crítica
+        acionável e, se houver, regenera uma vez com a diretiva. O agent só toca o
+        domínio via ``run_tool`` (fronteira D29).
+        """
+        draft = await run_tool(**inputs)
+        revision = await self._agent_critique(stage, draft, model=target_model or self.model)
+        add_trace_metadata(
+            agent_backend="anthropic_gateway",
+            stage=stage,
+            allowed_tools=list(allowed_tools),
+            target_model=target_model,
+            agent_revised=bool(revision),
+        )
+        if not revision:
+            return draft
+        return await run_tool(**{**inputs, "revision": revision})
+
+    @traced("adapter.anthropic.agent_critique", run_type="llm", provider="anthropic")
+    async def _agent_critique(self, stage: str, draft: Any, *, model: str) -> Optional[str]:
+        """Pede ao modelo uma diretiva de refino do rascunho (ou aprovação).
+
+        Retorna ``None`` quando o modelo aprova (responde ``APPROVE``); caso contrário,
+        a diretiva de uma linha. Nunca levanta — falhas de leitura viram aprovação
+        (o rascunho já é válido e passou pelos validators da tool).
+        """
+        critique_prompt = (
+            f"You are reviewing the draft output of the '{stage}' stage of a UGC ad "
+            "pipeline. If the draft is already strong, reply with exactly: APPROVE\n"
+            "Otherwise reply with a single actionable one-line revision directive "
+            "(no preamble). Draft:\n\n"
+            f"{draft!r}"
+        )
+        response = await self._client.messages.create(
+            model=model,
+            max_tokens=400,
+            messages=[{"role": "user", "content": critique_prompt}],
+        )
+        record_llm_usage(response.usage, model)
+        if response.stop_reason == "refusal":
+            return None
+        text_block = next((blk for blk in response.content if blk.type == "text"), None)
+        if text_block is None:
+            return None
+        directive = text_block.text.strip()
+        if not directive or directive.upper().startswith("APPROVE"):
+            return None
+        return directive
 
 
 # --------------------------------------------------------------------------- #

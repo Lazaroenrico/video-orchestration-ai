@@ -356,3 +356,85 @@ Datas absolutas. Apendar novas decisões ao final.
   `editing`, com checkbox de inclusão e submit "Save & Continue".
 - **Consequência:** o creator só roda depois da revisão humana de copy. Scripts deixam
   de depender de uma persona específica; a persona real é atribuída depois no fan-out.
+
+## 2026-07-14
+
+### D29 — Migração incremental para agents executions sobre a camada de tools
+- **Contexto:** o motor atual usa LangGraph como runtime de orquestração, com fan-out,
+  conditional edges, interrupts humanos, checkpointer e resume. A base já foi preparada
+  com a camada `orchestrator.tools`: nodes chamam tools tipadas, as tools validam shape
+  e delegam para o `CompositeAdapter`, que resolve adapter por papel. Migrar tudo de uma
+  vez para um runtime agentic colocaria em risco resumibilidade, determinismo, UI/SSE,
+  testes offline e o contrato de dry-run.
+- **Decisão:** a migração para agents executions será incremental. LangGraph permanece
+  como orquestrador canônico do fluxo no primeiro ciclo da migração. A camada `tools/`
+  vira a fronteira estável para agents: qualquer agent futuro deve chamar tools tipadas,
+  não adapters diretamente. O `CompositeAdapter` continua sendo a fonte de roteamento
+  provider/adapters por papel. O próximo passo arquitetural é introduzir um catálogo de
+  agents/models por stage/tool, sem alterar a topologia do grafo nem quebrar `config-mock`.
+- **Estratégia:** primeiro consolidar `TOOL_REGISTRY` como contrato público interno
+  (`name`, `role`, `stage`, descrição, `function_path`, capabilities e modelo/agente alvo
+  quando existir). O catálogo configurável vive em `agents.yaml`; quando ausente, todos os
+  stages ficam em `executor: tool` por compatibilidade. Depois criar uma camada fina de
+  agent execution que possa ser ativada por configuração para stages específicos,
+  começando por LLM-only (`concepts` e `scripts`). Stages de mídia (`creator`, `video`,
+  `assembly`, `upscale`) continuam via adapters até haver contrato agentic testado para
+  cada um.
+- **Consequência:** a migração pode ser feita stage por stage, mantendo testes
+  determinísticos, cassettes offline, dry-run sem custo, tracing por node/tool/adapter e
+  compatibilidade com CLI/web. O runtime agentic não pode bypassar validação de tools,
+  checkpointer LangGraph, gates humanos, persistência de mídia ou regras de shape dos
+  adapters. A primeira execução runtime fica restrita a `concepts` e `scripts`; stages de
+  mídia seguem bloqueados para `agent` até haver contrato específico.
+- **Fora de escopo:** substituir LangGraph por completo, remover `CompositeAdapter`,
+  mudar contratos públicos da CLI/web, ou acionar agents live por padrão. Essas mudanças
+  exigem ADR própria depois que a camada agentic incremental estiver validada.
+
+### D30 — R2 + DB relacional como arquitetura canônica de mídia
+- **Contexto:** `media_store.py` já baixa URLs voláteis de providers para disco local
+  (`ORCH_MEDIA`/`ORCH_VIDEOS`) e reescreve URIs para `/media/...` e `/videos/...`. Isso
+  preserva o dry-run e a UI local, mas não é uma fonte canônica adequada para produção:
+  bytes grandes de imagem, áudio e vídeo precisam sair do DB e do filesystem local,
+  enquanto metadados, estado, auditoria, custo, retenção e relações precisam de um DB
+  relacional.
+- **Decisão:** em produção, os bytes de mídia serão persistidos em Cloudflare R2 via API
+  S3-compatible. O DB relacional será a fonte da verdade para artifacts e ponteiros,
+  começando SQLite-first para preservar o modo offline atual. O R2 guarda apenas bytes; o
+  DB guarda `storage_key`, tipo, tamanho, hash, proveniência, retenção e relações com
+  run/item/creator. URLs assinadas serão geradas sob demanda para UI, downloads e
+  handoff para providers externos; elas não serão persistidas como valor canônico.
+- **Abstração:** a camada atual de persistência de mídia deve evoluir para um contrato
+  contínuo com duas implementações: `LocalMediaStorage` para mock/dry-run/dev/testes e
+  `R2MediaStorage` para live. LangGraph, tools e adapters continuam recebendo `Artifact`
+  e metadados, sem conhecer detalhes de R2. `config-mock` continua sem rede e sem custo.
+- **Retenção:** creator assets, clips aprovados e vídeos finais montados são retidos.
+  Clips reprovados são short-lived e expiram após **3 dias**. Tentativas intermediárias
+  são short-lived e expiram após **2 dias**. A limpeza deve operar pelos metadados do DB,
+  não por varredura cega do bucket.
+- **Consequência:** a arquitetura separa corretamente bytes pesados de estado
+  transacional, mantém compatibilidade com a D29 (mídia ainda adapter-driven), reduz
+  dependência de URLs temporárias dos providers e prepara o caminho para signed URLs,
+  auditoria e políticas de expiração sem quebrar o fluxo offline existente.
+
+## 2026-07-15
+
+### D31 — Execução agentic real via adapter LLM gateway-nativo (Fase 7 do D29)
+- **Contexto:** a Fase 7 do D29 (ADR `docs/ADR-D31-agentic-execution.md`) introduz o loop
+  agentic *critique → refine* bounded em `concepts`/`scripts`, com o brain no adapter LLM
+  via `AgentPort.run_stage_agent` e `revision` como canal genérico de refino. O backend
+  real precisava alcançar o modelo **pelo AI gateway**, sem amarrar o motor ao SDK
+  `anthropic`.
+- **Decisão:** o adapter LLM real default (`vercel_gateway_llm`) passa a ser
+  **gateway-nativo**: `GatewayLLMAdapter` fala com o Vercel AI Gateway por `httpx` puro
+  contra `POST {base}/chat/completions` (OpenAI-compatible, Structured Outputs via
+  `response_format: json_schema`), implementando `LLMPort` + `AgentPort`. Sem importar o
+  SDK `anthropic`. O `AnthropicLLMAdapter` (SDK direto ou SDK apontado ao gateway) fica
+  registrado como **legado opt-in** (`anthropic`, `anthropic_sdk_gateway`).
+- **Fronteiras (herdadas do D29):** o agent só toca o domínio via `run_tool` (typed tool
+  validada); o loop é bounded a um refinamento; agent execution só em `concepts`/`scripts`;
+  a crítica nunca levanta (falha → aprova o rascunho já validado). O mock permanece
+  determinístico/offline (`config-mock` segue `executor: tool`, custo zero).
+- **Consequência:** o backend LLM live roda 100% pelo AI gateway, desacoplado do SDK
+  Anthropic, cobreto offline via `httpx.MockTransport` (cliente injetável). Streaming de
+  token do LLM fica fora desta fase (não-streaming). `config/providers.yaml` não muda —
+  `llm: vercel_gateway_llm` passa a resolver o adapter gateway-nativo.

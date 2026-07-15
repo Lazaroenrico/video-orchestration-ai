@@ -25,6 +25,7 @@ from orchestrator.adapters.base import VoiceProfile, assign_voice_profile
 from orchestrator.config import default_media_path, default_videos_path
 from orchestrator.graph.state import Artifact, Item, new_item
 from orchestrator.nodes.base import as_item, get_pipeline
+from orchestrator.stage_executor import StageExecutionError, execute_stage_tool
 from orchestrator.tools.assembly import assemble_video_tool, upscale_video_tool
 from orchestrator.tools.base import tool_context_from_config
 from orchestrator.tools.concepts import generate_concepts_tool
@@ -315,8 +316,12 @@ async def node_roster(state: dict[str, Any], config: RunnableConfig) -> dict[str
         # Perfil concreto por índice: garante paridade imagem↔voz e variedade de
         # gênero no roster mesmo quando o briefing não cita gênero.
         profile = assign_voice_profile(creator_prompt, None, index=i)
-        creator = await build_creator_tool(
+        creator = await execute_stage_tool(
+            config,
             tool_ctx,
+            catalog_stage="roster",
+            tool_name="build_creator",
+            tool_fn=build_creator_tool,
             index=i, system_prompt=creator_prompt, voice_profile=profile,
         )
         # Baixa e persiste os bytes (imagem/voz) e reescreve as URIs para caminhos
@@ -402,8 +407,16 @@ async def node_concepts(state: dict[str, Any], config: RunnableConfig) -> dict[s
     # Step 10 -> 1: vés pelos hooks vencedores do ciclo anterior (fecha o loop).
     bias = run_cfg.get("prior_winning_styles") or None
     add_trace_metadata(step=1, stage="concepts", batch_size=n, offer=offer)
-    concepts = await generate_concepts_tool(
-        tool_ctx, offer=offer, n=n, seed=seed, bias=bias,
+    concepts = await execute_stage_tool(
+        config,
+        tool_ctx,
+        catalog_stage="concepts",
+        tool_name="generate_concepts",
+        tool_fn=generate_concepts_tool,
+        offer=offer,
+        n=n,
+        seed=seed,
+        bias=bias,
     )
     return {"concepts": concepts}
 
@@ -423,8 +436,12 @@ async def node_scripts(state: dict[str, Any], config: RunnableConfig) -> dict[st
     add_trace_metadata(step=2, stage="scripts", batch_size=len(concepts), platform=platform)
 
     async def _write(concept: dict[str, Any]) -> dict[str, Any]:
-        script = await write_script_tool(
+        script = await execute_stage_tool(
+            config,
             tool_ctx,
+            catalog_stage="scripts",
+            tool_name="write_script",
+            tool_fn=write_script_tool,
             concept=concept, creator_ref="creator", platform=platform,
         )
         return {**concept, "script": script}
@@ -540,8 +557,12 @@ def make_gen_node(tier: str):
             step=4, stage="talking_head", item_id=item.id, tier=tier,
             attempt=item.attempts,
         )
-        clip = await generate_clip_tool(
+        clip = await execute_stage_tool(
+            config,
             tool_ctx,
+            catalog_stage="video",
+            tool_name="generate_clip",
+            tool_fn=generate_clip_tool,
             item_id=item.id, tier=tier, seconds=seconds, attempt=item.attempts,
             system_prompt=_video_prompt(
                 item, run_cfg.get("video_prompt"), stage="talking-head"
@@ -584,8 +605,12 @@ async def node_product_demo(state: Any, config: RunnableConfig) -> dict[str, Any
     run_cfg = config["configurable"].get("run", {})
     seconds = int(pipeline.get("clip", {}).get("duration_seconds", 8))
     add_trace_metadata(step=5, stage="product_demo", item_id=item.id, attempt=item.attempts)
-    demo = await generate_clip_tool(
+    demo = await execute_stage_tool(
+        config,
         tool_ctx,
+        catalog_stage="video",
+        tool_name="generate_clip",
+        tool_fn=generate_clip_tool,
         item_id=f"{item.id}:demo", tier="ltx", seconds=seconds, attempt=item.attempts,
         system_prompt=_video_prompt(item, run_cfg.get("video_prompt"), stage="product-demo"),
         reference_image_uri=item.creator_image_uri,
@@ -618,7 +643,15 @@ async def node_qc(state: Any, config: RunnableConfig) -> dict[str, Any]:
     tool_ctx = tool_context_from_config(config)
     pipeline = get_pipeline(config)
     fail_rate = float(pipeline.get("qc", {}).get("fail_rate", 0.34))
-    qc = await qc_check_tool(tool_ctx, item=item, fail_rate=fail_rate)
+    qc = await execute_stage_tool(
+        config,
+        tool_ctx,
+        catalog_stage="qc",
+        tool_name="qc_check",
+        tool_fn=qc_check_tool,
+        item=item,
+        fail_rate=fail_rate,
+    )
     add_trace_metadata(
         step=7, stage="qc", item_id=item.id, attempt=item.attempts,
         qc_score=qc.score, qc_passed=qc.passed,
@@ -657,9 +690,15 @@ async def node_assembly(state: Any, config: RunnableConfig) -> dict[str, Any]:
 
     reason: Optional[str] = None
     try:
-        art = await assemble_video_tool(
+        art = await execute_stage_tool(
+            config,
             tool_ctx, item=item, platform=platform, system_prompt=system_prompt,
+            catalog_stage="assembly",
+            tool_name="assemble_video",
+            tool_fn=assemble_video_tool,
         )
+    except StageExecutionError:  # erro de config, não falha do assembler → estoura alto
+        raise
     except Exception as exc:  # noqa: BLE001 — assembly best-effort; falha vira erro no item
         art = None
         reason = str(exc)
@@ -699,7 +738,16 @@ async def node_upscale(state: Any, config: RunnableConfig) -> dict[str, Any]:
     tool_ctx = tool_context_from_config(config)
     add_trace_metadata(step=8, stage="upscale", item_id=item.id)
     try:
-        upscaled_uri = await upscale_video_tool(tool_ctx, media_uri=item.assembled.uri)
+        upscaled_uri = await execute_stage_tool(
+            config,
+            tool_ctx,
+            catalog_stage="upscale",
+            tool_name="upscale_video",
+            tool_fn=upscale_video_tool,
+            media_uri=item.assembled.uri,
+        )
+    except StageExecutionError:  # erro de config, não falha do upscaler → estoura alto
+        raise
     except Exception as exc:  # noqa: BLE001 — upscale best-effort; preserva o montado
         add_trace_metadata(step=8, stage="upscale_failed", item_id=item.id, error=str(exc))
         return {}

@@ -42,6 +42,111 @@ cobertura 100%; `rtk proxy env LANGSMITH_TRACING=false LANGSMITH_API_KEY=
 .venv/bin/orchestrator run --batch 1 --offer "serum X" --config-dir config-mock`
 → dry-run mock aprovado (1 produzido, 1 aprovado).
 
+## Caminho A — Fase 2 registry agentic (2026-07-14)
+
+Objetivo: transformar `TOOL_REGISTRY` de lista estatica minima em contrato publico
+interno para roteamento agentic futuro, ainda sem ligar agent execution em runtime.
+
+### Red → Green (TDD)
+- RED: `tests/test_tools.py` passou a exigir `function_path`, `target_model`,
+  `target_agent`, `agent_enabled`, `capabilities`, helpers de lookup/resolucao e uma
+  prova de que as tools importadas por `nodes/stages.py` estao registradas.
+- GREEN:
+  - `ToolSpec` ganhou os campos agentic opcionais com defaults compativeis.
+  - Cada spec declara `function_path` importavel e capabilities declarativas.
+  - `registry.py` expoe `get_tool_spec`, `tool_specs_for_stage` e
+    `resolve_tool_function`.
+  - Os testes validam que `function_path` resolve para a funcao real e que o trace marker
+    continua `tool.{name}`.
+
+### Falha investigada nesta fase
+- Sintoma: os testes novos falharam com `AttributeError: 'ToolSpec' object has no
+  attribute 'function_path'` e `ImportError` para os helpers do registry.
+  - Causa raiz: o registry ainda era apenas metadata documental; nao havia caminho
+    importavel nem API de consulta para agentes ou catalogo futuro.
+  - Correção: expandir o contrato do `ToolSpec`, preencher paths/capabilities das tools
+    reais e adicionar helpers de lookup/resolucao sem mudar os nodes.
+  - Verificação: `rtk proxy .venv/bin/python -m pytest --no-cov tests/test_tools.py -q`
+    → 25 passed; `rtk proxy .venv/bin/python -m pytest` → 601 passed, 2 skipped,
+    cobertura 100%.
+
+## Caminho A — Fase 3 catálogo agents/models (2026-07-14)
+
+Objetivo: adicionar configuração declarativa de executor/model por stage/tool sem mudar
+topologia LangGraph e sem ligar agents em runtime.
+
+### Red → Green (TDD)
+- RED: `tests/test_agent_catalog.py` exigiu `load_agent_catalog`, default compatível
+  quando `agents.yaml` falta, merge de overrides, validação de stage/tool/executor,
+  serialização estável, arquivos oficiais em `config/` e `config-mock/`, e injeção do
+  catálogo no runner/CLI/web. `tests/test_web_spa.py` passou a exigir `agents` em
+  `/api/integrations` preservando `stages`.
+- GREEN:
+  - `orchestrator.agent_catalog` define `AgentCatalog`, `StageExecutionSpec`,
+    `default_agent_catalog()` e builder validado a partir de YAML.
+  - `config/agents.yaml` e `config-mock/agents.yaml` declaram todos os stages em
+    `executor: tool`, com `agent_enabled: false`.
+  - `load_agent_catalog` cai para default quando o arquivo falta, mantendo config-dirs
+    antigos compatíveis.
+  - Runner, CLI e web passam `agent_catalog` dentro de `RunnableConfig.configurable`;
+    nodes ainda não usam esse dado.
+  - `/api/integrations` agora retorna `{"stages": ..., "agents": ...}`.
+
+### Falhas investigadas nesta fase
+- Sintoma: `load_agent_catalog` não existia; depois `config/agents.yaml` e
+  `config-mock/agents.yaml` também não existiam.
+  - Causa raiz: a Fase 2 tinha apenas o registry; a configuração declarativa ainda não
+    havia sido introduzida.
+  - Correção: criar o módulo/loader e os dois arquivos oficiais.
+- Sintoma: `stages: []` passava como catálogo válido.
+  - Causa raiz: `data.get("stages") or {}` mascarava lista vazia inválida como mapping
+    vazio.
+  - Correção: tratar apenas campo ausente/null como default; tipos inválidos levantam
+    `ValueError`.
+- Sintoma: um parametrized quebrou na coleta com 3 valores para 2 nomes.
+  - Causa raiz: literal YAML separado por vírgula no teste.
+  - Correção: concatenar a string corretamente.
+- Verificação: fatia focada `tests/test_agent_catalog.py tests/test_web_spa.py
+  tests/test_cli.py tests/test_web_endpoints.py` → 78 passed; suíte completa
+  `rtk proxy .venv/bin/python -m pytest` → 619 passed, 2 skipped, cobertura 100%.
+
+## Caminho A — Fases 4-6 executor agentic opt-in (2026-07-14)
+
+Objetivo: concluir a trilha D29 com um executor configuravel `tool`/`agent`, piloto
+offline em `concepts`/`scripts`, e decisao operacional para manter midia fora de agent
+execution.
+
+### Red → Green (TDD)
+- RED: `tests/test_stage_executor.py` exigiu `orchestrator.stage_executor`, modo `tool`,
+  modo `agent`, validacao de tools permitidas, erro para stage ausente e pipeline mock
+  completa com `concepts`/`scripts` em agentic opt-in. `tests/test_agent_catalog.py`
+  passou a exigir que `agent_enabled` e `executor` sejam consistentes e que stages de
+  midia nao possam usar `agent`.
+- GREEN:
+  - `execute_stage_tool` passou a ser a fronteira entre nodes e tools.
+  - Todos os nodes que chamam tools passam pelo executor.
+  - Modo `tool` chama a tool diretamente; modo `agent` adiciona trace
+    `agent.stage_executor`, valida catalogo e chama a mesma tool, mantendo validators.
+  - `concepts` e `scripts` aceitam `executor: agent` + `agent_enabled: true`.
+  - `video`, `roster`, `qc`, `assembly` e `upscale` ficam bloqueados para `agent`.
+
+### Falhas investigadas nesta fase
+- Sintoma: testes novos falharam com `ModuleNotFoundError` para
+  `orchestrator.stage_executor`.
+  - Causa raiz: a Fase 3 só carregava catálogo; não havia executor runtime.
+  - Correção: criar `stage_executor.py` e integrar os nodes.
+- Sintoma: a suíte completa passou funcionalmente, mas quebrou cobertura em
+  `stage_executor.py`.
+  - Causa raiz: o ramo de erro para stage ausente no catálogo não estava coberto.
+  - Correção: adicionar regressão explícita para `StageExecutionError`.
+- Sintoma: o catálogo permitia configurações ambíguas e mídia agentic.
+  - Causa raiz: `executor` e `agent_enabled` eram aceitos independentemente; não havia
+    allowlist dos stages LLM-only.
+  - Correção: exigir `executor: agent` junto de `agent_enabled: true` e limitar agentic a
+    `concepts`/`scripts`.
+- Verificação: `rtk proxy .venv/bin/python -m pytest` → 629 passed, 2 skipped, cobertura
+  100%; `rtk proxy .venv/bin/python -m compileall -q src tests` → OK.
+
 Estado em **2026-07-06**. Suíte: **537 passando, 2 skips** (testes `--live` opt-in,
 pulados sem `JUDGE_GATEWAY_URL`) + 2 warnings conhecidos/benignos (LangSmith
 deprecation em import; LangGraph resume parcial — ver falha #5).
