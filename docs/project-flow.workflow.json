@@ -1,0 +1,376 @@
+{
+  "schema_version": 1,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "Project Flow Atual do UGC Orchestrator",
+    "subtitle": "persona -> concepts -> scripts -> creator -> per-item media -> QC -> assembly -> feedback",
+    "output": "docs/project-flow.html",
+    "viewBox": [720, 1640]
+  },
+  "lanes": [
+    { "id": "ui", "label": "Operador / CLI / Web" },
+    { "id": "agents", "label": "Batch agents + tools" },
+    { "id": "human", "label": "Copy review gate" },
+    { "id": "creator", "label": "Creator reutilizavel" },
+    { "id": "approval", "label": "Creator approval gate" },
+    { "id": "dispatch", "label": "Fan-out paralelo" },
+    { "id": "generation", "label": "Geracao de midia" },
+    { "id": "quality", "label": "QC gate" },
+    { "id": "exceptions", "label": "Retry / descarte", "variant": "exception" },
+    { "id": "assembly_lane", "label": "Montagem final" },
+    { "id": "upscale_lane", "label": "Upscale do video" },
+    { "id": "state", "label": "Estado + feedback" }
+  ],
+  "phases": [
+    { "id": "intake", "label": "Intake", "fromCol": 0, "toCol": 1 },
+    { "id": "copy", "label": "Persona + copy", "fromCol": 1, "toCol": 5, "variant": "emphasis" },
+    { "id": "production", "label": "Production", "fromCol": 5, "toCol": 5, "variant": "dashed" }
+  ],
+  "groups": [
+    { "id": "agent_loop", "label": "Agentic stages use own system prompts", "lane": "agents", "fromCol": 1, "toCol": 5, "variant": "emphasis" },
+    { "id": "media_work", "label": "Subgrafo por item", "lane": "generation", "fromCol": 5, "toCol": 5, "variant": "dashed" },
+    { "id": "failure_path", "label": "Falhas controladas", "lane": "exceptions", "fromCol": 2, "toCol": 5, "variant": "security" }
+  ],
+  "mainPath": [
+    "run",
+    "persona",
+    "concepts",
+    "scripts",
+    "edit",
+    "roster",
+    "approve",
+    "fanout",
+    "clips",
+    "qc",
+    "assembly",
+    "upscale",
+    "feedback"
+  ],
+  "nodes": [
+    {
+      "id": "run",
+      "lane": "ui",
+      "col": 0,
+      "type": "frontend",
+      "label": "Run",
+      "sublabel": "offer + batch"
+    },
+    {
+      "id": "status",
+      "lane": "ui",
+      "col": 5,
+      "type": "frontend",
+      "label": "Status",
+      "sublabel": "CLI/Web/SSE"
+    },
+    {
+      "id": "persona",
+      "lane": "agents",
+      "col": 1,
+      "type": "backend",
+      "label": "Persona",
+      "sublabel": "write_persona",
+      "tag": "persona-agent"
+    },
+    {
+      "id": "concepts",
+      "lane": "agents",
+      "col": 3,
+      "type": "backend",
+      "label": "Conceitos",
+      "sublabel": "generate_concepts",
+      "tag": "concept-agent",
+      "width": 92
+    },
+    {
+      "id": "scripts",
+      "lane": "agents",
+      "col": 5,
+      "type": "backend",
+      "label": "Scripts",
+      "sublabel": "write_script",
+      "tag": "script-agent"
+    },
+    {
+      "id": "edit",
+      "lane": "human",
+      "col": 5,
+      "type": "security",
+      "label": "Editar",
+      "sublabel": "concept + script"
+    },
+    {
+      "id": "roster",
+      "lane": "creator",
+      "col": 5,
+      "type": "cloud",
+      "label": "Roster",
+      "sublabel": "face + voz"
+    },
+    {
+      "id": "approve",
+      "lane": "approval",
+      "col": 5,
+      "type": "security",
+      "label": "Aprovar",
+      "sublabel": "creator gate"
+    },
+    {
+      "id": "fanout",
+      "lane": "dispatch",
+      "col": 5,
+      "type": "messagebus",
+      "label": "Fan-out",
+      "sublabel": "Send por conceito"
+    },
+    {
+      "id": "clips",
+      "lane": "generation",
+      "col": 5,
+      "type": "cloud",
+      "label": "Clips",
+      "sublabel": "talking + demo",
+      "tag": "video-agent"
+    },
+    {
+      "id": "qc",
+      "lane": "quality",
+      "col": 5,
+      "type": "security",
+      "label": "QC Gate",
+      "sublabel": "integridade"
+    },
+    {
+      "id": "retry",
+      "lane": "exceptions",
+      "col": 2,
+      "type": "messagebus",
+      "label": "Retry",
+      "sublabel": "tier route"
+    },
+    {
+      "id": "drop",
+      "lane": "exceptions",
+      "col": 4,
+      "type": "security",
+      "label": "Drop",
+      "sublabel": "max attempts"
+    },
+    {
+      "id": "assembly",
+      "lane": "assembly_lane",
+      "col": 5,
+      "type": "cloud",
+      "label": "Assembly",
+      "sublabel": "Seedance"
+    },
+    {
+      "id": "upscale",
+      "lane": "upscale_lane",
+      "col": 5,
+      "type": "cloud",
+      "label": "Upscale",
+      "sublabel": "video final"
+    },
+    {
+      "id": "checkpoint",
+      "lane": "state",
+      "col": 1,
+      "type": "database",
+      "label": "Checkpoint",
+      "sublabel": "thread_id = run"
+    },
+    {
+      "id": "feedback",
+      "lane": "state",
+      "col": 5,
+      "type": "database",
+      "label": "Feedback",
+      "sublabel": "winning styles"
+    }
+  ],
+  "edges": [
+    {
+      "from": "run",
+      "to": "persona",
+      "label": "start",
+      "variant": "emphasis",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "route": "drop",
+      "labelSegment": 1,
+      "labelDy": 22
+    },
+    {
+      "from": "persona",
+      "to": "concepts",
+      "variant": "emphasis"
+    },
+    {
+      "from": "concepts",
+      "to": "scripts",
+      "variant": "default"
+    },
+    {
+      "from": "scripts",
+      "to": "edit",
+      "label": "review",
+      "variant": "security",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "route": "drop",
+      "labelSegment": 1,
+      "labelDy": 14
+    },
+    {
+      "from": "edit",
+      "to": "roster",
+      "variant": "default",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "route": "drop"
+    },
+    {
+      "from": "roster",
+      "to": "approve",
+      "variant": "security"
+    },
+    {
+      "from": "approve",
+      "to": "fanout",
+      "label": "approved",
+      "variant": "emphasis",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "route": "drop",
+      "labelSegment": 1,
+      "labelDy": 22
+    },
+    {
+      "from": "fanout",
+      "to": "clips",
+      "variant": "emphasis",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "route": "drop"
+    },
+    {
+      "from": "clips",
+      "to": "qc",
+      "variant": "default",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "route": "drop"
+    },
+    {
+      "from": "qc",
+      "to": "assembly",
+      "label": "pass",
+      "variant": "emphasis",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "route": "drop",
+      "labelSegment": 1,
+      "labelDy": 18
+    },
+    {
+      "from": "assembly",
+      "to": "upscale",
+      "variant": "emphasis",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "route": "drop"
+    },
+    {
+      "from": "upscale",
+      "to": "feedback",
+      "label": "assembled",
+      "variant": "emphasis",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "route": "drop",
+      "labelSegment": 1
+    },
+    {
+      "from": "qc",
+      "to": "retry",
+      "label": "fail < max",
+      "variant": "dashed",
+      "role": "return",
+      "fromSide": "left",
+      "toSide": "top",
+      "route": "drop",
+      "labelSegment": 1
+    },
+    {
+      "from": "retry",
+      "to": "clips",
+      "label": "regen",
+      "variant": "dashed",
+      "role": "return",
+      "fromSide": "right",
+      "toSide": "left",
+      "route": "return-left",
+      "labelDy": -14
+    },
+    {
+      "from": "qc",
+      "to": "drop",
+      "label": "max attempts",
+      "variant": "security",
+      "role": "error",
+      "fromSide": "left",
+      "toSide": "top",
+      "route": "drop",
+      "labelSegment": 1
+    },
+    {
+      "from": "feedback",
+      "to": "status",
+      "variant": "default",
+      "fromSide": "top",
+      "toSide": "bottom",
+      "route": "outside-right"
+    },
+    {
+      "from": "run",
+      "to": "checkpoint",
+      "label": "resume",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "route": "drop",
+      "labelSegment": 1,
+      "labelDx": -16
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Batch path",
+      "items": [
+        "Persona is generated before concepts",
+        "Concepts and scripts inherit persona context",
+        "Creator prompt is persona + user creator prompt"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Agent guardrails",
+      "items": [
+        "persona/concepts/scripts/video have dedicated system prompts",
+        "Agents can only call declared typed tools",
+        "Model-controlled field is the optional revision directive"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Production controls",
+      "items": [
+        "config-mock remains offline and deterministic",
+        "QC can regenerate or drop per item",
+        "Terminal approved state is assembled/upscaled"
+      ]
+    }
+  ]
+}
