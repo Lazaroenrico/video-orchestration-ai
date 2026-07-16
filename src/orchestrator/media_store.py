@@ -1,13 +1,18 @@
-"""Download e persistência local dos bytes de mídia do creator.
+"""Persistência dos bytes de mídia de creators e items.
 
 Por que existe: imagem upscalada (Replicate/Topaz) e áudio remoto vêm como
 URLs voláteis — ``replicate.delivery`` expira em ~1h. Para não perder os artefatos,
-baixamos os bytes para ``ORCH_MEDIA`` (default ``.orchestrator/media``) e reescrevemos
-as URIs do creator para um caminho web servível (``/media/{run_id}/{creator_id}/...``),
+persistimos os bytes e reescrevemos as URIs do creator/item para um caminho servível,
 guardando a URL original como ``*_source_uri`` para proveniência.
 
+Desde a D30 este módulo é a camada de **orquestração** por cima de
+``orchestrator.storage``: ele decide *o que* persistir e sob qual key canônica
+(``{run_id}/{creator_id}/image``, ``{run_id}/items/{item_id}/clip-{n}``), enquanto o
+backend decide *onde* os bytes moram. Hoje o backend é sempre ``LocalMediaStorage``;
+o ``R2MediaStorage`` entra sem que estas funções mudem.
+
 Determinismo (CLAUDE.md): ``mock://...`` e ids de voz (``voice-0``) **não** são
-baixáveis — ``persist_media`` é no-op e retorna a uri inalterada, sem tocar disco nem
+baixáveis — a persistência é no-op e retorna a uri inalterada, sem tocar disco nem
 rede. Por isso a suíte mock continua offline e determinística.
 """
 from __future__ import annotations
@@ -17,58 +22,26 @@ import logging
 import mimetypes
 from pathlib import Path
 from typing import Any, Optional
-from urllib.parse import urlparse
 
 import httpx
 
+from orchestrator.storage.base import (
+    _DEFAULT_EXT,
+    ext_from_mime as _ext_from_mime,
+    ext_from_url as _ext_from_url,
+    is_downloadable as _is_downloadable,
+)
+from orchestrator.storage.local import LocalMediaStorage
+
 _log = logging.getLogger(__name__)
 
-# Extensão default por família de mime (fallback quando o content-type é desconhecido).
-_EXT_BY_MIME = {
-    "image/png": "png",
-    "image/jpeg": "jpg",
-    "image/webp": "webp",
-    "image/gif": "gif",
-    "image/avif": "avif",
-    "image/svg+xml": "svg",
-    "audio/mpeg": "mp3",
-    "audio/mp3": "mp3",
-    "audio/wav": "wav",
-    "audio/x-wav": "wav",
-    "audio/mp4": "m4a",
-    "audio/ogg": "ogg",
-    "video/mp4": "mp4",
-    "video/webm": "webm",
-}
-_DEFAULT_EXT = "bin"
-
-
-def _is_downloadable(uri: str) -> bool:
-    """True só para http(s) e data: — o resto (mock://, voice_id, "") é referência."""
-    if not uri:
-        return False
-    if uri.startswith("data:"):
-        return True
-    return urlparse(uri).scheme in {"http", "https"}
-
-
-def _ext_from_mime(content_type: str) -> str:
-    mime = (content_type or "").split(";", 1)[0].strip().lower()
-    if mime in _EXT_BY_MIME:
-        return _EXT_BY_MIME[mime]
-    # Fallback para mimes conhecidos do stdlib antes de degradar para .bin — evita
-    # servir imagem/áudio como application/octet-stream (browser não renderiza).
-    guessed = mimetypes.guess_extension(mime) if mime else None
-    return guessed.lstrip(".") if guessed else _DEFAULT_EXT
-
-
-def _ext_from_url(uri: str) -> Optional[str]:
-    path = urlparse(uri).path.lower()
-    if "." in path:
-        ext = path.rsplit(".", 1)[-1]
-        if ext and len(ext) <= 5 and ext.isalnum():
-            return ext
-    return None
+__all__ = [
+    "data_uri_from_media_path",
+    "persist_bytes",
+    "persist_creator_media",
+    "persist_item_media",
+    "persist_media",
+]
 
 
 def data_uri_from_media_path(uri: str, media_root: Path) -> Optional[str]:
@@ -93,16 +66,6 @@ def data_uri_from_media_path(uri: str, media_root: Path) -> Optional[str]:
     return f"data:{mime};base64,{payload}"
 
 
-def _decode_data_uri(uri: str) -> tuple[bytes, str]:
-    """Decodifica ``data:<mime>;base64,<payload>`` -> (bytes, ext)."""
-    header, _, payload = uri.partition(",")
-    mime = "application/octet-stream"
-    if header.startswith("data:"):
-        mime = header[len("data:"):].split(";", 1)[0] or mime
-    data = base64.b64decode(payload) if ";base64" in header else payload.encode("utf-8")
-    return data, _ext_from_mime(mime)
-
-
 async def persist_media(
     uri: str,
     dest_dir: str | Path,
@@ -117,32 +80,9 @@ async def persist_media(
     baixáveis (``mock://``, voice_id) ou em falha de download, retorna ``uri``
     inalterada — nunca levanta, nunca cria diretório à toa.
     """
-    if not _is_downloadable(uri):
-        return uri
-
-    try:
-        if uri.startswith("data:"):
-            data, ext = _decode_data_uri(uri)
-        else:
-            owns_client = client is None
-            client = client or httpx.AsyncClient(timeout=120.0)
-            try:
-                resp = await client.get(uri)
-                resp.raise_for_status()
-                data = resp.content
-                ext = _ext_from_url(uri) or _ext_from_mime(resp.headers.get("content-type", ""))
-            finally:
-                if owns_client:
-                    await client.aclose()
-    except Exception as exc:  # noqa: BLE001 — download é best-effort
-        _log.error("persist_media falhou para %s: %s: %s", uri, type(exc).__name__, exc)
-        return uri
-
-    dest_dir = Path(dest_dir)
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    filename = f"{basename}.{ext}"
-    (dest_dir / filename).write_bytes(data)
-    return f"{web_prefix}/{filename}"
+    storage = LocalMediaStorage(dest_dir, web_prefix=web_prefix)
+    stored = await storage.put_from_url(uri, key_base=basename, client=client)
+    return stored.uri if stored else uri
 
 
 async def persist_bytes(
@@ -151,18 +91,16 @@ async def persist_bytes(
     basename: str,
     *,
     web_prefix: str,
-    ext: str = "mp3",
+    content_type: str = "audio/mpeg",
 ) -> str:
     """Grava ``data`` em ``dest_dir/{basename}.{ext}`` e retorna o caminho web servível.
 
     Usado quando os bytes já estão em mãos (ex.: TTS síncrono de preview de voz) e
     não há uri para baixar via ``persist_media``.
     """
-    dest_dir = Path(dest_dir)
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    filename = f"{basename}.{ext}"
-    (dest_dir / filename).write_bytes(data)
-    return f"{web_prefix}/{filename}"
+    storage = LocalMediaStorage(dest_dir, web_prefix=web_prefix)
+    stored = await storage.put_bytes(data, key_base=basename, content_type=content_type)
+    return stored.uri
 
 
 async def persist_item_media(
@@ -175,11 +113,10 @@ async def persist_item_media(
 ) -> Any:
     """Persiste os bytes dos clips e do vídeo montado de um ``Item``.
 
-    - ``clips[n].uri`` http(s)/data: -> baixado para
-      ``/videos/{run_id}/items/{item_id}/clip-{n}.{ext}``; a uri original fica em
-      ``meta["source_uri"]``.
-    - ``assembled.uri`` http(s)/data: -> baixado para
-      ``/videos/{run_id}/items/{item_id}/assembled.{ext}``, mesma proveniência.
+    - ``clips[n].uri`` http(s)/data: -> persistido sob a key
+      ``{run_id}/items/{item_id}/clip-{n}.{ext}``, servido em ``/videos/...``; a uri
+      original fica em ``meta["source_uri"]``.
+    - ``assembled.uri`` http(s)/data: -> mesma coisa sob ``assembled``.
     - Não-baixáveis (``mock://``, ids opacos): no-op total, item devolvido inalterado.
 
     Aceita ``item`` como ``Item`` (pydantic) ou dict — devolve o mesmo tipo recebido,
@@ -192,22 +129,20 @@ async def persist_item_media(
     is_model = hasattr(item, "model_dump")
     data = item.model_dump() if is_model else dict(item)
     item_id = data.get("id") or "item"
-    dest_dir = Path(root) / run_id / "items" / item_id
-    web_prefix = f"/videos/{run_id}/items/{item_id}"
+    storage = LocalMediaStorage(root, web_prefix="/videos")
+    key_prefix = f"{run_id}/items/{item_id}"
 
     clips = data.get("clips") or []
     new_clips: list[dict[str, Any]] = []
     for n, clip in enumerate(clips):
         clip = dict(clip)
         uri = clip.get("uri")
-        if isinstance(uri, str) and _is_downloadable(uri):
-            local = await persist_media(
-                uri, dest_dir, f"clip-{n}", web_prefix=web_prefix, client=client,
-            )
-            if local != uri:
+        if isinstance(uri, str):
+            stored = await storage.put_from_url(uri, key_base=f"{key_prefix}/clip-{n}", client=client)
+            if stored:
                 meta = dict(clip.get("meta") or {})
                 meta["source_uri"] = uri
-                clip = {**clip, "uri": local, "meta": meta}
+                clip = {**clip, "uri": stored.uri, "meta": meta}
         new_clips.append(clip)
     data["clips"] = new_clips
 
@@ -215,14 +150,12 @@ async def persist_item_media(
     if assembled:
         assembled = dict(assembled)
         uri = assembled.get("uri")
-        if isinstance(uri, str) and _is_downloadable(uri):
-            local = await persist_media(
-                uri, dest_dir, "assembled", web_prefix=web_prefix, client=client,
-            )
-            if local != uri:
+        if isinstance(uri, str):
+            stored = await storage.put_from_url(uri, key_base=f"{key_prefix}/assembled", client=client)
+            if stored:
                 meta = dict(assembled.get("meta") or {})
                 meta["source_uri"] = uri
-                assembled = {**assembled, "uri": local, "meta": meta}
+                assembled = {**assembled, "uri": stored.uri, "meta": meta}
         data["assembled"] = assembled
 
     if is_model:
@@ -239,36 +172,31 @@ async def persist_creator_media(
 ) -> dict[str, Any]:
     """Persiste imagem e voz (quando baixáveis) e reescreve as URIs do creator.
 
-    - ``upscaled_base`` http(s)/data: -> baixado; URI vira caminho local e
+    - ``upscaled_base`` http(s)/data: -> persistido; URI vira caminho servível e
       ``image_source_uri`` guarda a origem.
-    - ``voice_id`` http(s) (ex.: ElevenLabs via Replicate) -> baixado como áudio;
+    - ``voice_id`` http(s) (ex.: ElevenLabs via Replicate) -> persistido como áudio;
       ``voice_source_uri`` guarda a origem. Um ``voice_id`` que é só id (ElevenLabs)
       não é baixável -> permanece referência intacta.
     - Mock (``mock://``, ``voice-0``): no-op total, dict devolvido inalterado.
     """
     creator_id = creator.get("id") or "creator"
-    dest_dir = Path(media_root) / run_id / creator_id
-    web_prefix = f"/media/{run_id}/{creator_id}"
+    storage = LocalMediaStorage(media_root, web_prefix="/media")
+    key_prefix = f"{run_id}/{creator_id}"
     out = dict(creator)
 
     image_uri = out.get("upscaled_base")
-    if isinstance(image_uri, str) and _is_downloadable(image_uri):
-        local = await persist_media(
-            image_uri, dest_dir, "image", web_prefix=web_prefix, client=client,
-        )
-        if local != image_uri:
-            out["upscaled_base"] = local
+    if isinstance(image_uri, str):
+        stored = await storage.put_from_url(image_uri, key_base=f"{key_prefix}/image", client=client)
+        if stored:
+            out["upscaled_base"] = stored.uri
             out["image_source_uri"] = image_uri
-            filename = local.rsplit("/", 1)[-1]
-            out["image_local_path"] = str(dest_dir / filename)
+            out["image_local_path"] = str(Path(media_root) / stored.key)
 
     voice_uri = out.get("voice_id")
-    if isinstance(voice_uri, str) and _is_downloadable(voice_uri):
-        local = await persist_media(
-            voice_uri, dest_dir, "voice", web_prefix=web_prefix, client=client,
-        )
-        if local != voice_uri:
-            out["voice_id"] = local
+    if isinstance(voice_uri, str):
+        stored = await storage.put_from_url(voice_uri, key_base=f"{key_prefix}/voice", client=client)
+        if stored:
+            out["voice_id"] = stored.uri
             out["voice_source_uri"] = voice_uri
 
     return out
