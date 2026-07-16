@@ -73,11 +73,8 @@ custo; suíte verde sem credenciais R2; bytes no R2 + metadata no DB no perfil l
 URLs sob demanda e não persistidas; reprovados 3 dias; intermediárias 2 dias; creator
 assets, aprovados e finais sem expiração automática.
 
-**Escopo mantido fora:** o SSE (`/api/stream/{run_id}`) ainda não assina — os eventos de
-progresso carregam creator/item, então em perfil R2 o preview ao vivo mostraria o ponteiro
-até o primeiro `/api/state`. Não bloqueia (o dashboard busca o state), mas fecha a lacuna
-quando o R2 for ligado de fato. Migrar artifacts existentes, Postgres e purge agendado
-seguem fora, como a própria ADR define.
+**Escopo mantido fora:** migrar artifacts existentes, Postgres e purge agendado seguem
+fora, como a própria ADR define.
 
 **Verificação:** `rtk proxy .venv/bin/python -m pytest` → **884 passed, 2 skipped**,
 cobertura 100% (era 772). Dirigido fora da suíte, em dois níveis:
@@ -90,7 +87,29 @@ cobertura 100% (era 772). Dirigido fora da suíte, em dois níveis:
    `https://acct.r2.cloudflarestorage.com/...?X-Amz-Expires=900&X-Amz-Signature=...` — e
    estado e DB **inalterados** depois de assinar.
 
-Ao vivo de verdade não rodado: exige bucket R2 provisionado (`R2_*`), que ainda não existe.
+## D30 — Fase 6: SSE assina e R2 ligado de verdade (2026-07-16)
+
+Bucket `generation-video` provisionado e as `R2_*` configuradas, então `config/providers.yaml`
+passou a `storage: backend: r2`. `config-mock` segue `local` — dry-run continua offline,
+determinístico e sem custo.
+
+**Conectividade verificada contra o R2 real** (fora da suíte): `put_bytes` → `exists` →
+`get_signed_url` com GET 200 e bytes idênticos → `delete`. `list_buckets` dá `AccessDenied`
+e isso é o esperado: o token é escopado a um bucket só, e ListBuckets é permissão de conta.
+
+**Fase 4 fechada — o SSE agora assina.** `stream_events` resolve `r2://` no `yield`, não no
+`_emit`. O ponto é o buffer de replay: ele é reenviado a quem conecta tarde, então guardar a
+URL assinada nele entregaria uma URL já vencida. Assinando na saída, o buffer mantém o
+ponteiro canônico e o TTL só começa a correr quando o evento chega ao cliente. O backend de
+assinatura é construído **uma vez por stream** (era um `boto3.client` por evento).
+
+**Verificação:** `rtk proxy .venv/bin/python -m pytest` → **888 passed, 2 skipped**,
+cobertura 100%.
+
+**Não verificado:** o bucket ser privado. O GET sem assinatura devolve 400, mas isso não
+prova nada — o endpoint da API S3 rejeita qualquer requisição não assinada de qualquer jeito.
+Quem decide acesso público é o Public Development URL (`r2.dev`) no dashboard, que precisa
+ser confirmado desabilitado. Um batch pago end-to-end também não foi rodado.
 
 ## D35 — Persona antes de conceitos, scripts e creator (2026-07-16)
 

@@ -998,7 +998,7 @@ async def integrations_index(config_dir: Optional[str] = None) -> dict[str, Any]
 
 
 @app.get("/api/stream/{run_id}")
-async def stream_events(run_id: str) -> StreamingResponse:
+async def stream_events(run_id: str, config_dir: Optional[str] = None) -> StreamingResponse:
     state = _runs.get(run_id)
     if state is None:
         raise HTTPException(status_code=404, detail=f"run {run_id!r} not found")
@@ -1014,6 +1014,12 @@ async def stream_events(run_id: str) -> StreamingResponse:
     else:
         state["queues"].append(q)
 
+    # Uma vez por stream, não por evento: cada chamada reconstrói o client boto3, e um
+    # stream longo emite centenas de eventos. O TTL da URL só começa a correr no yield,
+    # então assinar aqui (e não no _emit) é o que mantém o buffer de replay com o
+    # ponteiro canônico — URL assinada vence, ponteiro não.
+    storage = _signing_storage(config_dir)
+
     async def generate():
         try:
             while True:
@@ -1025,6 +1031,7 @@ async def stream_events(run_id: str) -> StreamingResponse:
                 if event is None:
                     yield "data: {\"type\": \"stream_end\"}\n\n"
                     return
+                event = await resolve_signed_uris(event, storage=storage)
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
         finally:
             qs = _runs.get(run_id, {}).get("queues", [])
