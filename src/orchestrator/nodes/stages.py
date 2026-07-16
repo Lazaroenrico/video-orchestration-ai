@@ -288,6 +288,20 @@ def _ensure_seed_reference_image(creator: dict[str, Any], media_root: Path) -> N
             return
 
 
+def _persistence(config: RunnableConfig, *, storage_key: str) -> dict[str, Any]:
+    """Backend de storage + DB de artifacts resolvidos para o run (D30).
+
+    Ambos vêm do ``configurable`` (montado uma vez em ``runner._build_config``). Quando
+    ausentes — configs montados à mão em teste — o ``media_store`` cai no disco local a
+    partir do root, que é o comportamento histórico.
+    """
+    configurable = config["configurable"]
+    return {
+        "storage": configurable.get(storage_key),
+        "db": configurable.get("artifact_db"),
+    }
+
+
 # ===================== Top-graph (BatchState) =====================
 
 
@@ -363,6 +377,7 @@ async def node_roster(state: dict[str, Any], config: RunnableConfig) -> dict[str
         # locais servíveis. No-op para mock:// / voice_id (sem rede, sem disco).
         creator = await media_store.persist_creator_media(
             creator, run_id=run_id, media_root=media_root,
+            **_persistence(config, storage_key="media_storage"),
         )
         creator["voice_preview_uri"] = await _build_voice_preview(
             tool_ctx.adapter, creator, run_id=run_id, media_root=media_root,
@@ -651,6 +666,7 @@ def make_gen_node(tier: str):
         updated = item.model_copy(update={"clips": item.clips + [clip]})
         persisted = await media_store.persist_item_media(
             updated, run_id=run_id, videos_root=videos_root,
+            **_persistence(config, storage_key="videos_storage"),
         )
         return {
             "tier": tier,
@@ -698,6 +714,7 @@ async def node_product_demo(state: Any, config: RunnableConfig) -> dict[str, Any
     updated = item.model_copy(update={"clips": item.clips + [demo]})
     persisted = await media_store.persist_item_media(
         updated, run_id=run_id, videos_root=videos_root,
+        **_persistence(config, storage_key="videos_storage"),
     )
     return {
         "clips": persisted.clips,
@@ -788,6 +805,7 @@ async def node_assembly(state: Any, config: RunnableConfig) -> dict[str, Any]:
     updated = item.model_copy(update={"assembled": art})
     persisted = await media_store.persist_item_media(
         updated, run_id=run_id, videos_root=videos_root,
+        **_persistence(config, storage_key="videos_storage"),
     )
     return {"assembled": persisted.assembled, "error": None}
 
@@ -832,6 +850,7 @@ async def node_upscale(state: Any, config: RunnableConfig) -> dict[str, Any]:
     updated = item.model_copy(update={"assembled": art})
     persisted = await media_store.persist_item_media(
         updated, run_id=run_id, videos_root=default_videos_path(),
+        **_persistence(config, storage_key="videos_storage"),
     )
     add_trace_metadata(step=8, stage="upscale_done", item_id=item.id)
     return {"assembled": persisted.assembled}

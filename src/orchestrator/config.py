@@ -67,6 +67,12 @@ def default_prompt_store_path() -> Path:
     return Path(os.environ.get("ORCH_PROMPTS", ".orchestrator/prompts.json"))
 
 
+def default_artifacts_db_path() -> Path:
+    """DB canônico de artifacts (D30). Separado do checkpointer: um guarda estado do
+    grafo, o outro guarda a verdade sobre mídia — ciclos de vida diferentes."""
+    return Path(os.environ.get("ORCH_ARTIFACTS_DB", ".orchestrator/artifacts.sqlite"))
+
+
 def default_media_path() -> Path:
     return Path(os.environ.get("ORCH_MEDIA", ".orchestrator/media"))
 

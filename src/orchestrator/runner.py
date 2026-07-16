@@ -8,11 +8,18 @@ from pathlib import Path
 from typing import Any, Optional
 
 from orchestrator.agent_catalog import AgentCatalog, default_agent_catalog
+from orchestrator.config import (
+    default_artifacts_db_path,
+    default_media_path,
+    default_videos_path,
+)
 from orchestrator.feedback_store import load_latest_feedback
 from orchestrator.graph.builder import build_graph
 from orchestrator.graph.checkpoint import open_checkpointer
 from orchestrator.graph.state import Item
 from orchestrator.registry import build_adapter_from_providers
+from orchestrator.storage.db import ArtifactDB
+from orchestrator.storage.factory import build_media_storage
 from orchestrator.tracing import run_trace_config
 
 
@@ -26,12 +33,25 @@ def _build_config(
 ) -> dict[str, Any]:
     adapter = build_adapter_from_providers(providers, pipeline)
     catalog = agent_catalog or default_agent_catalog()
+
+    # Storage e DB de artifacts (D30) são resolvidos uma vez por run, como o adapter:
+    # construí-los por chamada recriaria o client S3 a cada clip.
+    artifact_db = ArtifactDB(default_artifacts_db_path())
+    artifact_db.setup()
+
     configurable: dict[str, Any] = {
         "adapter": adapter,
         "pipeline": pipeline,
         "agent_catalog": catalog,
         "run": {"platform": platform},
         "thread_id": run_id,
+        "media_storage": build_media_storage(
+            providers, root=default_media_path(), web_prefix="/media",
+        ),
+        "videos_storage": build_media_storage(
+            providers, root=default_videos_path(), web_prefix="/videos",
+        ),
+        "artifact_db": artifact_db,
     }
     if feedback_store is not None:
         configurable["feedback_store"] = str(feedback_store)
