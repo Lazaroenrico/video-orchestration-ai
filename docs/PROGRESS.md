@@ -1,5 +1,75 @@
 # PROGRESS — handoff
 
+## D30 — R2 + DB relacional de mídia: implementação (2026-07-16)
+
+Execução da `docs/ADR-D30-media-storage-r2-db.md`, que estava aceita mas não implementada.
+Escopo travado com o usuário: **só a D30** (storage + DB), SQLite-first, atrás de config.
+Hospedar o app na Cloudflare ficou **fora** — ver "Cloudflare" abaixo.
+
+### Fases entregues
+- **Fase 1 (`b345136`)** — contrato `MediaStorage` (`put_bytes`, `put_from_url`,
+  `get_signed_url`, `delete`, `exists`) + `LocalMediaStorage`. Toda escrita devolve
+  `StoredObject` (backend, key, uri, content_type, size_bytes, sha256). `media_store`
+  virou orquestração por cima: decide *o que* persistir e sob qual key canônica; o
+  backend decide *onde*. URIs servíveis inalteradas.
+- **Fase 2 (`a913a01`)** — `ArtifactDB` (SQLite) com as colunas mínimas da ADR. `id`
+  determinístico (`sha256` de `run_id:storage_key`), não `uuid4` → `record()` idempotente.
+- **Fase 3 (`78b943a`)** — `R2MediaStorage` (boto3, S3-compatible), backend selecionável
+  por `providers.yaml` (`storage.backend`), coberto com stub de S3.
+- **Fase 3.5 (`66e4cc3`)** — o elo que faltava: as Fases 1-3 eram infra sem consumidor.
+  `runner._build_config` resolve storage + DB uma vez por run (como o adapter) e os nodes
+  passam adiante via `_persistence()`.
+- **Fase 5 (`696e450`)** — retenção: `keep` / `rejected` (3d) / `intermediate` (2d),
+  `purge_expired` orientado pelo DB.
+
+### Decisões de desenho
+- **`aiosqlite` trava neste ambiente** (já documentado em `graph/checkpoint.py`), então o
+  `ArtifactDB` usa `sqlite3` síncrono sob lock com fachada async — mesmo padrão, mesmo
+  motivo. Já o R2 usa `asyncio.to_thread`: upload de vídeo segurando o event loop mataria
+  o fan-out paralelo de items.
+- **Retenção só é decidível depois do fato.** Quando o clip é persistido, o QC ainda não
+  rodou. `classify_item_retention` roda no veredito: aprovado → última take `keep`,
+  anteriores `intermediate`; drop → todas `rejected`. Item ainda em voo não é classificado.
+- **`storage_key` carimbado no `meta` do Artifact.** Sem ele, quem está a jusante teria de
+  reconstruir a key a partir da uri — impossível no R2 (`r2://bucket/key`) e dependente de
+  adivinhar a extensão.
+- **`kind` vem do próprio `Artifact`** (`clip`/`video`), não de um vocabulário paralelo: o
+  modelo de estado já carregava essa informação (descoberto quando o pydantic recusou um
+  `Artifact` sem `kind` num teste meu).
+- **Falhar alto**: backend desconhecido em `providers.yaml` e credencial R2 ausente
+  levantam no boot, em vez de degradar para disco local (mídia paga em disco efêmero) ou
+  quebrar no meio de um run pago.
+
+### Falhas investigadas (sintoma → causa → correção)
+- **Teste próprio com `RecursionError` de monkeypatch.** Sintoma: `transport` duplicado em
+  `test_put_from_url_uses_its_own_client...`. Causa: a lambda que substituía
+  `httpx.AsyncClient` chamava `httpx.AsyncClient` — já era ela mesma. Correção: guardar a
+  classe real antes do patch, idioma que `test_gateway_llm.py` já usava. Bug do teste, não
+  do código.
+- **Inserção duplicada ao ligar os call sites.** Sintoma: `**_persistence(...)` duplicado
+  num call site. Causa: substituição textual com padrão de 8 espaços que é **substring**
+  do de 12 espaços. Correção: remoção manual + `ast.parse` como gate antes de rodar.
+
+### Cloudflare (por que o app não foi para lá)
+A D30 é sobre **onde os bytes moram**, não sobre hospedagem — R2 é S3-compatible e serve
+de qualquer host. Hospedar *este* app na Cloudflare esbarra em: **Python Workers** roda
+Pyodide/Wasm (langgraph, pillow e o SDK anthropic não têm wheel PyEmscripten); **Containers**
+é viável mas tem **disco efêmero**, então o checkpointer SQLite e a mídia local
+evaporariam — exigiria DB durável, que a própria D30 põe em *fora de escopo* ("trocar
+SQLite por Postgres nesta etapa"). Seria uma ADR nova (compute/DB), não a D30.
+
+**Pendente:** Fase 4 (signed URLs sob demanda na UI). `get_signed_url` está implementado e
+testado, e signed URL nunca é persistida — mas a consequência da ADR "a UI passa a receber
+signed URLs sob demanda" ainda não vale: `_normalize_artifact`/`_normalize_creator` são
+síncronos e `get_signed_url` é async, então falta um pre-pass async sobre o payload. Só
+importa quando `storage.backend: r2` for ligado, o que depende do bucket ser provisionado.
+
+**Verificação:** `rtk proxy .venv/bin/python -m pytest` → **857 passed, 2 skipped**,
+cobertura 100% (era 772). Dirigido fora da suíte: run mock de batch 4 gravou 18 artifacts
+reais no DB com key canônica, content_type, size_bytes e sha256 — 8 `intermediate` com
+`expires_at` em +2 dias e 10 `keep` sem expiração, com a última take de cada item retida.
+Ao vivo não rodado: exige bucket R2 provisionado (`R2_*`), que ainda não existe.
+
 ## D35 — Persona antes de conceitos, scripts e creator (2026-07-16)
 
 Objetivo: adicionar uma persona batch-level antes de qualquer conceito, reutilizada como
