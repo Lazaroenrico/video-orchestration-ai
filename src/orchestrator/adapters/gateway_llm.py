@@ -21,6 +21,7 @@ from typing import Any, Optional
 
 import httpx
 
+from orchestrator import stream_bus
 from orchestrator.adapters._agent_loop import (
     DEFAULT_MAX_STEPS,
     AgentRunResult,
@@ -77,6 +78,18 @@ def _raise_for_status_verbose(resp: httpx.Response, *, label: str = "") -> None:
     if body:
         message += f"\nBody: {body}"
     raise httpx.HTTPStatusError(message, request=resp.request, response=resp)
+
+
+def _sse_payload(line: str) -> Optional[str]:
+    """Extrai o payload de uma linha SSE ``data: ...``.
+
+    ``None`` para o que não é dado: linhas vazias (separador de evento), comentários
+    de keep-alive (``: ping``) e o sentinela ``[DONE]``.
+    """
+    if not line.startswith("data:"):
+        return None
+    payload = line[len("data:"):].strip()
+    return None if not payload or payload == "[DONE]" else payload
 
 
 def _openai_usage_to_metric(usage: Any) -> dict[str, int]:
@@ -141,12 +154,19 @@ class GatewayLLMAdapter:
         model: Optional[str] = None,
         response_format: Optional[dict[str, Any]] = None,
         tools: Optional[list[dict[str, Any]]] = None,
+        stage: Optional[str] = None,
     ) -> dict[str, Any]:
         """POST ``{base_url}/chat/completions`` e retorna o JSON decodificado.
 
         Registra token usage/custo na run atual (via ``record_llm_usage``) e levanta
         com o corpo do gateway em falha (diagnóstico). Retenta blips de transporte/429.
         ``tools`` (function-calling OpenAI-compatible) habilita o loop agentic (Fase 1).
+
+        ``stage`` marca a chamada como *observável*: quando informado **e** houver um
+        subscriber no ``stream_bus``, a resposta vem por SSE e cada delta é emitido como
+        ``llm_token`` para a UI. Sem ``stage`` (ex.: as rodadas de decisão do agent) a
+        chamada nunca streama. Os dois caminhos devolvem **o mesmo shape** — quem chama
+        não sabe qual rodou.
         """
         used_model = model or self.model
         headers = {
@@ -164,19 +184,28 @@ class GatewayLLMAdapter:
             body["tools"] = tools
             body["tool_choice"] = "auto"
 
+        streaming = stage is not None and stream_bus.is_streaming()
+        if streaming:
+            body["stream"] = True
+            # Sem isto o gateway omite o usage no SSE e o custo do run seria zero.
+            body["stream_options"] = {"include_usage": True}
+
+        url = f"{self.base_url}/chat/completions"
+
         async def _call() -> dict[str, Any]:
+            if streaming:
+                return await self._stream_chat(url, headers, body, stage or "")
             if self._client is not None:
-                resp = await self._client.post(
-                    f"{self.base_url}/chat/completions", headers=headers, json=body
-                )
+                resp = await self._client.post(url, headers=headers, json=body)
             else:
                 async with httpx.AsyncClient(timeout=self.timeout) as client:
-                    resp = await client.post(
-                        f"{self.base_url}/chat/completions", headers=headers, json=body
-                    )
+                    resp = await client.post(url, headers=headers, json=body)
             _raise_for_status_verbose(resp, label="gateway_llm")
             return resp.json()
 
+        # Seguro retentar mesmo streamando: ``_is_retryable`` só cobre erros pré-envio
+        # (ConnectError/PoolTimeout) e 429 — todos anteriores ao 1º token. Falha no meio
+        # do stream é ReadTimeout, que não é retentável; nenhum token é reemitido.
         data: dict[str, Any] = await with_transport_retry(
             _call,
             max_retries=self.max_retries,
@@ -185,6 +214,63 @@ class GatewayLLMAdapter:
         )
         record_llm_usage(_openai_usage_to_metric(data.get("usage")), used_model)
         return data
+
+    async def _stream_chat(
+        self, url: str, headers: dict[str, str], body: dict[str, Any], stage: str
+    ) -> dict[str, Any]:
+        """Consome o SSE e remonta a resposta no shape do endpoint não-streaming."""
+        if self._client is not None:
+            return await self._consume_sse(self._client, url, headers, body, stage)
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            return await self._consume_sse(client, url, headers, body, stage)
+
+    @staticmethod
+    async def _consume_sse(
+        client: httpx.AsyncClient,
+        url: str,
+        headers: dict[str, str],
+        body: dict[str, Any],
+        stage: str,
+    ) -> dict[str, Any]:
+        """Emite cada delta como ``llm_token`` e devolve a resposta remontada.
+
+        Equivale ao ``get_final_message()`` do SDK Anthropic: streaming muda **como** o
+        texto chega, não **o que** o modelo produz — por isso o retorno imita
+        ``choices[0].message.content`` + ``usage``, e ``_message_text``/
+        ``record_llm_usage`` seguem inalterados.
+        """
+        parts: list[str] = []
+        usage: Optional[dict[str, Any]] = None
+        async with client.stream("POST", url, headers=headers, json=body) as resp:
+            if not resp.is_success:
+                # O corpo de erro não foi lido ainda (resposta streamada); sem isto o
+                # diagnóstico do gateway viria vazio.
+                await resp.aread()
+                _raise_for_status_verbose(resp, label="gateway_llm")
+            # Só depois do status OK: um retry pré-envio não deve emitir llm_start.
+            stream_bus.emit_token({"type": "llm_start", "stage": stage})
+            try:
+                async for line in resp.aiter_lines():
+                    payload = _sse_payload(line)
+                    if payload is None:
+                        continue
+                    try:
+                        chunk = json.loads(payload)
+                    except ValueError:
+                        continue  # keep-alive/linha malformada não derruba o stream
+                    if chunk.get("usage"):
+                        usage = chunk["usage"]
+                    for choice in chunk.get("choices") or []:
+                        token = (choice.get("delta") or {}).get("content")
+                        if token:
+                            parts.append(token)
+                            stream_bus.emit_token(
+                                {"type": "llm_token", "stage": stage, "token": token}
+                            )
+            finally:
+                # Em finally para a UI não ficar com o indicador preso se o stream cair.
+                stream_bus.emit_token({"type": "llm_end", "stage": stage})
+        return {"choices": [{"message": {"content": "".join(parts)}}], "usage": usage}
 
     @staticmethod
     def _message_text(data: dict[str, Any]) -> str:
@@ -259,6 +345,7 @@ class GatewayLLMAdapter:
                     "schema": _CONCEPT_SCHEMA,
                 },
             },
+            stage="concepts",
         )
         parsed: dict[str, Any] = json.loads(self._message_text(data))
         raw_concepts: list[dict[str, Any]] = parsed["concepts"]
@@ -322,7 +409,11 @@ class GatewayLLMAdapter:
             )
 
         data = await self._chat(
-            [{"role": "user", "content": user_prompt}], max_tokens=2000
+            [{"role": "user", "content": user_prompt}],
+            max_tokens=2000,
+            # Label com o id do conceito: a UI separa um script por card (paridade
+            # com o AnthropicLLMAdapter).
+            stage=f"script:{concept.get('id', '')}",
         )
         return self._message_text(data)
 

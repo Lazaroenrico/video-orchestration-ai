@@ -1435,3 +1435,46 @@ R2. Risco aceito: custo de take que falhe após a cobrança do provider não é 
 produzidos, 2 aprovados, custo mock $0.64. O caminho agentic de vídeo pelo grafo inteiro
 é coberto por `test_mock_pipeline_can_opt_into_agentic_video` (offline, custo zero).
 Ao vivo ainda não rodado: exige `AI_GATEWAY_API_KEY` + Replicate (custo real).
+
+## Fase 3 (D34): streaming de tokens no GatewayLLMAdapter (2026-07-16)
+
+**Entregue:** o adapter LLM default do perfil live passa a emitir tokens ao vivo para o
+dashboard. `_chat(..., stage=...)` → SSE (`"stream": true`) → `llm_start`/`llm_token`/
+`llm_end` no `stream_bus`. Contrato do front inalterado.
+
+**Arquivos:** `adapters/gateway_llm.py` (`_sse_payload`, `_stream_chat`, `_consume_sse`,
+param `stage` em `_chat`; call-sites `generate_concepts` → `"concepts"` e `write_script` →
+`"script:<id>"`), `front/src/api/useRunStream.ts` (reset do buffer no `llm_start`).
+
+### Decisões de desenho
+- **`stage` é o gate do streaming.** O brain do agent chama `_chat` sem `stage`, então o
+  loop agentic nunca streama — paridade com o Anthropic e sem remontar `tool_calls`
+  fragmentados do SSE. Em modo agent quem streama é a chamada de domínio dentro do
+  `run_tool`, que é o que o usuário quer ver.
+- **Retry não reemite token por construção** (ver D34): `_is_retryable` só cobre erros
+  pré-envio e 429. Nenhum código novo de guarda foi preciso.
+
+### Falhas investigadas (sintoma → causa → correção)
+- **UI concatenaria dois JSONs no painel de LLM.** Sintoma: dirigindo o loop agentic com
+  streaming (script fora da suíte), o stage `concepts` emitiu **2** `llm_start` e o texto
+  acumulado deu 246 chars para um payload de 123 — a revisão grudou no draft. Causa: em
+  modo agent `generate_concepts` roda 2x (draft + revisão) e o reducer do front tratava
+  `llm_start` só como "active: true", sem zerar o `text` do stage. Correção: `llm_start`
+  zera o buffer daquele stage. Era pré-existente (o Anthropic tem a mesma forma), mas só
+  ficou visível ao ligar streaming no adapter default. Verificado reproduzindo o reducer
+  contra a sequência real de eventos: 246 → 123 chars.
+- **Cobertura 99,94%:** o ramo "sem client injetado" do `_stream_chat` (produção cria o
+  próprio `AsyncClient`) não era exercitado. Correção: espelhado o
+  `test_uses_own_client_when_not_injected` já existente para o caminho de streaming.
+  Voltou a 100%.
+
+**Escopo mantido fora:** judge proxy ao vivo + wiring do `GatewayJudge` no QC, R2
+(`R2MediaStorage`, D30), streaming das rodadas de decisão do agent.
+
+**Verificação:** `rtk proxy .venv/bin/python -m pytest` → **746 passed, 2 skipped**,
+cobertura 100%. `tsc --noEmit` do front limpo. O caminho agentic + streaming foi dirigido
+fora da suíte (MockTransport servindo SSE) para observar os eventos reais — foi assim que
+o bug do reducer apareceu. Ao vivo ainda não rodado: exige `AI_GATEWAY_API_KEY` (custo
+real); em particular, **`stream_options.include_usage` só pode ser confirmado ao vivo** —
+se o gateway ignorar o campo, o custo do run vai a zero (mesmo comportamento que o
+caminho não-streaming já tem quando o `usage` vem ausente).

@@ -503,3 +503,37 @@ Datas absolutas. Apendar novas decisões ao final.
   tool (dry-run barato); o caminho agentic é provado por testes de node e por um e2e do
   grafo inteiro. `roster`/`assembly`/`upscale` seguem fora até terem contrato de artefato
   próprio; multi-tool por stage segue YAGNI (nenhum stage tem 2 tools legítimas).
+
+### D34 — Streaming de tokens no GatewayLLMAdapter (SSE)
+- **Contexto:** o D31 deixou streaming de fora e só o `AnthropicLLMAdapter` emitia tokens
+  (via `messages.stream` do SDK). Mas o adapter LLM **default do perfil live** é o
+  `GatewayLLMAdapter` — ou seja, na prática o dashboard nunca via token nenhum.
+- **Decisão:** `_chat` ganha um parâmetro `stage`. Quando `stage` é informado **e** há um
+  subscriber no `stream_bus`, o POST vai com `"stream": true` e a resposta é consumida como
+  SSE, emitindo `llm_start`/`llm_token`/`llm_end` — os mesmos eventos que o front já
+  consome (`useRunStream.ts`), sem mudança de contrato.
+- **`stage` como gate:** só chamadas que **nomeiam um stage** podem streamar. As rodadas de
+  decisão do agent (`_GatewayAgentBrain.complete`) não passam `stage` e portanto nunca
+  streamam — paridade com o Anthropic, e evita ter de remontar `tool_calls` fragmentados
+  do SSE (deltas indexados com `arguments` em pedaços). O usuário vê o conceito sendo
+  escrito, não a deliberação do agent.
+- **Shape único:** `_consume_sse` remonta `{"choices":[{"message":{"content": ...}}],
+  "usage": ...}` — o equivalente ao `get_final_message()` do SDK Anthropic. Streaming muda
+  **como** o texto chega, não **o que** o modelo produz, então `_message_text` e
+  `record_llm_usage` seguem inalterados e quem chama não sabe qual ramo rodou.
+- **Custo:** o SSE OpenAI-compatible omite `usage` por padrão — sem
+  `stream_options: {"include_usage": true}` o custo do run seria zero. Pedimos o usage e o
+  lemos do chunk final. Se ainda assim vier ausente, `_openai_usage_to_metric(None)` devolve
+  zeros — exatamente o que o caminho não-streaming já faz; sem novo modo de falha.
+- **Retry:** seguro streamando **por construção**: `_is_retryable` (`_retry.py`) só cobre
+  erros pré-envio (`ConnectError`/`ConnectTimeout`/`PoolTimeout`) e `429`, todos anteriores
+  ao 1º token; falha no meio do stream é `ReadTimeout`, explicitamente não retentável. Logo
+  um retry nunca reemite tokens. O `llm_start` só sai **depois** do status OK, para um
+  retry pré-envio não piscar a UI.
+- **Bug de UI corrigido junto (front):** em modo agent o mesmo stage gera mais de uma vez
+  (draft -> revisão), e o reducer acumulava `text` entre gerações — a 2ª grudava na 1ª e o
+  painel mostrava dois JSONs concatenados. `llm_start` passa a zerar o buffer do stage
+  ("nova geração começando"). Era pré-existente (valia para o Anthropic), mas só ficou
+  visível ao ligar streaming no adapter default.
+- **Consequência:** o dashboard mostra tokens ao vivo no perfil live. Coberto offline com
+  `httpx.MockTransport` servindo SSE. Judge proxy e R2 (D30) seguem fora.
