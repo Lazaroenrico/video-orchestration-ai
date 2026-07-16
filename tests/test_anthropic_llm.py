@@ -746,14 +746,14 @@ async def test_run_stage_agent_single_tool_call_then_stop() -> None:
         calls.append((tool_name, inputs))
         return ["draft"]
 
-    result = await adapter.run_stage_agent(
+    run = await adapter.run_stage_agent(
         stage="concepts",
         allowed_tools=("generate_concepts",),
         run_tool=run_tool,
         inputs={"offer": "o", "n": 1, "seed": "s"},
     )
 
-    assert result == ["draft"]
+    assert run.result == ["draft"]
     assert calls == [("generate_concepts", {})]
 
 
@@ -774,7 +774,7 @@ async def test_run_stage_agent_iterates_with_revision() -> None:
         calls.append((tool_name, inputs))
         return f"draft/{inputs.get('revision', '')}"
 
-    result = await adapter.run_stage_agent(
+    run = await adapter.run_stage_agent(
         stage="scripts",
         allowed_tools=("write_script",),
         run_tool=run_tool,
@@ -784,7 +784,7 @@ async def test_run_stage_agent_iterates_with_revision() -> None:
 
     assert len(calls) == 2
     assert calls[1] == ("write_script", {"revision": "Strengthen the hook."})
-    assert result == "draft/Strengthen the hook."
+    assert run.result == "draft/Strengthen the hook."
 
 
 async def test_run_stage_agent_refusal_stops_and_safety_net_runs_tool() -> None:
@@ -800,14 +800,14 @@ async def test_run_stage_agent_refusal_stops_and_safety_net_runs_tool() -> None:
         calls.append((tool_name, inputs))
         return ["fallback"]
 
-    result = await adapter.run_stage_agent(
+    run = await adapter.run_stage_agent(
         stage="concepts",
         allowed_tools=("generate_concepts",),
         run_tool=run_tool,
         inputs={"offer": "o"},
     )
 
-    assert result == ["fallback"]
+    assert run.result == ["fallback"]
     assert calls == [("generate_concepts", {})]
 
 

@@ -5,7 +5,12 @@ from typing import Any, Awaitable, Callable
 
 from langchain_core.runnables import RunnableConfig
 
-from orchestrator.adapters._agent_loop import DEFAULT_MAX_STEPS
+from orchestrator.adapters._agent_loop import (
+    DEFAULT_MAX_STEPS,
+    AgentRunResult,
+    ToolAttempt,
+    ToolCall,
+)
 from orchestrator.agent_catalog import (
     AgentCatalog,
     StageExecutionSpec,
@@ -25,14 +30,57 @@ class StageExecutionError(RuntimeError):
 ToolFn = Callable[..., Awaitable[Any]]
 
 
-def _agent_max_steps(pipeline: dict[str, Any]) -> int:
-    """Lê o budget do agent (``agent.max_steps`` no pipeline.yaml); default se ausente."""
+def _positive_int(raw: Any) -> int | None:
+    """Um int > 0, ou None. ``bool`` é rejeitado: ``isinstance(True, int)`` é True."""
+    if isinstance(raw, int) and not isinstance(raw, bool) and raw > 0:
+        return raw
+    return None
+
+
+def _agent_cfg(pipeline: dict[str, Any]) -> dict[str, Any]:
     agent_cfg = pipeline.get("agent") if isinstance(pipeline, dict) else None
-    if isinstance(agent_cfg, dict):
-        raw = agent_cfg.get("max_steps")
-        if isinstance(raw, int) and raw > 0:
-            return raw
-    return DEFAULT_MAX_STEPS
+    return agent_cfg if isinstance(agent_cfg, dict) else {}
+
+
+def _by_stage(agent_cfg: dict[str, Any], key: str, stage: str) -> int | None:
+    by_stage = agent_cfg.get(key)
+    return _positive_int(by_stage.get(stage)) if isinstance(by_stage, dict) else None
+
+
+def _agent_max_steps(pipeline: dict[str, Any], stage: str) -> int:
+    """Budget de rodadas: ``max_steps_by_stage.<stage>`` > ``max_steps`` > default.
+
+    Por stage porque o custo por rodada varia em ordens de grandeza entre texto
+    (centavos) e vídeo (dólares por take) — D33.
+    """
+    agent_cfg = _agent_cfg(pipeline)
+    return (
+        _by_stage(agent_cfg, "max_steps_by_stage", stage)
+        or _positive_int(agent_cfg.get("max_steps"))
+        or DEFAULT_MAX_STEPS
+    )
+
+
+def _agent_max_tool_calls(pipeline: dict[str, Any], stage: str) -> int | None:
+    """Cap de chamadas de tool (``None`` = sem cap).
+
+    ``max_steps`` conta rodadas do modelo, não tool calls: um único step pode pedir N
+    takes. Em mídia cada take é dinheiro, então este é o único teto de custo real (D33).
+    """
+    agent_cfg = _agent_cfg(pipeline)
+    return _by_stage(agent_cfg, "max_tool_calls_by_stage", stage) or _positive_int(
+        agent_cfg.get("max_tool_calls")
+    )
+
+
+def _direct_run(tool_name: str, result: Any) -> AgentRunResult:
+    """Embrulha uma execução direta (modo tool / passthrough) como uma tentativa única.
+
+    Mantém o retorno de ``with_attempts=True`` simétrico entre tool, passthrough e agent,
+    para o node de mídia ter um só caminho de contabilidade.
+    """
+    call = ToolCall(id="direct", name=tool_name)
+    return AgentRunResult(result=result, attempts=(ToolAttempt(call=call, result=result),))
 
 
 def _catalog_from_config(config: RunnableConfig) -> AgentCatalog:
@@ -68,7 +116,7 @@ async def _execute_agentic_tool(
     tool_name: str,
     tool_fn: ToolFn,
     kwargs: dict[str, Any],
-) -> Any:
+) -> AgentRunResult:
     add_trace_metadata(
         executor="agent",
         stage=spec.stage,
@@ -83,7 +131,7 @@ async def _execute_agentic_tool(
     run_stage_agent = getattr(ctx.adapter, "run_stage_agent", None)
     if run_stage_agent is None:
         add_trace_metadata(agent_backend="passthrough")
-        return await tool_fn(ctx, **kwargs)
+        return _direct_run(tool_name, await tool_fn(ctx, **kwargs))
 
     async def run_tool(called_tool: str, **tool_inputs: Any) -> Any:
         # Fronteira D29: o agent só toca o domínio via a typed tool (validada) e só
@@ -105,7 +153,8 @@ async def _execute_agentic_tool(
         run_tool=run_tool,
         inputs=kwargs,
         target_model=spec.target_model,
-        max_steps=_agent_max_steps(ctx.pipeline),
+        max_steps=_agent_max_steps(ctx.pipeline, spec.stage),
+        max_tool_calls=_agent_max_tool_calls(ctx.pipeline, spec.stage),
     )
 
 
@@ -116,13 +165,22 @@ async def execute_stage_tool(
     catalog_stage: str,
     tool_name: str,
     tool_fn: ToolFn,
+    with_attempts: bool = False,
     **kwargs: Any,
 ) -> Any:
+    """Roda a tool do stage pelo executor configurado (tool direto ou agent).
+
+    ``with_attempts=False`` (default) devolve o output de domínio cru — o contrato que
+    os nodes não-agentic esperam. ``with_attempts=True`` devolve sempre um
+    ``AgentRunResult``, inclusive em modo tool e no passthrough, para o node ter um só
+    caminho de contabilidade de custo por tentativa (D33).
+    """
     spec = _stage_spec(config, catalog_stage)
     _ensure_allowed(spec, tool_name)
     if spec.executor == "tool":
         add_trace_metadata(executor="tool", stage=catalog_stage, tool_name=tool_name)
-        return await tool_fn(ctx, **kwargs)
+        result = await tool_fn(ctx, **kwargs)
+        return _direct_run(tool_name, result) if with_attempts else result
     if spec.executor != "agent":
         raise StageExecutionError(
             f"stage {catalog_stage!r} has invalid executor {spec.executor!r}"
@@ -133,4 +191,5 @@ async def execute_stage_tool(
         )
     if not is_agent_stage_allowed(spec.stage):
         raise StageExecutionError(agent_stage_not_allowed_message())
-    return await _execute_agentic_tool(spec, ctx, tool_name, tool_fn, kwargs)
+    run = await _execute_agentic_tool(spec, ctx, tool_name, tool_fn, kwargs)
+    return run if with_attempts else run.result

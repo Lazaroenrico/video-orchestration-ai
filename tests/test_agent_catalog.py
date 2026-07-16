@@ -232,10 +232,11 @@ async def test_web_execute_run_injects_agent_catalog(monkeypatch, tmp_path):
             "requires executor: agent",
         ),
         (
+            # roster segue fora do gate de agent (video entrou no D33).
             "stages:\n"
-            "  video:\n"
+            "  roster:\n"
             "    executor: agent\n"
-            "    tools: [generate_clip]\n"
+            "    tools: [build_creator]\n"
             "    agent_enabled: true\n",
             "only supported for stages",
         ),
@@ -292,3 +293,16 @@ def test_agent_catalog_stage_lookup_rejects_unknown_stage():
 
     with pytest.raises(KeyError, match="unknown"):
         default_agent_catalog().stage("unknown")
+
+
+def test_video_is_an_allowed_agent_stage():
+    """D33: video entra no gate de agent execution; a demais mídia segue fora."""
+    from orchestrator.agent_catalog import (
+        agent_stage_not_allowed_message,
+        is_agent_stage_allowed,
+    )
+
+    assert is_agent_stage_allowed("video") is True
+    for stage in ("roster", "assembly", "upscale", "qc"):
+        assert is_agent_stage_allowed(stage) is False
+    assert "video" in agent_stage_not_allowed_message()

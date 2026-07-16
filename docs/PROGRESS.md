@@ -1375,3 +1375,63 @@ itera multi-pass até convergir ou estourar um budget. Ver ADR **D32**.
 O pipeline mock agentic ponta a ponta (`test_mock_pipeline_can_opt_into_agentic_concepts_and_scripts`)
 exercita o novo loop através do grafo. Ao vivo: `orchestrator run --config-dir config` com
 `AI_GATEWAY_API_KEY` mostra `agent_steps` no trace.
+
+## Fase 2 (D33): stage `video` agentic (2026-07-16)
+
+**Entregue:** o agent dirige a geração de clips. `_AGENT_STAGES` ganha `video`;
+`generate_clip` expõe `revision` (diretiva apendada ao brief server-authored);
+`run_agent_loop` devolve `AgentRunResult` (output final + todas as tentativas); erro de
+tool vira feedback ao modelo; budget e cap de chamadas por stage.
+
+**Arquivos:** `adapters/_agent_loop.py` (AgentRunResult/ToolAttempt, try/except no
+run_tool, `summarize_tool_result`), `adapters/base.py` (DEFAULT_MAX_STEPS + AgentPort
+atualizado), `stage_executor.py` (`with_attempts`, `_agent_max_steps(pipeline, stage)`,
+`_agent_max_tool_calls`), `tools/video.py` (`_compose_prompt`), `tools/registry.py`
+(`_VIDEO_REVISION_PARAM_SCHEMA`), `nodes/stages.py` (`_settle_takes`),
+`agent_catalog.py`, `config/agents.yaml`, `config/pipeline.yaml`.
+
+### Contratos alterados (comportamento desejado mudou — não afrouxamento)
+- `run_agent_loop`/`run_stage_agent`: de `(result, executed)` para `AgentRunResult`.
+  Dataclass, não tupla: a Fase 3 (tokens/latência) quebraria os call-sites de novo.
+- `execute_stage_tool(..., with_attempts=False)`: sem o opt-in, o retorno mudaria de tipo
+  entre modo tool e agent e quebraria concepts/scripts. Com `with_attempts=True` o retorno
+  é `AgentRunResult` **também** em modo tool e no passthrough (tentativa sintética
+  `id="direct"`), para o node de vídeo ter um só caminho de contabilidade.
+- `test_live_config_no_mock` e `test_tools::test_tool_registry_exposes_agent_parameter_schemas`
+  afirmavam "mídia fica em tool / schema vazio". Passaram a afirmar o novo comportamento.
+  Dois testes usavam `video` como exemplo de stage **proibido** em modo agent
+  (`test_agent_catalog`, `test_stage_executor`); o exemplo virou `roster`, que segue fora
+  do gate — o invariante continua provado.
+
+### Falhas investigadas (sintoma → causa → correção)
+- **Premissa errada no plano — "fan-out paralelo por tier".** Sintoma: o plano previa
+  escrita concorrente em `item.clips` e colisão de índice em `persist_item_media`. Causa:
+  `builder.py:57` usa `add_conditional_edges(START, make_script_route_node(tns), ...)` —
+  é um **router**, um só node de tier roda por item; o paralelismo é por item
+  (`batch.max_concurrency`). Prova: `Item.clips` é `list[Artifact]` **sem reducer**
+  (`graph/state.py:72`), então fan-out real já seria `InvalidUpdateError` hoje. Correção:
+  desenho simplificado, sem tratamento de concorrência.
+- **`RecursionError` no `summarize_tool_result`.** Sintoma:
+  `test_summarize_tool_result_falls_back_on_unserializable` estourou a pilha em vez de
+  cair no fallback. Causa: `_elide_data_uris` desce na estrutura, então uma referência
+  circular estoura **antes** de o `json.dumps` virar `ValueError` (o único erro que o
+  código antigo esperava). Correção: `except (TypeError, ValueError, RecursionError)`.
+- **Cobertura 99,94%** após o refactor: o `except` do `model_dump()` era um branch
+  defensivo especulativo (nenhum caso real). Correção: `model_dump()` foi para dentro do
+  `try` existente — mais simples e coberto pelo mesmo teste, com um `model_dump` que
+  levante caindo no fallback do `repr`. Voltou a 100%. (Mesmo critério da Fase 1: branch
+  sem caso real sai, não ganha teste artificial.)
+- **Bug latente corrigido:** a safety-net usava o sentinela `last_result is None`, que
+  confundia "o modelo nunca chamou uma tool" com "a tool rodou e retornou `None`" — e
+  disparava uma **segunda chamada paga** invisível. Agora há um flag `had_success`
+  explícito. Coberto por `test_agent_loop_does_not_call_safety_net_when_a_tool_returned_none`.
+
+**Escopo mantido fora (Fase 3):** `roster`/`assembly`/`upscale` agentic, multi-tool por
+stage (segue YAGNI: nenhum stage tem 2 tools legítimas), streaming de token, judge proxy,
+R2. Risco aceito: custo de take que falhe após a cobrança do provider não é contabilizado.
+
+**Verificação:** `rtk proxy python -m pytest` → **737 passed, 2 skipped**, cobertura 100%
+(era 687). `orchestrator run --batch 2 --offer "serum X" --config-dir config-mock` → 2
+produzidos, 2 aprovados, custo mock $0.64. O caminho agentic de vídeo pelo grafo inteiro
+é coberto por `test_mock_pipeline_can_opt_into_agentic_video` (offline, custo zero).
+Ao vivo ainda não rodado: exige `AI_GATEWAY_API_KEY` + Replicate (custo real).

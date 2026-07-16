@@ -8,7 +8,10 @@ from orchestrator.tools.registry import TOOL_REGISTRY, get_tool_spec, tool_specs
 
 
 _EXECUTORS = {"tool", "agent"}
-_AGENT_STAGES = {"concepts", "scripts"}
+# Stages que podem rodar em modo agent. ``video`` entrou no D33 (agent escolhe a diretiva
+# de refino da take; tier/attempt seguem server-authoritative). roster/assembly/upscale
+# continuam fora até terem contrato de artefato testado.
+_AGENT_STAGES = {"concepts", "scripts", "video"}
 
 
 def is_agent_stage_allowed(stage: str) -> bool:

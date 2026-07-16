@@ -22,7 +22,13 @@ from typing import Any, Optional
 from anthropic import AsyncAnthropic
 
 from orchestrator import stream_bus
-from orchestrator.adapters._agent_loop import DEFAULT_MAX_STEPS, ToolCall, run_agent_loop
+from orchestrator.adapters._agent_loop import (
+    DEFAULT_MAX_STEPS,
+    AgentRunResult,
+    ToolCall,
+    run_agent_loop,
+    summarize_tool_result,
+)
 from orchestrator.adapters.base import StageToolRunner
 from orchestrator.tools.registry import tool_call_schemas
 from orchestrator.tracing import add_trace_metadata, record_llm_usage, traced
@@ -292,16 +298,17 @@ class AnthropicLLMAdapter:
         inputs: dict[str, Any],
         target_model: Optional[str] = None,
         max_steps: int = DEFAULT_MAX_STEPS,
-    ) -> Any:
+        max_tool_calls: Optional[int] = None,
+    ) -> AgentRunResult:
         """Loop de tool-calling real, com o modelo Claude via SDK.
 
         O modelo recebe os schemas das tools permitidas (``input_schema``) e decide quais
         chamar (e com que ``revision``), iterando até convergir ou estourar ``max_steps``.
         O agent só toca o domínio via ``run_tool`` (fronteira D29) — a geração real
-        (concepts/scripts) acontece dentro da typed tool.
+        (concepts/scripts/clips) acontece dentro da typed tool.
         """
         brain = _AnthropicAgentBrain(self, model=target_model or self.model)
-        result, executed = await run_agent_loop(
+        run = await run_agent_loop(
             brain,
             stage=stage,
             allowed_tools=allowed_tools,
@@ -309,15 +316,16 @@ class AnthropicLLMAdapter:
             inputs=inputs,
             max_steps=max_steps,
             tool_schemas=tool_call_schemas(allowed_tools),
+            max_tool_calls=max_tool_calls,
         )
         add_trace_metadata(
             agent_backend="anthropic_gateway",
             stage=stage,
             allowed_tools=list(allowed_tools),
             target_model=target_model,
-            agent_steps=executed,
+            agent_steps=run.executed,
         )
-        return result
+        return run
 
 
 # --------------------------------------------------------------------------- #
@@ -333,12 +341,8 @@ _AGENT_SYSTEM_PROMPT = (
 )
 
 
-def _summarize_result(result: Any) -> str:
-    """Serializa o resultado de uma tool para devolver ao modelo (truncado)."""
-    try:
-        return json.dumps(result, default=str)[:4000]
-    except (TypeError, ValueError):
-        return repr(result)[:4000]
+# Compartilhado com o adapter do gateway — ver ``summarize_tool_result``.
+_summarize_result = summarize_tool_result
 
 
 class _AnthropicAgentBrain:

@@ -21,6 +21,7 @@ from langgraph.types import interrupt
 
 import orchestrator.feedback_store as _feedback_store
 from orchestrator import media_store, stream_bus
+from orchestrator.adapters._agent_loop import AgentRunResult
 from orchestrator.adapters.base import VoiceProfile, assign_voice_profile
 from orchestrator.config import default_media_path, default_videos_path
 from orchestrator.graph.state import Artifact, Item, new_item
@@ -523,6 +524,32 @@ def _video_prompt(item: Item, run_prompt: str | None, *, stage: str) -> str:
     return "\n\n".join(parts)
 
 
+def _settle_takes(run: AgentRunResult) -> tuple[Artifact, float]:
+    """Resolve um run de vídeo em ``(clip_final, custo_de_todas_as_takes)`` — D33.
+
+    O agent pode gerar várias takes e só a última vira clip do item; as descartadas
+    **já foram pagas**, então o custo soma todas. As descartadas ficam registradas no
+    meta do clip final (proveniência auditável) em vez de irem para ``item.clips``:
+    o IntegrityQC valida cada clip do item, e uma take rejeitada reprovaria o item
+    inteiro além de furar ``qc.required_clip_count``.
+    """
+    clip: Artifact = run.result
+    cost = round(sum(a.result.meta["cost_usd"] for a in run.successful), 6)
+    if not run.superseded:
+        return clip, cost
+    meta = dict(clip.meta)
+    meta["agent_takes"] = len(run.successful)
+    meta["superseded_takes"] = [
+        {
+            "uri": a.result.uri,
+            "cost_usd": a.result.meta.get("cost_usd"),
+            "revision": a.call.arguments.get("revision"),
+        }
+        for a in run.superseded
+    ]
+    return clip.model_copy(update={"meta": meta}), cost
+
+
 def _assembly_prompt(item: Item, run_prompt: str | None, *, platform: str) -> str:
     """Prompt para o vídeo final, usando Seedance como gerador de montagem."""
     parts: list[str] = []
@@ -557,12 +584,13 @@ def make_gen_node(tier: str):
             step=4, stage="talking_head", item_id=item.id, tier=tier,
             attempt=item.attempts,
         )
-        clip = await execute_stage_tool(
+        run = await execute_stage_tool(
             config,
             tool_ctx,
             catalog_stage="video",
             tool_name="generate_clip",
             tool_fn=generate_clip_tool,
+            with_attempts=True,
             item_id=item.id, tier=tier, seconds=seconds, attempt=item.attempts,
             system_prompt=_video_prompt(
                 item, run_cfg.get("video_prompt"), stage="talking-head"
@@ -570,6 +598,7 @@ def make_gen_node(tier: str):
             reference_image_uri=item.creator_image_uri,
             stage="talking_head",
         )
+        clip, takes_cost = _settle_takes(run)
         # Surfaça se o clip veio do provider real (replicate) ou de fallback mock,
         # + o modelo e a URI de saída — responde "está gerando o vídeo mesmo?".
         add_trace_metadata(
@@ -578,8 +607,9 @@ def make_gen_node(tier: str):
             video_model=clip.meta.get("model"),
             video_uri=clip.uri,
             fallback_reason=clip.meta.get("fallback_reason"),
+            agent_takes=run.executed,
         )
-        cost_usd = round(item.cost_usd + clip.meta["cost_usd"], 4)
+        cost_usd = round(item.cost_usd + takes_cost, 4)
         run_id = config["configurable"].get("thread_id", "run")
         videos_root = default_videos_path()
         updated = item.model_copy(update={"clips": item.clips + [clip]})
@@ -605,25 +635,28 @@ async def node_product_demo(state: Any, config: RunnableConfig) -> dict[str, Any
     run_cfg = config["configurable"].get("run", {})
     seconds = int(pipeline.get("clip", {}).get("duration_seconds", 8))
     add_trace_metadata(step=5, stage="product_demo", item_id=item.id, attempt=item.attempts)
-    demo = await execute_stage_tool(
+    run = await execute_stage_tool(
         config,
         tool_ctx,
         catalog_stage="video",
         tool_name="generate_clip",
         tool_fn=generate_clip_tool,
+        with_attempts=True,
         item_id=f"{item.id}:demo", tier="ltx", seconds=seconds, attempt=item.attempts,
         system_prompt=_video_prompt(item, run_cfg.get("video_prompt"), stage="product-demo"),
         reference_image_uri=item.creator_image_uri,
         stage="product_demo",
     )
+    demo, takes_cost = _settle_takes(run)
     add_trace_metadata(
         step=5, stage="product_demo_done", item_id=item.id,
         video_provider=demo.meta.get("provider"),
         video_model=demo.meta.get("model"),
         video_uri=demo.uri,
         fallback_reason=demo.meta.get("fallback_reason"),
+        agent_takes=run.executed,
     )
-    cost_usd = round(item.cost_usd + demo.meta["cost_usd"], 4)
+    cost_usd = round(item.cost_usd + takes_cost, 4)
     run_id = config["configurable"].get("thread_id", "run")
     videos_root = default_videos_path()
     updated = item.model_copy(update={"clips": item.clips + [demo]})

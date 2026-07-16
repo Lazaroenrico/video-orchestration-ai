@@ -463,3 +463,43 @@ Datas absolutas. Apendar novas decisões ao final.
   escolhe/itera tools de verdade, coberto offline (MockTransport / fake SDK client /
   brain determinístico), sem custo. Multi-tool por stage e agentificar mídia continuam
   fora de escopo (Fase 2); streaming e judge proxy, fora (Fase 3).
+
+### D33 — Stage `video` agentic: revision apendada, contabilidade de takes e budget por stage
+- **Contexto:** o D32 entregou o loop de tool-calling real, mas restrito a `concepts`/
+  `scripts` — `_AGENT_STAGES` bloqueava mídia e o D29 exigia ADR próprio para liberá-la.
+  Mídia é onde o agente pode agregar mais (reagir a uma take ruim ou a uma falha do
+  provider) e também onde errar custa dinheiro de verdade: cada take é uma cobrança.
+- **Decisão:** `video` entra em `_AGENT_STAGES`. O agent controla **um** parâmetro,
+  `revision` — uma diretiva de uma linha **apendada** ao brief construído pelo server
+  (`_video_prompt`), que sempre vence. Reusa o nome `revision` dos stages de texto: os
+  brains já ensinam esse vocabulário no system prompt, então nenhum prompt muda.
+- **Fronteiras:** `tier` **nunca** entra no schema — vem do tier routing (conditional edge)
+  e define o custo (`seedance` ≈ 17x `ltx`); o `product_demo` fixa `ltx` de propósito.
+  Idem `item_id`, `seconds`, `attempt` (vem do loop de QC), `system_prompt` e
+  `reference_image_uri`. O filtro `safe_inputs` do stage executor (D32) já garante isso:
+  o que não está em `properties` o modelo não alcança.
+- **Erros viram feedback:** uma exceção da tool dentro do loop vira tool_result de erro e
+  volta ao modelo, que pode ajustar a `revision` e tentar de novo dentro do budget. Se o
+  budget acabar **sem nenhum sucesso**, o último erro **propaga** — o stage nunca retorna
+  sucesso falso, e a safety-net não roda (seria outra chamada paga fadada ao mesmo erro).
+- **Contabilidade de takes:** `run_agent_loop` passa a devolver `AgentRunResult` (output
+  final + todas as `ToolAttempt`). O node de vídeo cobra **todas** as takes bem-sucedidas,
+  não só a vencedora — antes o custo do run mentiria. As descartadas **não** vão para
+  `item.clips`: o `IntegrityQCAdapter` valida cada clip do item, então uma take rejeitada
+  reprovaria o item inteiro e furaria `qc.required_clip_count`. Elas ficam como
+  proveniência no meta do clip final (`agent_takes`, `superseded_takes` com
+  uri/cost_usd/revision). Os bytes não são persistidos: ninguém os consome, e o custo já
+  está contabilizado. **Limitação conhecida:** uma take que falhe *depois* de o provider
+  cobrar não é contabilizada (exigiria custo no path de exceção do adapter).
+- **Budget por stage:** `agent.max_steps_by_stage.video: 2` (uma take base + uma revisão),
+  porque uma rodada de texto custa centavos e uma de vídeo, dólares. E `max_tool_calls`
+  (novo): `max_steps` conta **rodadas do modelo**, não chamadas de tool — um único step
+  pode pedir N takes, então só o cap de chamadas segura o custo de fato.
+- **Assimetria deliberada:** nos stages de texto o `revision` é repassado ao adapter, que o
+  apenda ao prompt lá dentro; em vídeo o append acontece **na tool**, para o `VideoPort` e
+  os adapters (`mock`, `replicate_video`) não mudarem.
+- **Consequência:** o agent passa a dirigir geração de mídia, coberto offline (adapter
+  agentic fake + brain determinístico) e sem custo. `config-mock` mantém `video` em modo
+  tool (dry-run barato); o caminho agentic é provado por testes de node e por um e2e do
+  grafo inteiro. `roster`/`assembly`/`upscale` seguem fora até terem contrato de artefato
+  próprio; multi-tool por stage segue YAGNI (nenhum stage tem 2 tools legítimas).

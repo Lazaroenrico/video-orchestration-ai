@@ -269,7 +269,7 @@ async def test_run_stage_agent_single_tool_call_then_stop():
         _chat_response("Looks great, done."),  # sem tool_calls → para
     ])
     adapter = _adapter_with(handler)
-    result = await adapter.run_stage_agent(
+    run = await adapter.run_stage_agent(
         stage="concepts",
         allowed_tools=("generate_concepts",),
         run_tool=run_tool,
@@ -277,7 +277,7 @@ async def test_run_stage_agent_single_tool_call_then_stop():
         target_model="anthropic/claude-opus-4.8",
     )
 
-    assert result == ["draft-concept"]
+    assert run.result == ["draft-concept"]
     assert calls == [("generate_concepts", {})]
 
 
@@ -294,7 +294,7 @@ async def test_run_stage_agent_iterates_with_revision():
         _chat_response("Done."),  # para
     ])
     adapter = _adapter_with(handler)
-    result = await adapter.run_stage_agent(
+    run = await adapter.run_stage_agent(
         stage="scripts",
         allowed_tools=("write_script",),
         run_tool=run_tool,
@@ -303,7 +303,7 @@ async def test_run_stage_agent_iterates_with_revision():
 
     assert len(calls) == 2
     assert calls[1] == ("write_script", {"revision": "Strengthen the hook."})
-    assert result == "draft/Strengthen the hook."
+    assert run.result == "draft/Strengthen the hook."
 
 
 async def test_run_stage_agent_respects_step_budget():
@@ -336,14 +336,14 @@ async def test_run_stage_agent_safety_net_when_model_never_calls_tool():
 
     # O modelo responde sem nenhum tool_call de cara; a safety-net roda a tool primária.
     adapter = _adapter_with(lambda req: _chat_response("I think we're done."))
-    result = await adapter.run_stage_agent(
+    run = await adapter.run_stage_agent(
         stage="concepts",
         allowed_tools=("generate_concepts",),
         run_tool=run_tool,
         inputs={"offer": "o"},
     )
 
-    assert result == ["fallback-draft"]
+    assert run.result == ["fallback-draft"]
     assert calls == [("generate_concepts", {})]
 
 
@@ -380,14 +380,14 @@ async def test_run_stage_agent_safety_net_on_malformed_response():
         return ["draft"]
 
     adapter = _adapter_with(lambda req: httpx.Response(200, json={}))  # sem choices
-    result = await adapter.run_stage_agent(
+    run = await adapter.run_stage_agent(
         stage="concepts",
         allowed_tools=("generate_concepts",),
         run_tool=run_tool,
         inputs={"offer": "o"},
     )
 
-    assert result == ["draft"]
+    assert run.result == ["draft"]
     assert calls == [("generate_concepts", {})]
 
 

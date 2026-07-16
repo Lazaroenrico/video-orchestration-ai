@@ -7,9 +7,21 @@ plugados via ``registry.py`` — sem mexer no grafo.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Literal, Optional, Protocol, runtime_checkable
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Awaitable,
+    Callable,
+    Literal,
+    Optional,
+    Protocol,
+    runtime_checkable,
+)
 
 from orchestrator.graph.state import Artifact, Item, JudgeVerdict, QCResult
+
+if TYPE_CHECKING:  # pragma: no cover - só para anotação; _agent_loop importa deste módulo
+    from orchestrator.adapters._agent_loop import AgentRunResult
 
 # Executor validado de uma typed tool, injetado pelo stage executor no agent.
 # Assinatura: ``await run_tool(tool_name, **tool_inputs)`` — o agent nomeia a tool
@@ -17,6 +29,11 @@ from orchestrator.graph.state import Artifact, Item, JudgeVerdict, QCResult
 # ``allowed_tools`` e injeta os inputs server-authoritative. Roda a tool tipada (com
 # seus validators) — o agent nunca fala com o adapter de domínio diretamente (D29).
 StageToolRunner = Callable[..., Awaitable[Any]]
+
+# Budget default de rodadas de decisão do modelo por stage agentic. Mora aqui (e não no
+# ``_agent_loop``) por ser parte da interface do ``AgentPort``: ``_agent_loop`` importa
+# ``StageToolRunner`` deste módulo, então o caminho inverso fecharia um ciclo.
+DEFAULT_MAX_STEPS = 4
 
 VoicePreset = Literal["male", "female", "neutral"]
 
@@ -131,12 +148,18 @@ class LLMPort(Protocol):
 
 @runtime_checkable
 class AgentPort(Protocol):
-    """Execução agentic de um stage LLM-only (Fase 7 do D29).
+    """Execução agentic de um stage (D32/D33).
 
-    Um adapter LLM opcionalmente implementa ``run_stage_agent`` para rodar um loop
-    *critique -> refine* bounded. Recebe ``run_tool`` (a typed tool já validada) e só
-    fala com o domínio através dele — nunca chama ``generate_concepts``/``write_script``
-    diretamente. Adapters sem esse método caem em passthrough no stage executor.
+    Um adapter LLM opcionalmente implementa ``run_stage_agent`` para rodar o loop de
+    tool-calling real (ReAct bounded): o modelo recebe os schemas das tools permitidas,
+    escolhe quais chamar e itera até parar ou estourar o budget. Recebe ``run_tool``
+    (a typed tool já validada) e só fala com o domínio através dele — nunca chama o
+    adapter de domínio diretamente (D29). Adapters sem esse método caem em passthrough
+    no stage executor.
+
+    Devolve um ``AgentRunResult``: o output final **e** todas as tentativas, porque uma
+    tool de mídia custa dinheiro por chamada e o node precisa contabilizar as takes
+    descartadas, não só a vencedora (D33).
     """
 
     async def run_stage_agent(
@@ -147,7 +170,9 @@ class AgentPort(Protocol):
         run_tool: StageToolRunner,
         inputs: dict[str, Any],
         target_model: Optional[str] = None,
-    ) -> Any: ...
+        max_steps: int = DEFAULT_MAX_STEPS,
+        max_tool_calls: Optional[int] = None,
+    ) -> "AgentRunResult": ...
 
 
 @runtime_checkable

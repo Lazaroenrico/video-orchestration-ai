@@ -49,8 +49,16 @@ assembly:
 roster:
   creators: 2               # quantos creators reutilizáveis no roster (Step 3)
 
-# Execução agentic (Fase 1): budget do loop de tool-calling nos stages LLM-only.
+# Execução agentic: budget do loop de tool-calling.
 # max_steps = nº máximo de rodadas de decisão do modelo por stage antes de cortar
 # (nunca loop infinito). Ausente → default do adapter (_agent_loop.DEFAULT_MAX_STEPS).
+# max_tool_calls = teto de chamadas de tool efetivas. É outro eixo: uma única rodada
+# pode pedir N tool_calls, então só este knob segura o CUSTO. Ausente → sem cap.
+# Ambos aceitam override por stage; vídeo custa por take gerada (ltx ~$0.08,
+# seedance ~$1.34) enquanto texto custa centavos — por isso o teto menor (D33).
 agent:
   max_steps: 4
+  max_steps_by_stage:
+    video: 2 # uma take base + uma revisão
+  max_tool_calls_by_stage:
+    video: 2

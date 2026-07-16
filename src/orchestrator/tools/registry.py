@@ -32,6 +32,28 @@ _EMPTY_PARAM_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
 }
 
+# Schema agent-facing do stage video (D33). Mesma alavanca única dos stages de texto —
+# ``revision`` —, reusando o nome que os brains já ensinam no system prompt. A diretiva é
+# apendada ao brief server-authored (que sempre vence). Fora do schema, e portanto
+# impossíveis de o modelo tocar: ``tier`` (vem do tier routing e define o custo — seedance
+# é ~17x ltx), ``attempt`` (vem do loop de QC), ``item_id`` (identidade), ``seconds``,
+# ``system_prompt`` e ``reference_image_uri``.
+_VIDEO_REVISION_PARAM_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "revision": {
+            "type": "string",
+            "description": (
+                "Optional one-line directive appended to the shot brief to improve the "
+                "previous take (e.g. framing, pacing, energy). The existing brief and "
+                "its constraints always win. Omit on the first call to produce the base take."
+            ),
+        }
+    },
+    "required": [],
+    "additionalProperties": False,
+}
+
 
 @dataclass(frozen=True)
 class ToolSpec:
@@ -82,6 +104,7 @@ TOOL_REGISTRY: tuple[ToolSpec, ...] = (
         stage="video",
         function_path="orchestrator.tools.video.generate_clip_tool",
         capabilities=("video_generation", "artifact_generation"),
+        parameters=dict(_VIDEO_REVISION_PARAM_SCHEMA),
     ),
     ToolSpec(
         name="qc_check",

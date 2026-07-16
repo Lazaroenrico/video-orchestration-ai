@@ -1,7 +1,8 @@
 # Catalogo declarativo para D29.
-# Fase 0 (agent activation): os stages LLM-only rodam o loop agentic (critique->refine)
-# pelo adapter llm (run_stage_agent). Os demais stages seguem em modo tool direto
-# (LangGraph node -> typed tool -> adapter); media agentic e fase posterior (D29 Fase 6).
+# concepts/scripts (Fase 0) e video (D33) rodam o loop de tool-calling real pelo adapter
+# llm (run_stage_agent). No video o agent so controla `revision` (diretiva de refino da
+# take): tier vem do tier routing e define o custo; attempt vem do loop de QC.
+# roster/qc/assembly/upscale seguem em modo tool direto (node -> typed tool -> adapter).
 stages:
   concepts:
     executor: agent
@@ -22,11 +23,11 @@ stages:
     target_agent: null
     agent_enabled: false
   video:
-    executor: tool
+    executor: agent
     tools: [generate_clip]
-    target_model: null
+    target_model: null # null = modelo default do adapter llm (o brain vem do papel llm)
     target_agent: null
-    agent_enabled: false
+    agent_enabled: true
   qc:
     executor: tool
     tools: [qc_check]

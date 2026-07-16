@@ -11,7 +11,12 @@ import base64
 import hashlib
 from typing import Any, Optional
 
-from orchestrator.adapters._agent_loop import DEFAULT_MAX_STEPS, ToolCall, run_agent_loop
+from orchestrator.adapters._agent_loop import (
+    DEFAULT_MAX_STEPS,
+    AgentRunResult,
+    ToolCall,
+    run_agent_loop,
+)
 from orchestrator.adapters.base import StageToolRunner, VoiceProfile, resolve_voice_profile
 from orchestrator.graph.state import Artifact, Item, QCResult
 from orchestrator.tools.registry import tool_call_schemas
@@ -246,7 +251,8 @@ class MockAdapter:
         inputs: dict[str, Any],
         target_model: Optional[str] = None,
         max_steps: int = DEFAULT_MAX_STEPS,
-    ) -> Any:
+        max_tool_calls: Optional[int] = None,
+    ) -> AgentRunResult:
         """Loop de tool-calling determinístico e offline (custo zero).
 
         Usa o loop compartilhado com um *brain* determinístico: chama a tool primária
@@ -255,7 +261,7 @@ class MockAdapter:
         ``write_script`` diretamente — só ``run_tool`` (fronteira D29).
         """
         brain = _MockAgentBrain(self._agent_critique)
-        result, executed = await run_agent_loop(
+        run = await run_agent_loop(
             brain,
             stage=stage,
             allowed_tools=allowed_tools,
@@ -263,15 +269,16 @@ class MockAdapter:
             inputs=inputs,
             max_steps=max_steps,
             tool_schemas=tool_call_schemas(allowed_tools),
+            max_tool_calls=max_tool_calls,
         )
         add_trace_metadata(
             agent_backend="mock",
             stage=stage,
             allowed_tools=list(allowed_tools),
             target_model=target_model,
-            agent_steps=executed,
+            agent_steps=run.executed,
         )
-        return result
+        return run
 
     @staticmethod
     def _agent_critique(stage: str, draft: Any) -> Optional[str]:
