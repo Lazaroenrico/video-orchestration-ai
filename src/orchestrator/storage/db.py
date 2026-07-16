@@ -19,15 +19,12 @@ import json
 import sqlite3
 import threading
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
 from orchestrator.storage.base import StoredObject
-
-# Retenção da D30. ``keep`` é o default seguro: um artifact só expira se alguém
-# declarar explicitamente que ele é descartável.
-RETENTION_KEEP = "keep"
-RETENTION_SHORT_LIVED = "short_lived"
+from orchestrator.storage.retention import RETENTION_KEEP, expires_at_for
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS artifacts (
@@ -198,3 +195,31 @@ class ArtifactDB:
                 "SELECT * FROM artifacts WHERE run_id = ? ORDER BY storage_key", (run_id,),
             ).fetchall()
         return [_to_record(row) for row in rows]
+
+    async def set_retention(self, storage_key: str, retention_class: str, *, now: datetime) -> None:
+        """Reclassifica um artifact e recalcula seu ``expires_at``.
+
+        Existe porque a classe só é conhecida **depois** do fato: quando o clip é
+        persistido o QC ainda não rodou, então não dá para saber se ele será aprovado,
+        superado por outra take, ou reprovado. Key desconhecida é no-op.
+        """
+        expires_at = expires_at_for(retention_class, now=now)
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                "UPDATE artifacts SET retention_class = ?, expires_at = ? WHERE storage_key = ?",
+                (retention_class, expires_at, storage_key),
+            )
+
+    async def expired(self, *, now: datetime) -> list[ArtifactRecord]:
+        """Artifacts já vencidos. ``expires_at IS NULL`` (retido) nunca entra."""
+        with self._lock, self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM artifacts WHERE expires_at IS NOT NULL AND expires_at <= ? "
+                "ORDER BY storage_key",
+                (now.isoformat(),),
+            ).fetchall()
+        return [_to_record(row) for row in rows]
+
+    async def delete(self, artifact_id: str) -> None:
+        with self._lock, self._connect() as conn:
+            conn.execute("DELETE FROM artifacts WHERE id = ?", (artifact_id,))

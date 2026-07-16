@@ -11,6 +11,7 @@ import base64
 import hashlib
 import logging
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -27,6 +28,11 @@ from orchestrator.config import default_media_path, default_videos_path
 from orchestrator.graph.state import Artifact, Item, new_item
 from orchestrator.nodes.base import as_item, get_pipeline
 from orchestrator.stage_executor import StageExecutionError, execute_stage_tool
+from orchestrator.storage.retention import (
+    RETENTION_INTERMEDIATE,
+    RETENTION_KEEP,
+    RETENTION_REJECTED,
+)
 from orchestrator.tools.assembly import assemble_video_tool, upscale_video_tool
 from orchestrator.tools.base import tool_context_from_config
 from orchestrator.tools.concepts import generate_concepts_tool
@@ -286,6 +292,43 @@ def _ensure_seed_reference_image(creator: dict[str, Any], media_root: Path) -> N
         if data_uri is not None:
             creator["image_source_uri"] = data_uri
             return
+
+
+async def classify_item_retention(
+    item: Item,
+    *,
+    db: Any,
+    now: datetime,
+) -> None:
+    """Aplica a retenção da D30 aos clips de um item, uma vez que seu destino é conhecido.
+
+    Não dá para classificar no momento da persistência: ali o QC ainda não rodou. Só
+    depois do veredito sabemos qual take é o entregável.
+
+    - Item **aprovado**: a última take é o clip aprovado (retido); as anteriores foram
+      superadas e viram tentativas intermediárias (2 dias).
+    - Item **descartado**: todas as takes são clips reprovados (3 dias).
+    - Item **ainda em voo** (QC reprovou mas há tentativa pela frente): nada a fazer —
+      condenar bytes que a próxima rodada pode promover seria cedo demais.
+
+    Clips sem ponteiro de storage (``mock://``, que nunca virou objeto) são pulados.
+    """
+    if db is None:
+        return
+
+    if item.dropped:
+        targets = [(clip, RETENTION_REJECTED) for clip in item.clips]
+    elif item.qc is not None and item.qc.passed and item.clips:
+        *superseded, final = item.clips
+        targets = [(clip, RETENTION_INTERMEDIATE) for clip in superseded]
+        targets.append((final, RETENTION_KEEP))
+    else:
+        return
+
+    for clip, retention_class in targets:
+        storage_key = (clip.meta or {}).get("storage_key")
+        if storage_key:
+            await db.set_retention(storage_key, retention_class, now=now)
 
 
 def _persistence(config: RunnableConfig, *, storage_key: str) -> dict[str, Any]:
@@ -743,6 +786,12 @@ async def node_qc(state: Any, config: RunnableConfig) -> dict[str, Any]:
         qc_score=qc.score, qc_passed=qc.passed,
     )
     if qc.passed:
+        # Destino conhecido: a última take é o entregável, as anteriores foram superadas.
+        await classify_item_retention(
+            item.model_copy(update={"qc": qc}),
+            db=config["configurable"].get("artifact_db"),
+            now=datetime.now(timezone.utc),
+        )
         return {"qc": qc}
     return {"qc": qc, "attempts": item.attempts + 1}
 
@@ -861,4 +910,10 @@ async def node_drop(state: Any, config: RunnableConfig) -> dict[str, Any]:
     """Item que esgotou as tentativas de QC: descartado, nunca publicado."""
     item = as_item(state)
     add_trace_metadata(step=7, stage="drop", item_id=item.id, dropped=True)
+    # Esgotou as tentativas: todas as takes são clips reprovados (3 dias, D30).
+    await classify_item_retention(
+        item.model_copy(update={"dropped": True}),
+        db=config["configurable"].get("artifact_db"),
+        now=datetime.now(timezone.utc),
+    )
     return {"dropped": True}

@@ -106,6 +106,16 @@ async def persist_bytes(
     return stored.uri
 
 
+def _pointer(stored: StoredObject) -> dict[str, str]:
+    """Ponteiro canônico carimbado no ``meta`` do Artifact.
+
+    Sem isso, quem estiver a jusante teria de reconstruir a key a partir da uri — o que
+    não funciona no R2 (``r2://bucket/key``) e obrigaria a adivinhar a extensão. É o que
+    permite reclassificar retenção depois do QC e derivar signed URL sob demanda.
+    """
+    return {"storage_key": stored.key, "storage_backend": stored.backend}
+
+
 async def _record(
     db: Optional[ArtifactDB],
     stored: StoredObject,
@@ -189,6 +199,7 @@ async def persist_item_media(
             if stored:
                 meta = dict(clip.get("meta") or {})
                 meta["source_uri"] = uri
+                meta.update(_pointer(stored))
                 clip = {**clip, "uri": stored.uri, "meta": meta}
                 await _record(
                     db, stored, run_id=run_id, kind=clip.get("kind") or "clip",
@@ -206,6 +217,7 @@ async def persist_item_media(
             if stored:
                 meta = dict(assembled.get("meta") or {})
                 meta["source_uri"] = uri
+                meta.update(_pointer(stored))
                 assembled = {**assembled, "uri": stored.uri, "meta": meta}
                 await _record(
                     db, stored, run_id=run_id, kind=assembled.get("kind") or "video",
