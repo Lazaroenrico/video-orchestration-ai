@@ -14,13 +14,7 @@ from typing import Optional
 
 import httpx
 
-from orchestrator.storage.base import (
-    StoredObject,
-    decode_data_uri,
-    ext_from_mime,
-    ext_from_url,
-    is_downloadable,
-)
+from orchestrator.storage.base import StoredObject, ext_from_mime, fetch_media
 
 _log = logging.getLogger(__name__)
 
@@ -56,11 +50,9 @@ class LocalMediaStorage:
         )
 
     async def put_bytes(self, data: bytes, *, key_base: str, content_type: str) -> StoredObject:
-        key = f"{key_base}.{ext_from_mime(content_type)}"
-        path = self._resolve(key)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(data)
-        return self._stored(key, data, content_type)
+        return await self.put_bytes_with_ext(
+            data, key_base=key_base, content_type=content_type, ext=ext_from_mime(content_type),
+        )
 
     async def put_from_url(
         self,
@@ -69,29 +61,17 @@ class LocalMediaStorage:
         key_base: str,
         client: Optional[httpx.AsyncClient] = None,
     ) -> Optional[StoredObject]:
-        if not is_downloadable(uri):
+        fetched = await fetch_media(uri, client=client)
+        if fetched is None:
             return None
+        return await self.put_bytes_with_ext(
+            fetched.data, key_base=key_base, content_type=fetched.content_type, ext=fetched.ext,
+        )
 
-        try:
-            if uri.startswith("data:"):
-                data, content_type = decode_data_uri(uri)
-                ext = ext_from_mime(content_type)
-            else:
-                owns_client = client is None
-                client = client or httpx.AsyncClient(timeout=120.0)
-                try:
-                    resp = await client.get(uri)
-                    resp.raise_for_status()
-                    data = resp.content
-                    content_type = resp.headers.get("content-type", "")
-                    ext = ext_from_url(uri) or ext_from_mime(content_type)
-                finally:
-                    if owns_client:
-                        await client.aclose()
-        except Exception as exc:  # noqa: BLE001 — download é best-effort
-            _log.error("put_from_url falhou para %s: %s: %s", uri, type(exc).__name__, exc)
-            return None
-
+    async def put_bytes_with_ext(
+        self, data: bytes, *, key_base: str, content_type: str, ext: str,
+    ) -> StoredObject:
+        """Variante interna com ext explícita: no download a URL manda mais que o mime."""
         key = f"{key_base}.{ext}"
         path = self._resolve(key)
         path.parent.mkdir(parents=True, exist_ok=True)

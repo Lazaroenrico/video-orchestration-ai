@@ -10,3 +10,9 @@ adapters:
   assembly: vercel_seedance_assembly  # vídeo final via Vercel AI Gateway / Seedance 2.0
   upscale: passthrough_upscale  # upscale do vídeo final (não da imagem); no-op até plugar upscaler de vídeo real
   judge: gateway
+
+# Onde os bytes de mídia pousam (D30). Trocar para `r2` exige R2_ACCOUNT_ID,
+# R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY e R2_BUCKET — sem elas o boot falha alto,
+# de propósito. Segue `local` até o bucket ser provisionado.
+storage:
+  backend: local

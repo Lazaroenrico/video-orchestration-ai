@@ -17,6 +17,7 @@ dependencies = [
     "replicate>=1.0",
     "python-dotenv>=1.0",
     "pillow>=10.0",
+    "boto3>=1.34",  # R2 via API S3-compatible (D30)
 ]
 
 [project.optional-dependencies]

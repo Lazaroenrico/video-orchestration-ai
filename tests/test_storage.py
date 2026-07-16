@@ -134,12 +134,12 @@ async def test_put_from_url_falls_back_to_the_content_type_when_the_url_has_no_e
 
 async def test_put_from_url_uses_its_own_client_when_none_is_injected(tmp_path, monkeypatch):
     """Produção não injeta client — o adapter cria (e fecha) o seu."""
-    import orchestrator.storage.local as local_storage
+    import orchestrator.storage.base as storage_base
 
     storage = _storage(tmp_path)
     real_async_client = httpx.AsyncClient
     monkeypatch.setattr(
-        local_storage.httpx, "AsyncClient",
+        storage_base.httpx, "AsyncClient",
         lambda *a, **k: real_async_client(transport=_ok_transport(_PNG_BYTES)),
     )
 

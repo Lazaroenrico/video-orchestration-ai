@@ -8,12 +8,15 @@ objeto (o que o DB persiste, D30), ``uri`` é o que vai para o ``Artifact`` e
 from __future__ import annotations
 
 import base64
+import logging
 import mimetypes
 from dataclasses import dataclass
 from typing import Optional, Protocol, runtime_checkable
 from urllib.parse import urlparse
 
 import httpx
+
+_log = logging.getLogger(__name__)
 
 # Extensão default por família de mime (fallback quando o content-type é desconhecido).
 _EXT_BY_MIME = {
@@ -72,6 +75,53 @@ def decode_data_uri(uri: str) -> tuple[bytes, str]:
         mime = header[len("data:"):].split(";", 1)[0] or mime
     data = base64.b64decode(payload) if ";base64" in header else payload.encode("utf-8")
     return data, mime
+
+
+@dataclass(frozen=True)
+class FetchedMedia:
+    """Bytes de origem já resolvidos, prontos para qualquer backend persistir."""
+
+    data: bytes
+    content_type: str
+    ext: str
+
+
+async def fetch_media(
+    uri: str,
+    *,
+    client: Optional[httpx.AsyncClient] = None,
+) -> Optional[FetchedMedia]:
+    """Resolve ``uri`` (http(s) ou ``data:``) para bytes + mime + extensão.
+
+    Compartilhado por todos os backends: *de onde* os bytes vêm não depende de *onde*
+    eles vão parar. Devolve ``None`` — nunca levanta — para uri não baixável
+    (``mock://``, voice_id) ou falha de download, deixando o caller manter a referência
+    original. É o que mantém o dry-run offline e sem custo.
+    """
+    if not is_downloadable(uri):
+        return None
+
+    try:
+        if uri.startswith("data:"):
+            data, content_type = decode_data_uri(uri)
+            ext = ext_from_mime(content_type)
+        else:
+            owns_client = client is None
+            client = client or httpx.AsyncClient(timeout=120.0)
+            try:
+                resp = await client.get(uri)
+                resp.raise_for_status()
+                data = resp.content
+                content_type = resp.headers.get("content-type", "")
+                ext = ext_from_url(uri) or ext_from_mime(content_type)
+            finally:
+                if owns_client:
+                    await client.aclose()
+    except Exception as exc:  # noqa: BLE001 — download é best-effort
+        _log.error("fetch_media falhou para %s: %s: %s", uri, type(exc).__name__, exc)
+        return None
+
+    return FetchedMedia(data=data, content_type=content_type, ext=ext)
 
 
 @dataclass(frozen=True)
