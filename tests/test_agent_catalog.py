@@ -89,10 +89,17 @@ def test_project_config_dirs_ship_valid_agents_yaml(config_dir):
     assert (Path(config_dir) / "agents.yaml").exists()
     catalog = load_agent_catalog(config_dir)
 
-    assert catalog.stage("concepts").executor == "tool"
+    # As tools por stage sao as mesmas nos dois perfis; o executor difere:
+    # o perfil live (`config`) ativa o loop agentic nos stages LLM-only (Fase 0),
+    # enquanto o perfil offline (`config-mock`) permanece em modo tool.
     assert catalog.stage("concepts").tools == ("generate_concepts",)
-    assert catalog.stage("scripts").executor == "tool"
     assert catalog.stage("scripts").tools == ("write_script",)
+
+    expected_executor = "agent" if config_dir == "config" else "tool"
+    for stage in ("concepts", "scripts"):
+        spec = catalog.stage(stage)
+        assert spec.executor == expected_executor
+        assert spec.agent_enabled is (expected_executor == "agent")
 
 
 def test_runner_config_includes_agent_catalog(pipeline_cfg):

@@ -1,18 +1,20 @@
-# Catalogo declarativo para D29/Fase 3.
-# Nesta fase o runtime continua direto: LangGraph node -> typed tool -> adapter.
+# Catalogo declarativo para D29.
+# Fase 0 (agent activation): os stages LLM-only rodam o loop agentic (critique->refine)
+# pelo adapter llm (run_stage_agent). Os demais stages seguem em modo tool direto
+# (LangGraph node -> typed tool -> adapter); media agentic e fase posterior (D29 Fase 6).
 stages:
   concepts:
-    executor: tool
+    executor: agent
     tools: [generate_concepts]
     target_model: null
     target_agent: null
-    agent_enabled: false
+    agent_enabled: true
   scripts:
-    executor: tool
+    executor: agent
     tools: [write_script]
     target_model: null
     target_agent: null
-    agent_enabled: false
+    agent_enabled: true
   roster:
     executor: tool
     tools: [build_creator]
