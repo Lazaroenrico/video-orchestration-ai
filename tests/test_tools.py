@@ -375,6 +375,7 @@ def test_tool_registry_lists_static_tool_specs():
     specs = {spec.name: spec for spec in TOOL_REGISTRY}
 
     assert set(specs) == {
+        "write_persona",
         "generate_concepts",
         "write_script",
         "build_creator",
@@ -383,6 +384,7 @@ def test_tool_registry_lists_static_tool_specs():
         "assemble_video",
         "upscale_video",
     }
+    assert specs["write_persona"].role == "llm"
     assert specs["generate_concepts"].role == "llm"
     assert specs["generate_clip"].role == "video"
     assert specs["upscale_video"].stage == "upscale"
@@ -458,7 +460,7 @@ def test_tool_registry_exposes_agent_parameter_schemas():
         assert isinstance(spec.parameters, dict)
         assert spec.parameters.get("type", "object") == "object"
 
-    for name in ("generate_concepts", "write_script", "generate_clip"):
+    for name in ("write_persona", "generate_concepts", "write_script", "generate_clip"):
         params = get_tool_spec(name).parameters
         assert "revision" in params["properties"]
         assert params["properties"]["revision"]["type"] == "string"

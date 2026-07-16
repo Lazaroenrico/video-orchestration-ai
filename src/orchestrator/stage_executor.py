@@ -123,6 +123,7 @@ async def _execute_agentic_tool(
         tool_name=tool_name,
         target_model=spec.target_model,
         target_agent=spec.target_agent,
+        has_system_prompt=bool(spec.system_prompt and spec.system_prompt.strip()),
         allowed_tools=list(spec.tools),
         run_id=ctx.run_id,
     )
@@ -153,6 +154,7 @@ async def _execute_agentic_tool(
         run_tool=run_tool,
         inputs=kwargs,
         target_model=spec.target_model,
+        system_prompt=spec.system_prompt,
         max_steps=_agent_max_steps(ctx.pipeline, spec.stage),
         max_tool_calls=_agent_max_tool_calls(ctx.pipeline, spec.stage),
     )

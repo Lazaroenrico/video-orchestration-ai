@@ -3,8 +3,9 @@
 Fala com o gateway via ``httpx`` puro contra ``POST {base_url}/chat/completions``
 (OpenAI-compatible) — **sem** o SDK ``anthropic``. Implementa:
 
-- ``LLMPort`` — ``generate_concepts`` (Step 1, com JSON Schema via ``response_format``)
-  e ``write_script`` (Step 2, texto livre calibrado por plataforma).
+- ``LLMPort`` — ``write_persona`` (Step 0), ``generate_concepts`` (Step 1, com JSON
+  Schema via ``response_format``) e ``write_script`` (Step 2, texto livre calibrado
+  por plataforma).
 - ``AgentPort`` — ``run_stage_agent`` (Fase 7 / D31): loop *critique -> refine* bounded,
   com a crítica servida pelo mesmo gateway. O agent só toca o domínio via ``run_tool``
   (fronteira D29) — nunca chama ``generate_concepts``/``write_script`` diretamente.
@@ -66,6 +67,16 @@ _CONCEPT_SCHEMA: dict[str, Any] = {
     "required": ["concepts"],
     "additionalProperties": False,
 }
+
+
+def _persona_context(persona: Optional[str]) -> str:
+    text = persona.strip() if isinstance(persona, str) else ""
+    if not text:
+        return ""
+    return (
+        "PERSONA CONTEXT (must shape the angles, language, and creator POV; do not "
+        f"quote it verbatim unless useful):\n{text}\n\n"
+    )
 
 
 def _raise_for_status_verbose(resp: httpx.Response, *, label: str = "") -> None:
@@ -286,6 +297,40 @@ class GatewayLLMAdapter:
         return content
 
     # ------------------------------------------------------------------ #
+    # Step 0 — Persona                                                    #
+    # ------------------------------------------------------------------ #
+
+    @traced("adapter.gateway.write_persona", run_type="llm", step=0, provider="vercel_gateway")
+    async def write_persona(
+        self,
+        offer: str,
+        brief: Optional[str] = None,
+        revision: Optional[str] = None,
+    ) -> str:
+        """Escreve a persona batch-level usada por concepts, scripts e creator."""
+        brief_text = brief.strip() if isinstance(brief, str) else ""
+        user_prompt = (
+            "Write one concise batch-level UGC creator persona for this offer.\n\n"
+            f"OFFER: {offer}\n\n"
+            "The persona should define audience, creator POV, tone, trust posture, "
+            "language style, and claim boundaries. Keep it practical for downstream "
+            "concept, script, image, and voice prompts."
+        )
+        if brief_text:
+            user_prompt += f"\n\nBRIEF: {brief_text}"
+        if revision:
+            user_prompt += (
+                f"\n\nREVISION DIRECTIVE (address this in the rewritten persona): {revision}"
+            )
+
+        data = await self._chat(
+            [{"role": "user", "content": user_prompt}],
+            max_tokens=2000,
+            stage="persona",
+        )
+        return self._message_text(data)
+
+    # ------------------------------------------------------------------ #
     # Step 1 — Conceitos                                                  #
     # ------------------------------------------------------------------ #
 
@@ -297,6 +342,7 @@ class GatewayLLMAdapter:
         seed: str,
         bias: Optional[list[str]] = None,
         revision: Optional[str] = None,
+        persona: Optional[str] = None,
     ) -> list[dict[str, Any]]:
         """Gera ``n`` conceitos de UGC via gateway com Structured Outputs (JSON Schema).
 
@@ -315,7 +361,7 @@ class GatewayLLMAdapter:
                 f"Spread the hook_styles broadly across all 5 styles: {_HOOK_STYLES}."
             )
 
-        user_prompt = (
+        user_prompt = _persona_context(persona) + (
             f"Generate exactly {n} UGC ad concepts for the following offer:\n\n"
             f"OFFER: {offer}\n\n"
             f"SEED (use for determinism): {seed}\n\n"
@@ -368,6 +414,7 @@ class GatewayLLMAdapter:
         creator_ref: str,
         platform: str,
         revision: Optional[str] = None,
+        persona: Optional[str] = None,
     ) -> str:
         """Escreve o script de UGC para um conceito, calibrado por plataforma.
 
@@ -390,7 +437,7 @@ class GatewayLLMAdapter:
                 "Hook within 5 seconds."
             )
 
-        user_prompt = (
+        user_prompt = _persona_context(persona) + (
             f"Write a UGC ad script for the following concept.\n\n"
             f"Platform: {platform}\n"
             f"{pacing_note}\n\n"
@@ -429,6 +476,7 @@ class GatewayLLMAdapter:
         run_tool: StageToolRunner,
         inputs: dict[str, Any],
         target_model: Optional[str] = None,
+        system_prompt: Optional[str] = None,
         max_steps: int = DEFAULT_MAX_STEPS,
         max_tool_calls: Optional[int] = None,
     ) -> AgentRunResult:
@@ -439,7 +487,11 @@ class GatewayLLMAdapter:
         o domínio via ``run_tool`` (fronteira D29) — a geração real (concepts/scripts/
         clips) acontece dentro da typed tool, nunca por chamada direta.
         """
-        brain = _GatewayAgentBrain(self, model=target_model or self.model)
+        brain = _GatewayAgentBrain(
+            self,
+            model=target_model or self.model,
+            system_prompt=system_prompt,
+        )
         run = await run_agent_loop(
             brain,
             stage=stage,
@@ -473,6 +525,11 @@ _AGENT_SYSTEM_PROMPT = (
 )
 
 
+def _agent_system_prompt(stage: str, configured_prompt: Optional[str]) -> str:
+    prompt = configured_prompt.strip() if isinstance(configured_prompt, str) else ""
+    return prompt or _AGENT_SYSTEM_PROMPT.format(stage=stage)
+
+
 # Compartilhado com o adapter Anthropic: elide data URIs (mídia base64) e trunca, para o
 # resultado de uma tool de vídeo não queimar o contexto do modelo (D33).
 _summarize_result = summarize_tool_result
@@ -481,9 +538,16 @@ _summarize_result = summarize_tool_result
 class _GatewayAgentBrain:
     """Ponte OpenAI-compatible (function-calling) entre o loop e o AI gateway."""
 
-    def __init__(self, adapter: "GatewayLLMAdapter", *, model: str) -> None:
+    def __init__(
+        self,
+        adapter: "GatewayLLMAdapter",
+        *,
+        model: str,
+        system_prompt: Optional[str] = None,
+    ) -> None:
         self._adapter = adapter
         self._model = model
+        self._system_prompt = system_prompt
 
     @staticmethod
     def _openai_tools(tool_schemas: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -503,7 +567,7 @@ class _GatewayAgentBrain:
         self, stage: str, inputs: dict[str, Any], tool_schemas: list[dict[str, Any]]
     ) -> list[Any]:
         return [
-            {"role": "system", "content": _AGENT_SYSTEM_PROMPT.format(stage=stage)},
+            {"role": "system", "content": _agent_system_prompt(stage, self._system_prompt)},
             {
                 "role": "user",
                 "content": (

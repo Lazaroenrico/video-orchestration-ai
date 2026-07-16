@@ -54,6 +54,7 @@ class _MultiTakeAdapter(MockAdapter):
         run_tool: Any,
         inputs: dict[str, Any],
         target_model: Any = None,
+        system_prompt: str | None = None,
         max_steps: int = 4,
         max_tool_calls: int | None = None,
     ) -> AgentRunResult:

@@ -54,6 +54,40 @@ def _concepts_payload(n: int, *, with_ids: bool = True) -> str:
 
 
 # --------------------------------------------------------------------------- #
+# write_persona                                                               #
+# --------------------------------------------------------------------------- #
+
+
+async def test_write_persona_returns_text_and_includes_brief():
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["prompt"] = json.loads(request.content)["messages"][0]["content"]
+        return _chat_response("PERSONA: Ana, especialista direta.")
+
+    adapter = _adapter_with(handler)
+    out = await adapter.write_persona(offer="serum X", brief="tom leve")
+
+    assert out == "PERSONA: Ana, especialista direta."
+    assert "OFFER: serum X" in captured["prompt"]
+    assert "BRIEF: tom leve" in captured["prompt"]
+
+
+async def test_write_persona_revision_appended_to_prompt():
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["prompt"] = json.loads(request.content)["messages"][0]["content"]
+        return _chat_response("PERSONA")
+
+    adapter = _adapter_with(handler)
+    await adapter.write_persona(offer="o", revision="mais jovem")
+
+    assert "REVISION DIRECTIVE" in captured["prompt"]
+    assert "mais jovem" in captured["prompt"]
+
+
+# --------------------------------------------------------------------------- #
 # generate_concepts                                                           #
 # --------------------------------------------------------------------------- #
 
@@ -130,6 +164,29 @@ async def test_generate_concepts_revision_appended_to_prompt():
     await adapter.generate_concepts(offer="o", n=1, seed="s", revision="punch up the hook")
     assert "REVISION DIRECTIVE" in captured["prompt"]
     assert "punch up the hook" in captured["prompt"]
+
+
+async def test_generate_concepts_persona_context_precedes_revision():
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["prompt"] = json.loads(request.content)["messages"][0]["content"]
+        return _chat_response(_concepts_payload(1))
+
+    adapter = _adapter_with(handler)
+    await adapter.generate_concepts(
+        offer="o",
+        n=1,
+        seed="s",
+        persona="PERSONA: Ana.",
+        revision="punch up the hook",
+    )
+
+    assert "PERSONA: Ana." in captured["prompt"]
+    assert "REVISION DIRECTIVE" in captured["prompt"]
+    assert captured["prompt"].index("PERSONA: Ana.") < captured["prompt"].index(
+        "REVISION DIRECTIVE"
+    )
 
 
 async def test_generate_concepts_raises_on_missing_choices():
@@ -215,6 +272,29 @@ async def test_write_script_revision_appended():
     assert "tighten CTA" in captured["prompt"]
 
 
+async def test_write_script_persona_context_precedes_revision():
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["prompt"] = json.loads(request.content)["messages"][0]["content"]
+        return _chat_response("script")
+
+    adapter = _adapter_with(handler)
+    await adapter.write_script(
+        concept={"id": "c"},
+        creator_ref="cr",
+        platform="tiktok",
+        persona="PERSONA: Ana.",
+        revision="tighten CTA",
+    )
+
+    assert "PERSONA: Ana." in captured["prompt"]
+    assert "REVISION DIRECTIVE" in captured["prompt"]
+    assert captured["prompt"].index("PERSONA: Ana.") < captured["prompt"].index(
+        "REVISION DIRECTIVE"
+    )
+
+
 # --------------------------------------------------------------------------- #
 # run_stage_agent — loop de tool-calling (Fase 1)                             #
 # --------------------------------------------------------------------------- #
@@ -259,15 +339,21 @@ def _queued_handler(responses: list[httpx.Response]):
 
 async def test_run_stage_agent_single_tool_call_then_stop():
     calls: list[tuple[str, dict[str, Any]]] = []
+    captured: list[dict[str, Any]] = []
 
     async def run_tool(tool_name: str, **inputs: Any) -> Any:
         calls.append((tool_name, inputs))
         return ["draft-concept"]
 
-    handler = _queued_handler([
+    queued = _queued_handler([
         _tool_call_response("generate_concepts"),
         _chat_response("Looks great, done."),  # sem tool_calls → para
     ])
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(request.content))
+        return queued(request)
+
     adapter = _adapter_with(handler)
     run = await adapter.run_stage_agent(
         stage="concepts",
@@ -275,10 +361,15 @@ async def test_run_stage_agent_single_tool_call_then_stop():
         run_tool=run_tool,
         inputs={"offer": "o", "n": 1, "seed": "s"},
         target_model="anthropic/claude-opus-4.8",
+        system_prompt="Concept agent guardrails.",
     )
 
     assert run.result == ["draft-concept"]
     assert calls == [("generate_concepts", {})]
+    assert captured[0]["messages"][0] == {
+        "role": "system",
+        "content": "Concept agent guardrails.",
+    }
 
 
 async def test_run_stage_agent_iterates_with_revision():
@@ -573,6 +664,17 @@ async def test_write_script_streams_tokens_with_the_concept_stage_label(stream_e
 
     assert out == "HOOK: buy now"
     assert {e["stage"] for e in stream_events} == {"script:concept-0007"}
+
+
+async def test_write_persona_streams_tokens_with_persona_stage(stream_events):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _sse([_delta("PERSONA: "), _delta("Ana")])
+
+    adapter = _adapter_with(handler)
+    out = await adapter.write_persona(offer="serum")
+
+    assert out == "PERSONA: Ana"
+    assert {e["stage"] for e in stream_events} == {"persona"}
 
 
 async def test_streaming_records_usage_from_the_final_chunk(stream_events, monkeypatch):

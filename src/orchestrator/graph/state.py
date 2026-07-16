@@ -107,6 +107,7 @@ class BatchState(TypedDict, total=False):
     """Estado do grafo de topo (um batch/semana de produção)."""
 
     run_id: str
+    persona: str
     concepts: list[dict[str, Any]]
     roster: list[dict[str, Any]]
     results: Annotated[list[Item], add_items]

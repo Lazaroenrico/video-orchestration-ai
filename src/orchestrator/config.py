@@ -48,10 +48,11 @@ def load_judge(path: str | None = None) -> dict[str, Any]:
 
 
 def load_agent_catalog(path: str | None = None) -> AgentCatalog:
-    catalog_path = config_dir(path) / "agents.yaml"
+    base = config_dir(path)
+    catalog_path = base / "agents.yaml"
     if not catalog_path.exists():
         return default_agent_catalog()
-    return build_agent_catalog(_load_yaml(catalog_path))
+    return build_agent_catalog(_load_yaml(catalog_path), base_dir=base)
 
 
 def default_db_path() -> Path:

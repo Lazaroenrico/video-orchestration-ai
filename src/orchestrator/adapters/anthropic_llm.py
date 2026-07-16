@@ -1,6 +1,7 @@
 """AnthropicLLMAdapter — adapter real do Claude para LLMPort.
 
-Implementa os dois métodos do LLMPort usando o SDK oficial ``anthropic``:
+Implementa os métodos do LLMPort usando o SDK oficial ``anthropic``:
+- ``write_persona`` — escreve a persona batch-level usada como contexto downstream.
 - ``generate_concepts`` — usa Structured Outputs via ``output_config`` para
   garantir JSON com o esquema exato que o grafo espera.
 - ``write_script`` — chamada de mensagem padrão com texto livre, calibrada
@@ -69,6 +70,26 @@ _CONCEPT_SCHEMA: dict[str, Any] = {
 }
 
 
+def _persona_context(persona: Optional[str]) -> str:
+    text = persona.strip() if isinstance(persona, str) else ""
+    if not text:
+        return ""
+    return (
+        "PERSONA CONTEXT (must shape the angles, language, and creator POV; do not "
+        f"quote it verbatim unless useful):\n{text}\n\n"
+    )
+
+
+def _first_text_block(response: Any, *, label: str) -> str:
+    text_block = next((blk for blk in response.content if blk.type == "text"), None)
+    if text_block is None:
+        raise RuntimeError(
+            f"Claude response contained no text block for {label}. "
+            f"Content types: {[b.type for b in response.content]}"
+        )
+    return text_block.text
+
+
 class AnthropicLLMAdapter:
     """Adapter real do Claude — implementa LLMPort.
 
@@ -91,6 +112,62 @@ class AnthropicLLMAdapter:
         self._client: AsyncAnthropic = client if client is not None else AsyncAnthropic()
 
     # ------------------------------------------------------------------ #
+    # Step 0 — Persona                                                     #
+    # ------------------------------------------------------------------ #
+
+    @traced("adapter.anthropic.write_persona", run_type="llm", step=0, provider="anthropic")
+    async def write_persona(
+        self,
+        offer: str,
+        brief: Optional[str] = None,
+        revision: Optional[str] = None,
+    ) -> str:
+        """Escreve a persona batch-level usada por concepts, scripts e creator."""
+        brief_text = brief.strip() if isinstance(brief, str) else ""
+        user_prompt = (
+            "Write one concise batch-level UGC creator persona for this offer.\n\n"
+            f"OFFER: {offer}\n\n"
+            "The persona should define audience, creator POV, tone, trust posture, "
+            "language style, and claim boundaries. Keep it practical for downstream "
+            "concept, script, image, and voice prompts."
+        )
+        if brief_text:
+            user_prompt += f"\n\nBRIEF: {brief_text}"
+        if revision:
+            user_prompt += (
+                f"\n\nREVISION DIRECTIVE (address this in the rewritten persona): {revision}"
+            )
+
+        api_kwargs = dict(
+            model=self.model,
+            max_tokens=2000,
+            thinking={"type": "adaptive"},
+            messages=[{"role": "user", "content": user_prompt}],
+        )
+
+        if stream_bus.is_streaming():
+            stream_bus.emit_token({"type": "llm_start", "stage": "persona"})
+            async with self._client.messages.stream(**api_kwargs) as s:
+                async for text in s.text_stream:
+                    stream_bus.emit_token(
+                        {"type": "llm_token", "stage": "persona", "token": text}
+                    )
+                response = await s.get_final_message()
+            stream_bus.emit_token({"type": "llm_end", "stage": "persona"})
+        else:
+            response = await self._client.messages.create(**api_kwargs)
+
+        record_llm_usage(response.usage, self.model)
+
+        if response.stop_reason == "refusal":
+            raise RuntimeError(
+                f"Claude refused to write persona for offer={offer!r}. "
+                f"stop_reason='refusal'"
+            )
+
+        return _first_text_block(response, label="write_persona")
+
+    # ------------------------------------------------------------------ #
     # Step 1 — Conceitos                                                   #
     # ------------------------------------------------------------------ #
 
@@ -102,6 +179,7 @@ class AnthropicLLMAdapter:
         seed: str,
         bias: Optional[list[str]] = None,
         revision: Optional[str] = None,
+        persona: Optional[str] = None,
     ) -> list[dict[str, Any]]:
         """Gera ``n`` conceitos de UGC via Claude com Structured Outputs.
 
@@ -126,7 +204,7 @@ class AnthropicLLMAdapter:
                 f"{_HOOK_STYLES}."
             )
 
-        user_prompt = (
+        user_prompt = _persona_context(persona) + (
             f"Generate exactly {n} UGC ad concepts for the following offer:\n\n"
             f"OFFER: {offer}\n\n"
             f"SEED (use for determinism): {seed}\n\n"
@@ -172,17 +250,7 @@ class AnthropicLLMAdapter:
                 f"stop_reason='refusal'"
             )
 
-        # Extrai o primeiro bloco de texto
-        text_block = next(
-            (blk for blk in response.content if blk.type == "text"), None
-        )
-        if text_block is None:
-            raise RuntimeError(
-                "Claude response contained no text block. "
-                f"Content types: {[b.type for b in response.content]}"
-            )
-
-        data: dict[str, Any] = json.loads(text_block.text)
+        data: dict[str, Any] = json.loads(_first_text_block(response, label="generate_concepts"))
         raw_concepts: list[dict[str, Any]] = data["concepts"]
 
         # Garante campos obrigatórios e trunca para n
@@ -205,6 +273,7 @@ class AnthropicLLMAdapter:
         creator_ref: str,
         platform: str,
         revision: Optional[str] = None,
+        persona: Optional[str] = None,
     ) -> str:
         """Escreve o script de UGC para um conceito, calibrado por plataforma.
 
@@ -229,7 +298,7 @@ class AnthropicLLMAdapter:
                 "Hook within 5 seconds."
             )
 
-        user_prompt = (
+        user_prompt = _persona_context(persona) + (
             f"Write a UGC ad script for the following concept.\n\n"
             f"Platform: {platform}\n"
             f"{pacing_note}\n\n"
@@ -274,16 +343,7 @@ class AnthropicLLMAdapter:
                 f"stop_reason='refusal'"
             )
 
-        text_block = next(
-            (blk for blk in response.content if blk.type == "text"), None
-        )
-        if text_block is None:
-            raise RuntimeError(
-                "Claude response contained no text block for write_script. "
-                f"Content types: {[b.type for b in response.content]}"
-            )
-
-        return text_block.text
+        return _first_text_block(response, label="write_script")
 
     # ------------------------------------------------------------------ #
     # Fase 1 — execução agentic (concepts/scripts): loop de tool-calling   #
@@ -297,6 +357,7 @@ class AnthropicLLMAdapter:
         run_tool: StageToolRunner,
         inputs: dict[str, Any],
         target_model: Optional[str] = None,
+        system_prompt: Optional[str] = None,
         max_steps: int = DEFAULT_MAX_STEPS,
         max_tool_calls: Optional[int] = None,
     ) -> AgentRunResult:
@@ -307,7 +368,11 @@ class AnthropicLLMAdapter:
         O agent só toca o domínio via ``run_tool`` (fronteira D29) — a geração real
         (concepts/scripts/clips) acontece dentro da typed tool.
         """
-        brain = _AnthropicAgentBrain(self, model=target_model or self.model)
+        brain = _AnthropicAgentBrain(
+            self,
+            model=target_model or self.model,
+            system_prompt=system_prompt,
+        )
         run = await run_agent_loop(
             brain,
             stage=stage,
@@ -341,6 +406,11 @@ _AGENT_SYSTEM_PROMPT = (
 )
 
 
+def _agent_system_prompt(stage: str, configured_prompt: Optional[str]) -> str:
+    prompt = configured_prompt.strip() if isinstance(configured_prompt, str) else ""
+    return prompt or _AGENT_SYSTEM_PROMPT.format(stage=stage)
+
+
 # Compartilhado com o adapter do gateway — ver ``summarize_tool_result``.
 _summarize_result = summarize_tool_result
 
@@ -348,9 +418,16 @@ _summarize_result = summarize_tool_result
 class _AnthropicAgentBrain:
     """Ponte entre o loop de tool-calling e o SDK Anthropic (blocos ``tool_use``)."""
 
-    def __init__(self, adapter: "AnthropicLLMAdapter", *, model: str) -> None:
+    def __init__(
+        self,
+        adapter: "AnthropicLLMAdapter",
+        *,
+        model: str,
+        system_prompt: Optional[str] = None,
+    ) -> None:
         self._adapter = adapter
         self._model = model
+        self._configured_system_prompt = system_prompt
         self._system = ""
 
     @staticmethod
@@ -367,7 +444,7 @@ class _AnthropicAgentBrain:
     def initial_messages(
         self, stage: str, inputs: dict[str, Any], tool_schemas: list[dict[str, Any]]
     ) -> list[Any]:
-        self._system = _AGENT_SYSTEM_PROMPT.format(stage=stage)
+        self._system = _agent_system_prompt(stage, self._configured_system_prompt)
         return [
             {
                 "role": "user",

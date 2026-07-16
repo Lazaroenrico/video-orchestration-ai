@@ -121,7 +121,14 @@ def image_gender_clause(profile: Optional[VoiceProfile]) -> str:
 
 @runtime_checkable
 class LLMPort(Protocol):
-    """Claude — conceitos (Step 1), scripts (Step 2)."""
+    """Claude — persona, conceitos (Step 1), scripts (Step 2)."""
+
+    async def write_persona(
+        self,
+        offer: str,
+        brief: Optional[str] = None,
+        revision: Optional[str] = None,
+    ) -> str: ...
 
     async def generate_concepts(
         self,
@@ -130,6 +137,7 @@ class LLMPort(Protocol):
         seed: str,
         bias: Optional[list[str]] = None,
         revision: Optional[str] = None,
+        persona: Optional[str] = None,
     ) -> list[dict[str, Any]]:
         """``bias`` = hooks vencedores do ciclo anterior (Step 10 -> 1), opcional.
 
@@ -143,6 +151,7 @@ class LLMPort(Protocol):
         creator_ref: str,
         platform: str,
         revision: Optional[str] = None,
+        persona: Optional[str] = None,
     ) -> str: ...
 
 
@@ -170,6 +179,7 @@ class AgentPort(Protocol):
         run_tool: StageToolRunner,
         inputs: dict[str, Any],
         target_model: Optional[str] = None,
+        system_prompt: Optional[str] = None,
         max_steps: int = DEFAULT_MAX_STEPS,
         max_tool_calls: Optional[int] = None,
     ) -> "AgentRunResult": ...

@@ -31,6 +31,7 @@ from orchestrator.tools.assembly import assemble_video_tool, upscale_video_tool
 from orchestrator.tools.base import tool_context_from_config
 from orchestrator.tools.concepts import generate_concepts_tool
 from orchestrator.tools.creators import build_creator_tool
+from orchestrator.tools.persona import write_persona_tool
 from orchestrator.tools.qc import qc_check_tool
 from orchestrator.tools.scripts import write_script_tool
 from orchestrator.tools.video import generate_clip_tool
@@ -289,6 +290,39 @@ def _ensure_seed_reference_image(creator: dict[str, Any], media_root: Path) -> N
 
 # ===================== Top-graph (BatchState) =====================
 
+
+def _prompt_with_persona(persona: Any, prompt: Any) -> str | None:
+    persona_text = persona.strip() if isinstance(persona, str) else ""
+    prompt_text = prompt.strip() if isinstance(prompt, str) else ""
+    if persona_text and prompt_text:
+        return f"{persona_text}\n\n{prompt_text}"
+    if persona_text:
+        return persona_text
+    if prompt_text:
+        return prompt_text
+    return None
+
+
+@traced("node.persona", run_type="chain", step=0)
+async def node_persona(state: dict[str, Any], config: RunnableConfig) -> dict[str, Any]:
+    """Step 0 — gera a persona batch-level antes dos conceitos."""
+    tool_ctx = tool_context_from_config(config)
+    run_cfg = state.get("config", {})
+    runtime_cfg = config["configurable"].get("run", {})
+    offer = run_cfg.get("offer", "demo offer")
+    brief = run_cfg.get("persona_brief", runtime_cfg.get("persona_brief"))
+    add_trace_metadata(step=0, stage="persona", offer=offer)
+    persona = await execute_stage_tool(
+        config,
+        tool_ctx,
+        catalog_stage="persona",
+        tool_name="write_persona",
+        tool_fn=write_persona_tool,
+        offer=offer,
+        brief=brief,
+    )
+    return {"persona": persona}
+
 @traced("node.roster", run_type="chain", step=3)
 async def node_roster(state: dict[str, Any], config: RunnableConfig) -> dict[str, Any]:
     """Step 3 — constrói o roster de creators reutilizáveis (uma vez por run)."""
@@ -296,7 +330,7 @@ async def node_roster(state: dict[str, Any], config: RunnableConfig) -> dict[str
     pipeline = get_pipeline(config)
     run_cfg = config["configurable"].get("run", {})
     n = int(pipeline.get("roster", {}).get("creators", 5))
-    creator_prompt = run_cfg.get("creator_prompt")
+    creator_prompt = _prompt_with_persona(state.get("persona"), run_cfg.get("creator_prompt"))
     run_id = config["configurable"].get("thread_id", "run")
     media_root = default_media_path()
     add_trace_metadata(step=3, stage="roster", creators=n)
@@ -418,6 +452,7 @@ async def node_concepts(state: dict[str, Any], config: RunnableConfig) -> dict[s
         n=n,
         seed=seed,
         bias=bias,
+        persona=state.get("persona"),
     )
     return {"concepts": concepts}
 
@@ -444,6 +479,7 @@ async def node_scripts(state: dict[str, Any], config: RunnableConfig) -> dict[st
             tool_name="write_script",
             tool_fn=write_script_tool,
             concept=concept, creator_ref="creator", platform=platform,
+            persona=state.get("persona"),
         )
         return {**concept, "script": script}
 

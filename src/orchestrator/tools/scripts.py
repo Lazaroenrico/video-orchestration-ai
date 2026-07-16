@@ -21,6 +21,7 @@ async def write_script_tool(
     creator_ref: str,
     platform: str,
     revision: Optional[str] = None,
+    persona: Optional[str] = None,
 ) -> str:
     add_trace_metadata(
         tool_name="write_script",
@@ -28,7 +29,13 @@ async def write_script_tool(
         stage="scripts",
         run_id=ctx.run_id,
     )
-    script = await ctx.adapter.write_script(
-        concept=concept, creator_ref=creator_ref, platform=platform, revision=revision,
-    )
+    kwargs: dict[str, Any] = {
+        "concept": concept,
+        "creator_ref": creator_ref,
+        "platform": platform,
+        "revision": revision,
+    }
+    if persona is not None:
+        kwargs["persona"] = persona
+    script = await ctx.adapter.write_script(**kwargs)
     return require_non_empty_string(script, tool_name="write_script_tool")

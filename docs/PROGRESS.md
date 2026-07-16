@@ -1,5 +1,58 @@
 # PROGRESS — handoff
 
+## D35 — Persona antes de conceitos, scripts e creator (2026-07-16)
+
+Objetivo: adicionar uma persona batch-level antes de qualquer conceito, reutilizada como
+contexto em concepts/scripts e como briefing do creator, preservando dry-run offline,
+determinismo e execução agentic via typed tools.
+
+### Red → Green (TDD)
+- RED inicial: `tests/test_persona.py` falhava com `ModuleNotFoundError` para
+  `orchestrator.tools.persona`, `KeyError: 'write_persona'` no registry e ausência de
+  `MockAdapter.write_persona`/`CompositeAdapter.write_persona`.
+- GREEN:
+  - `LLMPort.write_persona`, `write_persona_tool`, `ToolSpec(write_persona)` e delegação
+    `CompositeAdapter.write_persona`.
+  - `MockAdapter`, `GatewayLLMAdapter` e `AnthropicLLMAdapter` implementam persona; Gateway
+    e Anthropic streamam com stage `persona`.
+  - Top graph agora roda `persona -> concepts -> scripts -> concept_review -> roster`.
+  - `BatchState.persona` é salvo; persona é passada para concepts/scripts e prefixa o
+    `creator_prompt` sem alterar o prompt seguro de imagem.
+  - `agent_catalog` permite `persona`; `config/agents.yaml` usa `executor: agent` e
+    `config-mock/agents.yaml` usa `executor: tool`.
+  - Backend/frontend exibem `Persona` na timeline.
+- Continuação D35: cada stage agentic atual (`persona`, `concepts`, `scripts`, `video`)
+  agora declara `target_agent` e `system_prompt_path`; o loader concatena
+  `prompts/agents/_shared.md` + prompt do stage, valida arquivo ausente/vazio e expõe
+  apenas `system_prompt_path`/`has_system_prompt` no catálogo. O texto resolvido é passado
+  internamente para `run_stage_agent` em Mock, Gateway e Anthropic.
+
+### Falhas investigadas nesta fase
+- Sintoma: após inserir persona, a suíte completa quebrou em
+  `test_feedback_loop_biases_next_cycle` (`share2 == 1`).
+  - Causa: o mock distribuía o viés entre todos os estilos vencedores
+    (`bias[i % len(bias)]`); com a persona no hash, o top winner do ciclo anterior podia
+    receber só um slot enviesado.
+  - Correção: slots enviesados do mock agora privilegiam `bias[0]`; slots não enviesados
+    continuam preservando spread determinístico.
+- Sintoma: gate de cobertura caiu para 99,81% em `AnthropicLLMAdapter.write_persona`.
+  - Causa: os ramos novos de streaming e refusal da persona não estavam cobertos.
+  - Correção: adicionar regressões offline para streaming stage `persona` e refusal.
+- Sintoma: ao adicionar `system_prompt` ao `AgentPort`, a suíte completa falhou em
+  `tests/test_video_agent_node.py` com `_MultiTakeAdapter.run_stage_agent() got an
+  unexpected keyword argument 'system_prompt'`.
+  - Causa: o fake de vídeo no teste ainda implementava a assinatura antiga do port.
+  - Correção: atualizar o fake para aceitar o kwarg opcional e manter a simulação de
+    múltiplas takes inalterada.
+- Sintoma: cobertura caiu para 99,95% em `agent_catalog.py`.
+  - Causa: os ramos de `system_prompt_path` inválido e prompt sem `_shared.md` eram novos
+    e ainda não exercitados.
+  - Correção: adicionar regressões para path traversal e prompt stage-only.
+
+**Verificação:** `rtk proxy .venv/bin/python -m pytest` → **772 passed, 2 skipped**,
+cobertura 100%. `cd front && rtk npm run build` → build Vite/TypeScript limpo.
+
+
 ## Caminho A — tool layer foundation (2026-07-14)
 
 Objetivo: entregar a primeira fundação do Caminho A sem `AgentRuntime`: o LangGraph

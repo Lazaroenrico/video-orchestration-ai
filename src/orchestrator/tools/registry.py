@@ -72,6 +72,15 @@ class ToolSpec:
 
 TOOL_REGISTRY: tuple[ToolSpec, ...] = (
     ToolSpec(
+        name="write_persona",
+        description="Write the batch-level creator persona for an offer.",
+        role="llm",
+        stage="persona",
+        function_path="orchestrator.tools.persona.write_persona_tool",
+        capabilities=("llm", "persona_generation", "brand_context"),
+        parameters=dict(_REVISION_PARAM_SCHEMA),
+    ),
+    ToolSpec(
         name="generate_concepts",
         description="Generate a batch of UGC concepts for an offer.",
         role="llm",

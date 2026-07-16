@@ -115,7 +115,11 @@ class CompositeAdapter:
                 return value
         raise AttributeError(name)
 
-    # --- llm (Steps 1 e 2) ---
+    # --- llm (persona, Steps 1 e 2) ---
+    @traced("adapter.llm.write_persona", run_type="chain", role="llm", step=0)
+    async def write_persona(self, *args: Any, **kwargs: Any) -> Any:
+        return await self._by_role["llm"].write_persona(*args, **kwargs)
+
     @traced("adapter.llm.generate_concepts", run_type="chain", role="llm", step=1)
     async def generate_concepts(self, *args: Any, **kwargs: Any) -> Any:
         return await self._by_role["llm"].generate_concepts(*args, **kwargs)

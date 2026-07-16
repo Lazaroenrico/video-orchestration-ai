@@ -25,6 +25,7 @@ class _AgentAdapter:
     def __init__(self) -> None:
         self.received_max_steps: int | None = None
         self.received_max_tool_calls: int | None = None
+        self.received_system_prompt: str | None = None
         self.reject_error: Exception | None = None
 
     async def generate_concepts(self, **kwargs: Any) -> list[dict[str, Any]]:
@@ -40,9 +41,11 @@ class _AgentAdapter:
         target_model: Any = None,
         max_steps: int = 99,
         max_tool_calls: int | None = None,
+        system_prompt: str | None = None,
     ) -> AgentRunResult:
         self.received_max_steps = max_steps
         self.received_max_tool_calls = max_tool_calls
+        self.received_system_prompt = system_prompt
         try:
             await run_tool("evil_tool")  # fora da allowlist → D29 bloqueia
         except Exception as exc:  # noqa: BLE001 - captura para asserção
@@ -75,6 +78,7 @@ def _catalog(*, executor: str = "tool", tools: tuple[str, ...] = ("generate_conc
                 agent_enabled=executor == "agent",
                 target_model="mock-model" if executor == "agent" else None,
                 target_agent="concept-agent" if executor == "agent" else None,
+                system_prompt="Concept agent guardrails." if executor == "agent" else None,
             ),
         )
     )
@@ -168,6 +172,7 @@ async def test_stage_executor_agent_mode_emits_agent_trace_span_metadata(monkeyp
             "tool_name": "generate_concepts",
             "target_model": "mock-model",
             "target_agent": "concept-agent",
+            "has_system_prompt": True,
             "allowed_tools": ["generate_concepts"],
             "run_id": ctx.run_id,
         },
@@ -493,6 +498,7 @@ async def test_stage_executor_agent_run_tool_enforces_boundary_and_budget():
     )
 
     assert adapter.received_max_steps == 2  # budget do pipeline propagado
+    assert adapter.received_system_prompt == "Concept agent guardrails."
     assert isinstance(adapter.reject_error, StageExecutionError)  # D29 boundary
     # offer="HACKED" do modelo foi filtrado; usa o offer confiável do node.
     assert result == [{"id": "concept-1", "hook": "serum"}]

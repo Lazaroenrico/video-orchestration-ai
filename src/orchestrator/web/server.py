@@ -113,7 +113,7 @@ app.mount(
 _runs: dict[str, dict[str, Any]] = {}
 
 PIPELINE_NODES = {
-    "roster", "approval", "concepts", "scripts", "concept_review",
+    "persona", "roster", "approval", "concepts", "scripts", "concept_review",
     "process_item", "feedback",
     "script", "ltx", "kling", "seedance",
     "product_demo", "qc", "assembly", "upscale", "drop",
@@ -126,6 +126,7 @@ ITEM_UPDATE_NODES = {
 }
 
 NODE_LABELS: dict[str, str] = {
+    "persona": "Persona",
     "roster": "Creator Roster",
     "approval": "Aceite Human",
     "concepts": "Conceitos",

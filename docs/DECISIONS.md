@@ -537,3 +537,49 @@ Datas absolutas. Apendar novas decisões ao final.
   visível ao ligar streaming no adapter default.
 - **Consequência:** o dashboard mostra tokens ao vivo no perfil live. Coberto offline com
   `httpx.MockTransport` servindo SSE. Judge proxy e R2 (D30) seguem fora.
+
+## 2026-07-16
+
+### D35 — Persona batch-level e system prompts por stage agentic
+- **Contexto:** `concepts`, `scripts` e `creator` não compartilhavam um retrato de **quem
+  fala** — cada stage inferia o tom do próprio `offer`, e nada garantia que o creator do
+  roster fosse a mesma pessoa que o script imaginava. Em paralelo, os stages agentic
+  (D31–D33) rodavam **sem system prompt próprio**: o único guardrail era a tool tipada, que
+  restringe o *formato* da saída, não o comportamento do agent.
+- **Persona é um stage do top graph, não um campo de config:** `graph/builder.py` passa a
+  rodar `persona -> concepts -> scripts -> concept_review -> roster`, com `node_persona`
+  como step 0. Ser um node (e não uma string no `pipeline.yaml`) é o que dá as três
+  propriedades que interessam: `BatchState.persona` é **checkpointado** (logo o run é
+  resumível com a mesma persona), a persona aparece na timeline como qualquer outro stage,
+  e ela pode ser **gerada por um agent** com a mesma máquina dos demais — `write_persona`
+  é uma typed tool como as outras, e `persona` entrou em `_AGENT_STAGES`.
+- **Persona é reusada, não recopiada:** vai como parâmetro para `generate_concepts` e
+  `write_script`, e prefixa o `creator_prompt` no `node_roster` via `_prompt_with_persona`.
+  O prompt seguro de imagem **não** é tocado — a persona descreve quem fala, não o que a
+  imagem mostra, e misturar os dois reabriria o risco de conteúdo que o provider recusa.
+  Nos tools a persona só é repassada `if persona is not None`, então adapter que não a
+  aceite segue funcionando.
+- **Determinismo preservado, ao custo de um ajuste no mock:** a persona entra no hash do
+  mock, o que mudou a distribuição do viés de feedback e quebrou
+  `test_feedback_loop_biases_next_cycle`. A correção foi no **mock** (slots enviesados
+  privilegiam `bias[0]`), não no teste: o comportamento desejado — o vencedor do ciclo
+  anterior domina o próximo — era o que o teste afirmava, e o mock é que o violava.
+- **System prompt por stage = `_shared.md` + prompt do stage:** cada stage agentic declara
+  `system_prompt_path` no `agents.yaml`; `_load_system_prompt` (`agent_catalog.py`)
+  concatena as regras comuns de `prompts/agents/_shared.md` com o prompt do stage. Prompt
+  como **arquivo versionado**, não string em Python: revisável em diff, editável sem
+  redeploy de código. O `_shared.md` é opcional por construção (se não existir, vale só o
+  prompt do stage), então um `config-dir` mínimo continua válido.
+- **Path é validado no load, não no uso:** `system_prompt_path` absoluto ou com `..` é
+  `ValueError`, assim como arquivo ausente ou vazio. O caminho vem de YAML que o operador
+  edita, então o loader trata como entrada não confiável e falha cedo — um prompt vazio que
+  passasse silenciosamente viraria um agent sem guardrail nenhum.
+- **O texto do prompt não vaza para a API:** `AgentCatalog.as_dict()` expõe
+  `system_prompt_path` e `has_system_prompt` (booleano), nunca o `system_prompt` resolvido.
+  O texto só trafega internamente, do catálogo para `run_stage_agent`.
+- **Perfis divergem por executor, não por prompt:** `config/agents.yaml` usa
+  `executor: agent`; `config-mock/agents.yaml` usa `executor: tool`, com os mesmos prompts
+  no disco. Dry-run segue offline, determinístico e de custo zero.
+- **Consequência:** todo stage downstream tem acesso à persona, e cada stage agentic tem
+  guardrail próprio versionado. Segue fora: `roster`/`assembly`/`upscale` agentic, judge
+  proxy ao vivo, R2 (D30).

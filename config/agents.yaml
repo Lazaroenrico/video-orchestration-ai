@@ -4,17 +4,26 @@
 # take): tier vem do tier routing e define o custo; attempt vem do loop de QC.
 # roster/qc/assembly/upscale seguem em modo tool direto (node -> typed tool -> adapter).
 stages:
+  persona:
+    executor: agent
+    tools: [write_persona]
+    target_model: null
+    target_agent: persona-agent
+    system_prompt_path: prompts/agents/persona.md
+    agent_enabled: true
   concepts:
     executor: agent
     tools: [generate_concepts]
     target_model: null
-    target_agent: null
+    target_agent: concept-agent
+    system_prompt_path: prompts/agents/concepts.md
     agent_enabled: true
   scripts:
     executor: agent
     tools: [write_script]
     target_model: null
-    target_agent: null
+    target_agent: script-agent
+    system_prompt_path: prompts/agents/scripts.md
     agent_enabled: true
   roster:
     executor: tool
@@ -26,7 +35,8 @@ stages:
     executor: agent
     tools: [generate_clip]
     target_model: null # null = modelo default do adapter llm (o brain vem do papel llm)
-    target_agent: null
+    target_agent: video-agent
+    system_prompt_path: prompts/agents/video.md
     agent_enabled: true
   qc:
     executor: tool

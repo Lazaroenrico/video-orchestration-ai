@@ -3,9 +3,9 @@
 - Subgrafo per-item (``Item``): [route tier] -> gen(tier) -> product_demo -> qc ->
   [qc gate] -> {assembly | regen | drop}. O script já vem pronto no ``Item`` (gerado
   em nível de batch antes do creator).
-- Grafo de topo (``BatchState``): concepts -> scripts -> concept_review (gate de edição)
-  -> roster -> approval -> [fan-out via Send] -> process_item (invoca o subgrafo) ->
-  feedback.
+- Grafo de topo (``BatchState``): persona -> concepts -> scripts -> concept_review
+  (gate de edição) -> roster -> approval -> [fan-out via Send] -> process_item
+  (invoca o subgrafo) -> feedback.
 """
 from __future__ import annotations
 
@@ -26,6 +26,7 @@ from orchestrator.nodes.stages import (
     node_concepts,
     node_drop,
     node_feedback,
+    node_persona,
     node_product_demo,
     node_qc,
     node_roster,
@@ -180,6 +181,7 @@ def build_graph(pipeline: dict[str, Any], checkpointer: Optional[Any] = None):
     item_app = build_item_graph(pipeline)
 
     g = StateGraph(BatchState)
+    g.add_node("persona", node_persona)
     g.add_node("concepts", node_concepts)
     g.add_node("scripts", node_scripts)
     g.add_node("concept_review", node_concept_review)
@@ -189,8 +191,9 @@ def build_graph(pipeline: dict[str, Any], checkpointer: Optional[Any] = None):
     g.add_node("process_item", make_process_item_node(item_app))
     g.add_node("feedback", node_feedback)
 
-    # concepts -> scripts -> [gate de edição] -> creator -> [gate de aprovação] -> fan-out
-    g.add_edge(START, "concepts")
+    # persona -> concepts -> scripts -> [gate de edição] -> creator -> [gate de aprovação] -> fan-out
+    g.add_edge(START, "persona")
+    g.add_edge("persona", "concepts")
     g.add_edge("concepts", "scripts")
     g.add_edge("scripts", "concept_review")
     g.add_edge("concept_review", "roster")

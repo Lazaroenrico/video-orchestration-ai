@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from orchestrator.tools.registry import TOOL_REGISTRY, get_tool_spec, tool_specs_for_stage
@@ -11,7 +12,7 @@ _EXECUTORS = {"tool", "agent"}
 # Stages que podem rodar em modo agent. ``video`` entrou no D33 (agent escolhe a diretiva
 # de refino da take; tier/attempt seguem server-authoritative). roster/assembly/upscale
 # continuam fora até terem contrato de artefato testado.
-_AGENT_STAGES = {"concepts", "scripts", "video"}
+_AGENT_STAGES = {"persona", "concepts", "scripts", "video"}
 
 
 def is_agent_stage_allowed(stage: str) -> bool:
@@ -35,6 +36,8 @@ class StageExecutionSpec:
     tools: tuple[str, ...]
     target_model: str | None = None
     target_agent: str | None = None
+    system_prompt_path: str | None = None
+    system_prompt: str | None = None
     agent_enabled: bool = False
 
 
@@ -56,6 +59,8 @@ class AgentCatalog:
                     "tools": list(spec.tools),
                     "target_model": spec.target_model,
                     "target_agent": spec.target_agent,
+                    "system_prompt_path": spec.system_prompt_path,
+                    "has_system_prompt": bool(spec.system_prompt and spec.system_prompt.strip()),
                     "agent_enabled": spec.agent_enabled,
                 }
                 for spec in self.stages
@@ -76,9 +81,38 @@ def default_agent_catalog() -> AgentCatalog:
     return AgentCatalog(stages=specs)
 
 
-def build_agent_catalog(raw: dict[str, Any] | None = None) -> AgentCatalog:
+def _load_system_prompt(base_dir: Path, rel_path: str | None) -> tuple[str | None, str | None]:
+    if rel_path is None:
+        return None, None
+
+    prompt_path = Path(rel_path)
+    if prompt_path.is_absolute() or ".." in prompt_path.parts:
+        raise ValueError(f"agents.yaml: invalid system_prompt_path {rel_path!r}")
+
+    full_path = base_dir / prompt_path
+    if not full_path.exists():
+        raise ValueError(f"agents.yaml: system_prompt_path not found: {rel_path}")
+
+    stage_prompt = full_path.read_text(encoding="utf-8").strip()
+    if not stage_prompt:
+        raise ValueError(f"agents.yaml: empty system prompt at {rel_path}")
+
+    shared_path = base_dir / "prompts" / "agents" / "_shared.md"
+    if shared_path.exists():
+        shared_prompt = shared_path.read_text(encoding="utf-8").strip()
+        if shared_prompt:
+            return rel_path, f"{shared_prompt}\n\n{stage_prompt}"
+    return rel_path, stage_prompt
+
+
+def build_agent_catalog(
+    raw: dict[str, Any] | None = None,
+    *,
+    base_dir: str | Path | None = None,
+) -> AgentCatalog:
     catalog = default_agent_catalog()
     data = raw or {}
+    prompt_base = Path(base_dir or ".")
     stages_raw = data.get("stages", {})
     if stages_raw is None:
         stages_raw = {}
@@ -127,12 +161,19 @@ def build_agent_catalog(raw: dict[str, Any] | None = None) -> AgentCatalog:
         if executor == "agent" and not is_agent_stage_allowed(stage_name):
             raise ValueError(f"agents.yaml: {agent_stage_not_allowed_message()}")
 
+        system_prompt_path, system_prompt = _load_system_prompt(
+            prompt_base,
+            override.get("system_prompt_path", base.system_prompt_path),
+        )
+
         by_stage[stage_name] = StageExecutionSpec(
             stage=stage_name,
             executor=executor,
             tools=tools,
             target_model=override.get("target_model", base.target_model),
             target_agent=override.get("target_agent", base.target_agent),
+            system_prompt_path=system_prompt_path,
+            system_prompt=system_prompt,
             agent_enabled=agent_enabled,
         )
 

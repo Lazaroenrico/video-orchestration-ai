@@ -130,14 +130,18 @@ class _MockAgentBrain:
     ou aprovar (para). >=2 resultados → para. Bounded a no máximo 2 execuções de tool.
     """
 
-    def __init__(self, critique) -> None:
+    def __init__(self, critique, system_prompt: Optional[str] = None) -> None:
         self._critique = critique
+        self._system_prompt = system_prompt
 
     def initial_messages(
         self, stage: str, inputs: dict[str, Any], tool_schemas: list[dict[str, Any]]
     ) -> list[Any]:
         primary = tool_schemas[0]["name"] if tool_schemas else ""
-        return [{"role": "user", "stage": stage, "primary_tool": primary}]
+        message = {"role": "user", "stage": stage, "primary_tool": primary}
+        if self._system_prompt:
+            message["system_prompt"] = self._system_prompt
+        return [message]
 
     async def complete(
         self, messages: list[Any], tool_schemas: list[dict[str, Any]]
@@ -174,6 +178,34 @@ class MockAdapter:
         if self.latency:
             await asyncio.sleep(self.latency)
 
+    # --- Step 0: persona ---
+    @traced("adapter.mock.write_persona", run_type="chain", step=0, provider="mock")
+    async def write_persona(
+        self,
+        offer: str,
+        brief: Optional[str] = None,
+        revision: Optional[str] = None,
+    ) -> str:
+        await self._tick()
+        parts: tuple[Any, ...] = ("persona", offer, brief or "")
+        if revision:
+            parts = (*parts, f"rev:{revision}")
+        tag = hashlib.sha256("|".join(str(part) for part in parts).encode()).hexdigest()[:8]
+        audience = ["busy moms", "skincare beginners", "performance buyers"][
+            int(_unit(*parts, "audience") * 3)
+        ]
+        tone = ["warm expert", "direct friend", "calm skeptic"][
+            int(_unit(*parts, "tone") * 3)
+        ]
+        context = f" Brief: {brief.strip()}." if brief else ""
+        persona = (
+            f"PERSONA[{tag}]: {audience} voice as a {tone} for {offer}."
+            f"{context} Keep claims grounded and creator-safe."
+        )
+        if revision:
+            persona += f" Revision directive: {revision}"
+        return persona
+
     # --- Step 1: conceitos ---
     @traced("adapter.mock.generate_concepts", run_type="chain", step=1, provider="mock")
     async def generate_concepts(
@@ -183,6 +215,7 @@ class MockAdapter:
         seed: str,
         bias: Optional[list[str]] = None,
         revision: Optional[str] = None,
+        persona: Optional[str] = None,
     ) -> list[dict[str, Any]]:
         await self._tick()
         # bias = hooks vencedores do ciclo anterior (Step 10 -> 1). Uma fração dos
@@ -194,15 +227,16 @@ class MockAdapter:
         # byte-idêntica ao modo tool (o part de revisão nem entra no hash).
         concepts: list[dict[str, Any]] = []
         for i in range(n):
+            persona_part = (f"persona:{persona}",) if persona else ()
             if revision:
-                style_parts: tuple[Any, ...] = (seed, offer, f"rev:{revision}", i)
-                tag_key = f"{seed}|{offer}|rev:{revision}|{i}"
+                style_parts: tuple[Any, ...] = (seed, offer, *persona_part, f"rev:{revision}", i)
+                tag_key = "|".join(str(part) for part in style_parts)
             else:
-                style_parts = (seed, offer, i)
-                tag_key = f"{seed}|{offer}|{i}"
+                style_parts = (seed, offer, *persona_part, i)
+                tag_key = "|".join(str(part) for part in style_parts)
             style = _HOOK_STYLES[int(_unit(*style_parts) * len(_HOOK_STYLES))]
             if bias and _unit("bias", seed, offer, i) < bias_strength:
-                style = bias[i % len(bias)]
+                style = bias[0]
             tag = hashlib.sha256(tag_key.encode()).hexdigest()[:8]
             concepts.append(
                 {
@@ -224,6 +258,7 @@ class MockAdapter:
         creator_ref: str,
         platform: str,
         revision: Optional[str] = None,
+        persona: Optional[str] = None,
     ) -> str:
         await self._tick()
         hook = concept.get("hook", "hook")
@@ -234,6 +269,9 @@ class MockAdapter:
             f"{concept.get('offer', 'o produto')} no ângulo {concept.get('angle')}.\n"
             f"CTA: confere o link e testa hoje."
         )
+        if persona:
+            tag = hashlib.sha256(persona.encode()).hexdigest()[:8]
+            script += f"\nPERSONA_CONTEXT[{tag}]: {persona}"
         # revision (Fase 7): refino do agent anexa uma linha determinística; None mantém
         # o script base inalterado (backward-compatible com o modo tool).
         if revision:
@@ -250,6 +288,7 @@ class MockAdapter:
         run_tool: StageToolRunner,
         inputs: dict[str, Any],
         target_model: Optional[str] = None,
+        system_prompt: Optional[str] = None,
         max_steps: int = DEFAULT_MAX_STEPS,
         max_tool_calls: Optional[int] = None,
     ) -> AgentRunResult:
@@ -260,7 +299,7 @@ class MockAdapter:
         refino, chama a tool de novo com a diretiva. Nunca chama ``generate_concepts``/
         ``write_script`` diretamente — só ``run_tool`` (fronteira D29).
         """
-        brain = _MockAgentBrain(self._agent_critique)
+        brain = _MockAgentBrain(self._agent_critique, system_prompt=system_prompt)
         run = await run_agent_loop(
             brain,
             stage=stage,
