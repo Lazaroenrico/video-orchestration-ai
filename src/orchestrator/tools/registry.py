@@ -1,9 +1,36 @@
 """Static tool metadata for future agent routing."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from importlib import import_module
 from typing import Any
+
+
+# Schema agent-facing dos stages LLM-only: a única alavanca do modelo é ``revision``
+# (uma diretiva de refino). offer/n/seed (concepts) e concept/creator_ref/platform
+# (scripts) ficam server-authoritative — injetados pelo run_tool no stage_executor,
+# nunca controlados pelo modelo. ``revision`` opcional: sem ela = draft inicial.
+_REVISION_PARAM_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "revision": {
+            "type": "string",
+            "description": (
+                "Optional one-line revision directive to improve the previous draft. "
+                "Omit on the first call to produce the initial draft."
+            ),
+        }
+    },
+    "required": [],
+    "additionalProperties": False,
+}
+
+_EMPTY_PARAM_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {},
+    "required": [],
+    "additionalProperties": False,
+}
 
 
 @dataclass(frozen=True)
@@ -17,6 +44,8 @@ class ToolSpec:
     target_agent: str | None = None
     agent_enabled: bool = False
     capabilities: tuple[str, ...] = ()
+    # JSON schema dos params que o agent pode controlar ao chamar a tool (Fase 1).
+    parameters: dict[str, Any] = field(default_factory=lambda: dict(_EMPTY_PARAM_SCHEMA))
 
 
 TOOL_REGISTRY: tuple[ToolSpec, ...] = (
@@ -27,6 +56,7 @@ TOOL_REGISTRY: tuple[ToolSpec, ...] = (
         stage="concepts",
         function_path="orchestrator.tools.concepts.generate_concepts_tool",
         capabilities=("llm", "batch_generation", "concept_generation"),
+        parameters=dict(_REVISION_PARAM_SCHEMA),
     ),
     ToolSpec(
         name="write_script",
@@ -35,6 +65,7 @@ TOOL_REGISTRY: tuple[ToolSpec, ...] = (
         stage="scripts",
         function_path="orchestrator.tools.scripts.write_script_tool",
         capabilities=("llm", "copywriting", "script_generation"),
+        parameters=dict(_REVISION_PARAM_SCHEMA),
     ),
     ToolSpec(
         name="build_creator",
@@ -88,6 +119,26 @@ def get_tool_spec(name: str) -> ToolSpec:
 
 def tool_specs_for_stage(stage: str) -> tuple[ToolSpec, ...]:
     return tuple(spec for spec in TOOL_REGISTRY if spec.stage == stage)
+
+
+def tool_call_schemas(names: tuple[str, ...]) -> list[dict[str, Any]]:
+    """Contrato neutro (name/description/parameters) das tools que o agent pode chamar.
+
+    Os adapters formatam isso para o provider: OpenAI function-calling
+    (``{"type":"function","function":{...}}``) ou Anthropic (``input_schema``).
+    ``KeyError`` para nomes não registrados — só tools do registry viram schema.
+    """
+    schemas: list[dict[str, Any]] = []
+    for name in names:
+        spec = get_tool_spec(name)
+        schemas.append(
+            {
+                "name": spec.name,
+                "description": spec.description,
+                "parameters": dict(spec.parameters),
+            }
+        )
+    return schemas
 
 
 def resolve_tool_function(spec: ToolSpec) -> Any:

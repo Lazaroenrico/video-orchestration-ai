@@ -1298,3 +1298,80 @@ mídia foi limpa, a referência permanece o path `/media/...` e a geração falh
 `test_node_roster_seed_reconstructs_reference_from_local_media` e
 `test_node_roster_seed_keeps_remote_reference_untouched` (stages). Suíte
 `rtk proxy python -m pytest` → **576 passed, 2 skipped**, cobertura 100%.
+
+## Transformação agent — Fase 0: ativação do modo agent (2026-07-15)
+
+Objetivo: ligar o loop agentic (critique→refine) que já existia implementado mas estava
+dormente. Toda a máquina (`AgentPort.run_stage_agent`, `stage_executor`, `agent_catalog`)
+já estava pronta e testada; faltava apenas nenhuma config ativá-la — `config/agents.yaml`
+declarava todos os stages como `executor: tool, agent_enabled: false`.
+
+### Red → Green (TDD)
+- RED: `test_live_config_activates_agent_mode_on_llm_stages` (test_live_config_no_mock.py)
+  afirma que o perfil live (`config`) ships `concepts`/`scripts` em `executor: agent,
+  agent_enabled: true` e mantém os stages de mídia em modo tool. Falhou (config ainda tool).
+- GREEN: `config/agents.yaml` — `concepts` e `scripts` viram `executor: agent,
+  agent_enabled: true`. Nenhum código de produto mudou; o roteamento agent já existia no
+  `stage_executor`. `config-mock/agents.yaml` permanece tool (perfil offline/dry-run).
+
+### Falha investigada (sintoma → causa → correção)
+- **Sintoma:** `test_project_config_dirs_ship_valid_agents_yaml[config]` quebrou.
+- **Causa:** o teste travava o estado *antigo* (concepts/scripts sempre `executor == "tool"`)
+  para ambos os perfis. O comportamento desejado do perfil live mudou legitimamente na Fase 0.
+- **Correção:** o teste passou a esperar `executor` específico por perfil — `agent` para
+  `config`, `tool` para `config-mock` — mantendo as demais asserções (tools por stage,
+  validade do YAML). Não foi afrouxamento: continua provando o contrato, agora correto.
+
+**Escopo:** o loop ativado ainda é o wrapper bounded de 2 passos (draft→critique→refine ×1),
+não um loop de tool-calling. A Fase 1 (tool-calling real) é a próxima etapa do roadmap.
+
+**Verificação:** `rtk proxy python -m pytest` → suíte verde, cobertura 100%. Ao vivo:
+`orchestrator run --batch 2 --offer "serum X" --config-dir config` com `AI_GATEWAY_API_KEY`
+setado mostra `agent_backend`/`agent_revised` no trace do LangSmith.
+
+## Transformação agent — Fase 1: loop de tool-calling real (2026-07-15)
+
+Objetivo: substituir o wrapper agentic fixo de 2 passos (draft→critique→refine ×1) por um
+**loop de tool-calling real** — o modelo recebe schemas das tools, escolhe quais chamar e
+itera multi-pass até convergir ou estourar um budget. Ver ADR **D32**.
+
+### Red → Green (TDD)
+- `tools/registry.py`: `ToolSpec.parameters` (JSON schema agent-facing) + `tool_call_schemas`.
+  concepts/scripts expõem só `revision`; media tools = schema vazio (Fase 2).
+  Testes: `test_tool_registry_exposes_agent_parameter_schemas`,
+  `test_tool_call_schemas_builds_neutral_schema_for_allowed_tools` (test_tools.py).
+- `adapters/_agent_loop.py` (novo): loop compartilhado provider-agnostic + `ToolCall` +
+  `AgentBrain` Protocol. Centraliza budget (`max_steps`), fronteira D29 (só `run_tool`),
+  enforcement de `allowed_tools` e safety-net (garante ≥1 output de domínio válido).
+  Testes: `tests/test_agent_loop.py` (single-call, multi-pass, budget, safety-net, allowlist).
+- `stage_executor.py`: closure `run_tool(tool_name, **inputs)` — o agent nomeia a tool; o
+  executor valida contra `allowed_tools` e mantém offer/n/seed server-authoritative
+  (filtra args do modelo aos params declarados). Novo `_agent_max_steps` lê `agent.max_steps`
+  do pipeline. Teste: `test_stage_executor_agent_run_tool_enforces_boundary_and_budget`.
+- Adapters `mock.py` / `gateway_llm.py` / `anthropic_llm.py`: `run_stage_agent` reescrito
+  sobre `run_agent_loop`, cada um com seu brain (`_MockAgentBrain` determinístico,
+  `_GatewayAgentBrain` OpenAI function-calling via httpx, `_AnthropicAgentBrain` `tool_use`
+  do SDK). `_agent_critique` (crítica-como-diretiva) removido — coberto pelo novo loop.
+- `config/pipeline.yaml`: seção `agent.max_steps: 4` (budget documentado; default se ausente).
+
+### Contratos alterados (comportamento desejado mudou — não afrouxamento)
+- `StageToolRunner`: de `run_tool(**inputs)` para `run_tool(tool_name, **inputs)`. Os testes
+  agentic de mock/gateway/anthropic foram reescritos para o novo contrato de tool-calling
+  (draft inicial via tool nomeada; refino via 2ª chamada com `revision`; budget; safety-net;
+  allowlist). A cobertura foi **substituída**, não reduzida: os testes de `_agent_critique`
+  deram lugar a testes do loop real.
+
+### Falhas investigadas (sintoma → causa → correção)
+- **Cobertura 99.6%** após o rewrite: branches defensivos/futuros não exercitados —
+  (a) resolução multi-tool no closure (Fase 2): **removida** por YAGNI (entra na Fase 2 com
+  teste); (b) guard D29 do closure, knob `max_steps`, `_summarize_result` (ref. circular),
+  resposta malformada do gateway e args de tool inválidos: cobertos com testes diretos.
+  Voltou a 100%.
+
+**Escopo mantido fora (Fase 2/3):** multi-tool por stage, agentificar mídia
+(`_AGENT_STAGES` ainda = concepts/scripts), streaming de token, judge proxy, R2.
+
+**Verificação:** `rtk proxy python -m pytest` → **687 passed, 2 skipped**, cobertura 100%.
+O pipeline mock agentic ponta a ponta (`test_mock_pipeline_can_opt_into_agentic_concepts_and_scripts`)
+exercita o novo loop através do grafo. Ao vivo: `orchestrator run --config-dir config` com
+`AI_GATEWAY_API_KEY` mostra `agent_steps` no trace.

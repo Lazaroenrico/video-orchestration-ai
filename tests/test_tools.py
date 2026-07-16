@@ -397,6 +397,44 @@ def test_tool_registry_lookup_by_name_and_stage():
         get_tool_spec("unknown_tool")
 
 
+def test_tool_registry_exposes_agent_parameter_schemas():
+    """Fase 1: cada ToolSpec declara um JSON schema dos params controláveis pelo agent.
+
+    Os stages LLM-only (concepts/scripts) expõem ``revision`` — a única alavanca do modelo;
+    offer/n/seed/etc. ficam server-authoritative (injetados pelo run_tool). Media tools
+    ainda não são agentic (Fase 2), então declaram schema vazio.
+    """
+    from orchestrator.tools.registry import TOOL_REGISTRY, get_tool_spec
+
+    for spec in TOOL_REGISTRY:
+        assert isinstance(spec.parameters, dict)
+        assert spec.parameters.get("type", "object") == "object"
+
+    for name in ("generate_concepts", "write_script"):
+        params = get_tool_spec(name).parameters
+        assert "revision" in params["properties"]
+        assert params["properties"]["revision"]["type"] == "string"
+        # nada de params obrigatórios: o modelo pode chamar sem revisão (draft inicial).
+        assert params.get("required", []) == []
+
+
+def test_tool_call_schemas_builds_neutral_schema_for_allowed_tools():
+    """``tool_call_schemas`` monta o contrato neutro (name/description/parameters) que os
+    adapters formatam para o provider (OpenAI function-calling ou Anthropic input_schema)."""
+    from orchestrator.tools.registry import tool_call_schemas
+
+    schemas = tool_call_schemas(("generate_concepts",))
+    assert len(schemas) == 1
+    schema = schemas[0]
+    assert schema["name"] == "generate_concepts"
+    assert schema["description"].strip()
+    assert schema["parameters"]["properties"]["revision"]["type"] == "string"
+
+    # nomes desconhecidos estouram (contrato: só tools registradas viram schema).
+    with pytest.raises(KeyError, match="nope"):
+        tool_call_schemas(("nope",))
+
+
 def test_tool_registry_covers_tool_functions_imported_by_stage_nodes():
     from orchestrator.nodes import stages
     from orchestrator.tools.registry import TOOL_REGISTRY, resolve_tool_function

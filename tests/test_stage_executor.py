@@ -14,6 +14,39 @@ class _Adapter:
         return [{"id": "concept-1", "hook": kwargs["offer"]}]
 
 
+class _AgentAdapter:
+    """Adapter agentic que exercita o closure ``run_tool`` do stage executor.
+
+    Captura o ``max_steps`` propagado pelo pipeline e tenta chamar uma tool fora da
+    allowlist (fronteira D29), depois chama a tool primária com args do "modelo".
+    """
+
+    def __init__(self) -> None:
+        self.received_max_steps: int | None = None
+        self.reject_error: Exception | None = None
+
+    async def generate_concepts(self, **kwargs: Any) -> list[dict[str, Any]]:
+        return [{"id": "concept-1", "hook": kwargs["offer"]}]
+
+    async def run_stage_agent(
+        self,
+        *,
+        stage: str,
+        allowed_tools: tuple[str, ...],
+        run_tool: Any,
+        inputs: dict[str, Any],
+        target_model: Any = None,
+        max_steps: int = 99,
+    ) -> Any:
+        self.received_max_steps = max_steps
+        try:
+            await run_tool("evil_tool")  # fora da allowlist → D29 bloqueia
+        except Exception as exc:  # noqa: BLE001 - captura para asserção
+            self.reject_error = exc
+        # O "modelo" tenta sobrescrever offer (server-authoritative) + passa revision.
+        return await run_tool("generate_concepts", revision="tighten", offer="HACKED")
+
+
 def _config(catalog: AgentCatalog) -> dict[str, Any]:
     return {
         "configurable": {
@@ -380,9 +413,48 @@ async def test_mock_pipeline_can_opt_into_agentic_concepts_and_scripts(tmp_path,
     assert all(item.script for item in out["results"])
 
 
+async def test_stage_executor_agent_run_tool_enforces_boundary_and_budget():
+    """O closure run_tool do executor: (1) propaga o budget ``agent.max_steps`` do
+    pipeline, (2) bloqueia tools fora da allowlist (D29) e (3) mantém offer/n/seed
+    server-authoritative — o modelo só influencia params declarados (``revision``)."""
+    from orchestrator.stage_executor import StageExecutionError, execute_stage_tool
+    from orchestrator.tools.base import tool_context_from_config
+    from orchestrator.tools.concepts import generate_concepts_tool
+
+    adapter = _AgentAdapter()
+    cfg = {
+        "configurable": {
+            "adapter": adapter,
+            "pipeline": {"agent": {"max_steps": 2}},
+            "run": {},
+            "thread_id": "t",
+            "agent_catalog": _catalog(executor="agent"),
+        }
+    }
+    ctx = tool_context_from_config(cfg)
+
+    result = await execute_stage_tool(
+        cfg,
+        ctx,
+        catalog_stage="concepts",
+        tool_name="generate_concepts",
+        tool_fn=generate_concepts_tool,
+        offer="serum",
+        n=1,
+        seed="run",
+        bias=None,
+    )
+
+    assert adapter.received_max_steps == 2  # budget do pipeline propagado
+    assert isinstance(adapter.reject_error, StageExecutionError)  # D29 boundary
+    # offer="HACKED" do modelo foi filtrado; usa o offer confiável do node.
+    assert result == [{"id": "concept-1", "hook": "serum"}]
+
+
 async def test_mock_run_stage_agent_meets_acceptance_criteria():
-    """Critério de aceite D31 (mock): critique aceita → 1 chamada de tool, retorna o
-    rascunho; critique pede refino → 2 chamadas (2ª com ``revision``) e output difere."""
+    """Critério de aceite (mock, loop de tool-calling): critique aceita → 1 chamada de
+    tool nomeada, retorna o rascunho; critique pede refino → 2 chamadas (a 2ª com
+    ``revision``) e o output difere. O agent chama a tool por nome (fronteira D29)."""
     from orchestrator.adapters.mock import MockAdapter
 
     adapter = MockAdapter(tiers=[])
@@ -399,11 +471,11 @@ async def test_mock_run_stage_agent_meets_acceptance_criteria():
             refine_draft = refine_draft or candidate
         i += 1
 
-    # Aceita: 1 chamada, retorna o rascunho intacto.
-    approve_calls: list[dict[str, Any]] = []
+    # Aceita: 1 chamada, tool nomeada, sem revision, retorna o rascunho intacto.
+    approve_calls: list[tuple[str, dict[str, Any]]] = []
 
-    async def approve_tool(**inputs: Any) -> Any:
-        approve_calls.append(inputs)
+    async def approve_tool(tool_name: str, **inputs: Any) -> Any:
+        approve_calls.append((tool_name, inputs))
         return approve_draft
 
     approved = await adapter.run_stage_agent(
@@ -413,14 +485,15 @@ async def test_mock_run_stage_agent_meets_acceptance_criteria():
         inputs={"offer": "o"},
     )
     assert len(approve_calls) == 1
-    assert "revision" not in approve_calls[0]
+    assert approve_calls[0][0] == "generate_concepts"
+    assert "revision" not in approve_calls[0][1]
     assert approved == approve_draft
 
     # Refina: 2 chamadas, a 2ª com ``revision``, e o output difere do rascunho.
-    refine_calls: list[dict[str, Any]] = []
+    refine_calls: list[tuple[str, dict[str, Any]]] = []
 
-    async def refine_tool(**inputs: Any) -> Any:
-        refine_calls.append(inputs)
+    async def refine_tool(tool_name: str, **inputs: Any) -> Any:
+        refine_calls.append((tool_name, inputs))
         if "revision" in inputs:
             return refine_draft + ["REFINED"]
         return refine_draft
@@ -432,5 +505,6 @@ async def test_mock_run_stage_agent_meets_acceptance_criteria():
         inputs={"offer": "o"},
     )
     assert len(refine_calls) == 2
-    assert "revision" in refine_calls[1]
+    assert refine_calls[0][0] == "generate_concepts"
+    assert "revision" in refine_calls[1][1]
     assert refined != refine_draft

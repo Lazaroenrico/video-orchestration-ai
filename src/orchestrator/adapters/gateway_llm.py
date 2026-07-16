@@ -21,8 +21,10 @@ from typing import Any, Optional
 
 import httpx
 
+from orchestrator.adapters._agent_loop import DEFAULT_MAX_STEPS, ToolCall, run_agent_loop
 from orchestrator.adapters._retry import with_transport_retry
 from orchestrator.adapters.base import StageToolRunner
+from orchestrator.tools.registry import tool_call_schemas
 from orchestrator.tracing import add_trace_metadata, record_llm_usage, traced
 
 _HOOK_STYLES = ["problem", "curiosity", "bold_claim", "emotional", "social_proof"]
@@ -127,16 +129,18 @@ class GatewayLLMAdapter:
 
     async def _chat(
         self,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         *,
         max_tokens: int,
         model: Optional[str] = None,
         response_format: Optional[dict[str, Any]] = None,
+        tools: Optional[list[dict[str, Any]]] = None,
     ) -> dict[str, Any]:
         """POST ``{base_url}/chat/completions`` e retorna o JSON decodificado.
 
         Registra token usage/custo na run atual (via ``record_llm_usage``) e levanta
         com o corpo do gateway em falha (diagnóstico). Retenta blips de transporte/429.
+        ``tools`` (function-calling OpenAI-compatible) habilita o loop agentic (Fase 1).
         """
         used_model = model or self.model
         headers = {
@@ -150,6 +154,9 @@ class GatewayLLMAdapter:
         }
         if response_format is not None:
             body["response_format"] = response_format
+        if tools is not None:
+            body["tools"] = tools
+            body["tool_choice"] = "auto"
 
         async def _call() -> dict[str, Any]:
             if self._client is not None:
@@ -314,7 +321,7 @@ class GatewayLLMAdapter:
         return self._message_text(data)
 
     # ------------------------------------------------------------------ #
-    # Fase 7 — execução agentic (concepts/scripts) pelo AI gateway         #
+    # Fase 1 — execução agentic (concepts/scripts): loop de tool-calling   #
     # ------------------------------------------------------------------ #
 
     async def run_stage_agent(
@@ -325,52 +332,132 @@ class GatewayLLMAdapter:
         run_tool: StageToolRunner,
         inputs: dict[str, Any],
         target_model: Optional[str] = None,
+        max_steps: int = DEFAULT_MAX_STEPS,
     ) -> Any:
-        """Loop *critique -> refine* bounded, com o modelo servido pelo AI gateway.
+        """Loop de tool-calling real, com o modelo servido pelo AI gateway.
 
-        Gera o rascunho pela typed tool (``run_tool``), pede uma crítica acionável e, se
-        houver, regenera uma vez com a diretiva. O agent só toca o domínio via
-        ``run_tool`` (fronteira D29).
+        O modelo recebe os schemas das tools permitidas e decide quais chamar (e com que
+        ``revision``), iterando até convergir ou estourar ``max_steps``. O agent só toca
+        o domínio via ``run_tool`` (fronteira D29) — a geração real (concepts/scripts)
+        acontece dentro da typed tool, nunca por chamada direta.
         """
-        draft = await run_tool(**inputs)
-        revision = await self._agent_critique(stage, draft, model=target_model or self.model)
+        brain = _GatewayAgentBrain(self, model=target_model or self.model)
+        result, executed = await run_agent_loop(
+            brain,
+            stage=stage,
+            allowed_tools=allowed_tools,
+            run_tool=run_tool,
+            inputs=inputs,
+            max_steps=max_steps,
+            tool_schemas=tool_call_schemas(allowed_tools),
+        )
         add_trace_metadata(
             agent_backend="vercel_gateway",
             stage=stage,
             allowed_tools=list(allowed_tools),
             target_model=target_model,
-            agent_revised=bool(revision),
+            agent_steps=executed,
         )
-        if not revision:
-            return draft
-        return await run_tool(**{**inputs, "revision": revision})
+        return result
 
-    @traced("adapter.gateway.agent_critique", run_type="llm", provider="vercel_gateway")
-    async def _agent_critique(self, stage: str, draft: Any, *, model: str) -> Optional[str]:
-        """Pede ao modelo uma diretiva de refino do rascunho (ou aprovação).
 
-        Retorna ``None`` quando o modelo aprova (responde ``APPROVE``) ou quando a leitura
-        falha — o rascunho já é válido (passou pelos validators da tool). Nunca levanta.
-        """
-        critique_prompt = (
-            f"You are reviewing the draft output of the '{stage}' stage of a UGC ad "
-            "pipeline. If the draft is already strong, reply with exactly: APPROVE\n"
-            "Otherwise reply with a single actionable one-line revision directive "
-            "(no preamble). Draft:\n\n"
-            f"{draft!r}"
+# --------------------------------------------------------------------------- #
+# Brain do loop de tool-calling (OpenAI-compatible)                           #
+# --------------------------------------------------------------------------- #
+
+_AGENT_SYSTEM_PROMPT = (
+    "You are an agent driving the '{stage}' stage of a UGC ad pipeline. "
+    "Call the provided tool to produce the draft. Then review the tool result: if it can "
+    "be materially improved, call the tool again passing a concise one-line 'revision' "
+    "directive. When the result is strong, stop and reply without any further tool call. "
+    "You may only set an optional 'revision'; the other inputs are fixed server-side."
+)
+
+
+def _summarize_result(result: Any) -> str:
+    """Serializa o resultado de uma tool para devolver ao modelo (truncado)."""
+    try:
+        return json.dumps(result, default=str)[:4000]
+    except (TypeError, ValueError):
+        return repr(result)[:4000]
+
+
+class _GatewayAgentBrain:
+    """Ponte OpenAI-compatible (function-calling) entre o loop e o AI gateway."""
+
+    def __init__(self, adapter: "GatewayLLMAdapter", *, model: str) -> None:
+        self._adapter = adapter
+        self._model = model
+
+    @staticmethod
+    def _openai_tools(tool_schemas: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": s["name"],
+                    "description": s["description"],
+                    "parameters": s["parameters"],
+                },
+            }
+            for s in tool_schemas
+        ]
+
+    def initial_messages(
+        self, stage: str, inputs: dict[str, Any], tool_schemas: list[dict[str, Any]]
+    ) -> list[Any]:
+        return [
+            {"role": "system", "content": _AGENT_SYSTEM_PROMPT.format(stage=stage)},
+            {
+                "role": "user",
+                "content": (
+                    f"Stage inputs (fixed): {json.dumps(inputs, default=str)}\n"
+                    "Begin by calling the tool to produce the initial draft."
+                ),
+            },
+        ]
+
+    async def complete(
+        self, messages: list[Any], tool_schemas: list[dict[str, Any]]
+    ) -> tuple[Any, list[ToolCall]]:
+        data = await self._adapter._chat(
+            messages,
+            max_tokens=1500,
+            model=self._model,
+            tools=self._openai_tools(tool_schemas),
         )
         try:
-            data = await self._chat(
-                [{"role": "user", "content": critique_prompt}],
-                max_tokens=400,
-                model=model,
+            message = data["choices"][0]["message"]
+        except (KeyError, IndexError, TypeError):
+            return {"role": "assistant", "content": ""}, []
+        return message, self._parse_tool_calls(message)
+
+    @staticmethod
+    def _parse_tool_calls(message: dict[str, Any]) -> list[ToolCall]:
+        raw = message.get("tool_calls") or []
+        calls: list[ToolCall] = []
+        for tc in raw:
+            fn = tc.get("function", {}) if isinstance(tc, dict) else {}
+            args_raw = fn.get("arguments") or "{}"
+            try:
+                args = json.loads(args_raw) if isinstance(args_raw, str) else dict(args_raw)
+            except (TypeError, ValueError):
+                args = {}
+            calls.append(
+                ToolCall(
+                    id=str(tc.get("id", "")),
+                    name=str(fn.get("name", "")),
+                    arguments=args if isinstance(args, dict) else {},
+                )
             )
-            directive = self._message_text(data).strip()
-        except Exception:
-            return None
-        if not directive or directive.upper().startswith("APPROVE"):
-            return None
-        return directive
+        return calls
+
+    def tool_result_message(self, call: ToolCall, result: Any) -> Any:
+        return {
+            "role": "tool",
+            "tool_call_id": call.id,
+            "content": _summarize_result(result),
+        }
 
 
 # --------------------------------------------------------------------------- #

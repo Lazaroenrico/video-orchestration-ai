@@ -12,8 +12,10 @@ from typing import Any, Awaitable, Callable, Literal, Optional, Protocol, runtim
 from orchestrator.graph.state import Artifact, Item, JudgeVerdict, QCResult
 
 # Executor validado de uma typed tool, injetado pelo stage executor no agent.
-# Chamá-lo roda a tool tipada (com seus validators) — o agent nunca fala com o
-# adapter de domínio diretamente (fronteira D29).
+# Assinatura: ``await run_tool(tool_name, **tool_inputs)`` — o agent nomeia a tool
+# que quer chamar (tool-calling real, Fase 1); o stage executor valida o nome contra
+# ``allowed_tools`` e injeta os inputs server-authoritative. Roda a tool tipada (com
+# seus validators) — o agent nunca fala com o adapter de domínio diretamente (D29).
 StageToolRunner = Callable[..., Awaitable[Any]]
 
 VoicePreset = Literal["male", "female", "neutral"]

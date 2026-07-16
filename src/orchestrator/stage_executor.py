@@ -5,6 +5,7 @@ from typing import Any, Awaitable, Callable
 
 from langchain_core.runnables import RunnableConfig
 
+from orchestrator.adapters._agent_loop import DEFAULT_MAX_STEPS
 from orchestrator.agent_catalog import (
     AgentCatalog,
     StageExecutionSpec,
@@ -13,6 +14,7 @@ from orchestrator.agent_catalog import (
     is_agent_stage_allowed,
 )
 from orchestrator.tools.base import ToolContext
+from orchestrator.tools.registry import get_tool_spec
 from orchestrator.tracing import add_trace_metadata, traced
 
 
@@ -21,6 +23,16 @@ class StageExecutionError(RuntimeError):
 
 
 ToolFn = Callable[..., Awaitable[Any]]
+
+
+def _agent_max_steps(pipeline: dict[str, Any]) -> int:
+    """Lê o budget do agent (``agent.max_steps`` no pipeline.yaml); default se ausente."""
+    agent_cfg = pipeline.get("agent") if isinstance(pipeline, dict) else None
+    if isinstance(agent_cfg, dict):
+        raw = agent_cfg.get("max_steps")
+        if isinstance(raw, int) and raw > 0:
+            return raw
+    return DEFAULT_MAX_STEPS
 
 
 def _catalog_from_config(config: RunnableConfig) -> AgentCatalog:
@@ -73,9 +85,19 @@ async def _execute_agentic_tool(
         add_trace_metadata(agent_backend="passthrough")
         return await tool_fn(ctx, **kwargs)
 
-    async def run_tool(**tool_inputs: Any) -> Any:
-        # Fronteira D29: o agent só toca o domínio via a typed tool (validada).
-        return await tool_fn(ctx, **tool_inputs)
+    async def run_tool(called_tool: str, **tool_inputs: Any) -> Any:
+        # Fronteira D29: o agent só toca o domínio via a typed tool (validada) e só
+        # pela tool do stage. Fase 1 = uma tool por stage (a primária, ``tool_fn``);
+        # multi-tool por stage entra na Fase 2 (resolução por nome via registry).
+        if called_tool != tool_name:
+            raise StageExecutionError(
+                f"tool {called_tool!r} is not allowed for stage {spec.stage!r}"
+            )
+        # Server-authoritative: o modelo só influencia os params declarados no schema
+        # da tool (ex.: ``revision``); offer/n/seed/etc. vêm dos inputs confiáveis.
+        allowed_params = get_tool_spec(called_tool).parameters.get("properties", {})
+        safe_inputs = {k: v for k, v in tool_inputs.items() if k in allowed_params}
+        return await tool_fn(ctx, **{**kwargs, **safe_inputs})
 
     return await run_stage_agent(
         stage=spec.stage,
@@ -83,6 +105,7 @@ async def _execute_agentic_tool(
         run_tool=run_tool,
         inputs=kwargs,
         target_model=spec.target_model,
+        max_steps=_agent_max_steps(ctx.pipeline),
     )
 
 

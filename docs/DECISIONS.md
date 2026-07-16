@@ -438,3 +438,28 @@ Datas absolutas. Apendar novas decisões ao final.
   Anthropic, cobreto offline via `httpx.MockTransport` (cliente injetável). Streaming de
   token do LLM fica fora desta fase (não-streaming). `config/providers.yaml` não muda —
   `llm: vercel_gateway_llm` passa a resolver o adapter gateway-nativo.
+
+### D32 — Loop de tool-calling real (substitui o wrapper critique→refine bounded)
+- **Contexto:** o D31 entregou um wrapper agentic *fixo* de 2 passos (draft → critique →
+  refine ×1): o modelo só devolvia uma diretiva de texto ou `APPROVE`, sem receber schemas
+  de tools nem escolher tools. O D29 marcou "tool-calling real / live-by-default agents"
+  como fora de escopo, exigindo ADR próprio — este.
+- **Decisão:** `AgentPort.run_stage_agent` passa a rodar um **loop de tool-calling real**
+  (ReAct bounded). O modelo recebe os schemas das tools permitidas (`tool_call_schemas`
+  no `tools/registry.py`), decide **quais** chamar e **com que args**, e itera multi-pass
+  até parar (sem tool call) ou estourar `agent.max_steps` (novo knob em `pipeline.yaml`,
+  default `_agent_loop.DEFAULT_MAX_STEPS=4`). O loop compartilhado vive em
+  `adapters/_agent_loop.py` (budget, allowlist, fronteira D29 e safety-net num só lugar);
+  os brains provider-específicos (`_GatewayAgentBrain` OpenAI function-calling,
+  `_AnthropicAgentBrain` `tool_use` do SDK, `_MockAgentBrain` determinístico) fazem a
+  ponte com o modelo.
+- **Fronteiras / segurança:** o `StageToolRunner` vira `run_tool(tool_name, **inputs)` — o
+  agent **nomeia** a tool; o stage executor valida o nome contra `allowed_tools` (D29) e
+  mantém offer/n/seed/etc. **server-authoritative**, filtrando os args do modelo apenas
+  para os params declarados no schema da tool (hoje só `revision`). Safety-net: se o modelo
+  nunca chamar uma tool válida, a tool primária roda uma vez — o stage sempre produz output
+  de domínio válido. Agent execution segue restrito a `concepts`/`scripts` (`_AGENT_STAGES`).
+- **Consequência:** o motor deixa de ser um wrapper fixo e passa a ter um agente que
+  escolhe/itera tools de verdade, coberto offline (MockTransport / fake SDK client /
+  brain determinístico), sem custo. Multi-tool por stage e agentificar mídia continuam
+  fora de escopo (Fase 2); streaming e judge proxy, fora (Fase 3).

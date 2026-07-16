@@ -11,8 +11,10 @@ import base64
 import hashlib
 from typing import Any, Optional
 
+from orchestrator.adapters._agent_loop import DEFAULT_MAX_STEPS, ToolCall, run_agent_loop
 from orchestrator.adapters.base import StageToolRunner, VoiceProfile, resolve_voice_profile
 from orchestrator.graph.state import Artifact, Item, QCResult
+from orchestrator.tools.registry import tool_call_schemas
 from orchestrator.tracing import add_trace_metadata, traced
 
 _HOOK_STYLES = ["problem", "curiosity", "bold_claim", "emotional", "social_proof"]
@@ -114,6 +116,44 @@ def _mp4_data_uri(*seed_parts: Any) -> str:
     return "data:video/mp4;base64," + _MP4_PLAYABLE_B64 + "#" + tag
 
 
+class _MockAgentBrain:
+    """Brain determinístico para o loop de tool-calling do mock (offline, custo zero).
+
+    Sem rede: decide as tool calls contando os resultados já vistos nas mensagens.
+    0 resultados → chama a tool primária para o rascunho inicial. 1 resultado →
+    ``critique`` (heurístico por hash) decide refinar (chama de novo com ``revision``)
+    ou aprovar (para). >=2 resultados → para. Bounded a no máximo 2 execuções de tool.
+    """
+
+    def __init__(self, critique) -> None:
+        self._critique = critique
+
+    def initial_messages(
+        self, stage: str, inputs: dict[str, Any], tool_schemas: list[dict[str, Any]]
+    ) -> list[Any]:
+        primary = tool_schemas[0]["name"] if tool_schemas else ""
+        return [{"role": "user", "stage": stage, "primary_tool": primary}]
+
+    async def complete(
+        self, messages: list[Any], tool_schemas: list[dict[str, Any]]
+    ) -> tuple[Any, list[ToolCall]]:
+        stage = messages[0].get("stage", "")
+        primary = messages[0].get("primary_tool", "")
+        results = [m for m in messages if isinstance(m, dict) and m.get("role") == "tool"]
+        if not results:
+            return {"role": "assistant"}, [ToolCall(id="mock-draft", name=primary)]
+        if len(results) == 1:
+            revision = self._critique(stage, results[0].get("result"))
+            if revision:
+                return {"role": "assistant"}, [
+                    ToolCall(id="mock-refine", name=primary, arguments={"revision": revision})
+                ]
+        return {"role": "assistant"}, []
+
+    def tool_result_message(self, call: ToolCall, result: Any) -> Any:
+        return {"role": "tool", "name": call.name, "result": result}
+
+
 class MockAdapter:
     """Serve aos papéis mock (llm/image/voice/video/assembly) no v1."""
 
@@ -196,7 +236,7 @@ class MockAdapter:
             script += f"\nREVISED[{tag}]: {revision}"
         return script
 
-    # --- Fase 7: execução agentic (concepts/scripts) ---
+    # --- Fase 1: execução agentic (concepts/scripts) via loop de tool-calling ---
     async def run_stage_agent(
         self,
         *,
@@ -205,25 +245,33 @@ class MockAdapter:
         run_tool: StageToolRunner,
         inputs: dict[str, Any],
         target_model: Optional[str] = None,
+        max_steps: int = DEFAULT_MAX_STEPS,
     ) -> Any:
-        """Loop *critique -> refine* determinístico e offline (custo zero).
+        """Loop de tool-calling determinístico e offline (custo zero).
 
-        Gera o rascunho pela typed tool (via ``run_tool``), avalia com um heurístico
-        determinístico e, se pedir refino, regenera uma vez com a diretiva. Nunca chama
-        ``generate_concepts``/``write_script`` diretamente — só ``run_tool`` (fronteira D29).
+        Usa o loop compartilhado com um *brain* determinístico: chama a tool primária
+        para o rascunho, avalia com um heurístico (``_agent_critique``) e, se pedir
+        refino, chama a tool de novo com a diretiva. Nunca chama ``generate_concepts``/
+        ``write_script`` diretamente — só ``run_tool`` (fronteira D29).
         """
-        draft = await run_tool(**inputs)
-        revision = self._agent_critique(stage, draft)
+        brain = _MockAgentBrain(self._agent_critique)
+        result, executed = await run_agent_loop(
+            brain,
+            stage=stage,
+            allowed_tools=allowed_tools,
+            run_tool=run_tool,
+            inputs=inputs,
+            max_steps=max_steps,
+            tool_schemas=tool_call_schemas(allowed_tools),
+        )
         add_trace_metadata(
             agent_backend="mock",
             stage=stage,
             allowed_tools=list(allowed_tools),
             target_model=target_model,
-            agent_revised=bool(revision),
+            agent_steps=executed,
         )
-        if not revision:
-            return draft
-        return await run_tool(**{**inputs, "revision": revision})
+        return result
 
     @staticmethod
     def _agent_critique(stage: str, draft: Any) -> Optional[str]:

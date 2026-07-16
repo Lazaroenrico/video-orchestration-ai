@@ -22,7 +22,9 @@ from typing import Any, Optional
 from anthropic import AsyncAnthropic
 
 from orchestrator import stream_bus
+from orchestrator.adapters._agent_loop import DEFAULT_MAX_STEPS, ToolCall, run_agent_loop
 from orchestrator.adapters.base import StageToolRunner
+from orchestrator.tools.registry import tool_call_schemas
 from orchestrator.tracing import add_trace_metadata, record_llm_usage, traced
 
 _HOOK_STYLES = ["problem", "curiosity", "bold_claim", "emotional", "social_proof"]
@@ -278,7 +280,7 @@ class AnthropicLLMAdapter:
         return text_block.text
 
     # ------------------------------------------------------------------ #
-    # Fase 7 — execução agentic (concepts/scripts) pelo AI gateway         #
+    # Fase 1 — execução agentic (concepts/scripts): loop de tool-calling   #
     # ------------------------------------------------------------------ #
 
     async def run_stage_agent(
@@ -289,56 +291,121 @@ class AnthropicLLMAdapter:
         run_tool: StageToolRunner,
         inputs: dict[str, Any],
         target_model: Optional[str] = None,
+        max_steps: int = DEFAULT_MAX_STEPS,
     ) -> Any:
-        """Loop *critique -> refine* bounded, com o modelo servido pelo AI gateway.
+        """Loop de tool-calling real, com o modelo Claude via SDK.
 
-        Gera o rascunho pela typed tool (``run_tool``), pede ao modelo uma crítica
-        acionável e, se houver, regenera uma vez com a diretiva. O agent só toca o
-        domínio via ``run_tool`` (fronteira D29).
+        O modelo recebe os schemas das tools permitidas (``input_schema``) e decide quais
+        chamar (e com que ``revision``), iterando até convergir ou estourar ``max_steps``.
+        O agent só toca o domínio via ``run_tool`` (fronteira D29) — a geração real
+        (concepts/scripts) acontece dentro da typed tool.
         """
-        draft = await run_tool(**inputs)
-        revision = await self._agent_critique(stage, draft, model=target_model or self.model)
+        brain = _AnthropicAgentBrain(self, model=target_model or self.model)
+        result, executed = await run_agent_loop(
+            brain,
+            stage=stage,
+            allowed_tools=allowed_tools,
+            run_tool=run_tool,
+            inputs=inputs,
+            max_steps=max_steps,
+            tool_schemas=tool_call_schemas(allowed_tools),
+        )
         add_trace_metadata(
             agent_backend="anthropic_gateway",
             stage=stage,
             allowed_tools=list(allowed_tools),
             target_model=target_model,
-            agent_revised=bool(revision),
+            agent_steps=executed,
         )
-        if not revision:
-            return draft
-        return await run_tool(**{**inputs, "revision": revision})
+        return result
 
-    @traced("adapter.anthropic.agent_critique", run_type="llm", provider="anthropic")
-    async def _agent_critique(self, stage: str, draft: Any, *, model: str) -> Optional[str]:
-        """Pede ao modelo uma diretiva de refino do rascunho (ou aprovação).
 
-        Retorna ``None`` quando o modelo aprova (responde ``APPROVE``); caso contrário,
-        a diretiva de uma linha. Nunca levanta — falhas de leitura viram aprovação
-        (o rascunho já é válido e passou pelos validators da tool).
-        """
-        critique_prompt = (
-            f"You are reviewing the draft output of the '{stage}' stage of a UGC ad "
-            "pipeline. If the draft is already strong, reply with exactly: APPROVE\n"
-            "Otherwise reply with a single actionable one-line revision directive "
-            "(no preamble). Draft:\n\n"
-            f"{draft!r}"
+# --------------------------------------------------------------------------- #
+# Brain do loop de tool-calling (SDK Anthropic)                               #
+# --------------------------------------------------------------------------- #
+
+_AGENT_SYSTEM_PROMPT = (
+    "You are an agent driving the '{stage}' stage of a UGC ad pipeline. "
+    "Call the provided tool to produce the draft. Then review the tool result: if it can "
+    "be materially improved, call the tool again passing a concise one-line 'revision' "
+    "directive. When the result is strong, stop and reply without any further tool call. "
+    "You may only set an optional 'revision'; the other inputs are fixed server-side."
+)
+
+
+def _summarize_result(result: Any) -> str:
+    """Serializa o resultado de uma tool para devolver ao modelo (truncado)."""
+    try:
+        return json.dumps(result, default=str)[:4000]
+    except (TypeError, ValueError):
+        return repr(result)[:4000]
+
+
+class _AnthropicAgentBrain:
+    """Ponte entre o loop de tool-calling e o SDK Anthropic (blocos ``tool_use``)."""
+
+    def __init__(self, adapter: "AnthropicLLMAdapter", *, model: str) -> None:
+        self._adapter = adapter
+        self._model = model
+        self._system = ""
+
+    @staticmethod
+    def _anthropic_tools(tool_schemas: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return [
+            {
+                "name": s["name"],
+                "description": s["description"],
+                "input_schema": s["parameters"],
+            }
+            for s in tool_schemas
+        ]
+
+    def initial_messages(
+        self, stage: str, inputs: dict[str, Any], tool_schemas: list[dict[str, Any]]
+    ) -> list[Any]:
+        self._system = _AGENT_SYSTEM_PROMPT.format(stage=stage)
+        return [
+            {
+                "role": "user",
+                "content": (
+                    f"Stage inputs (fixed): {json.dumps(inputs, default=str)}\n"
+                    "Begin by calling the tool to produce the initial draft."
+                ),
+            }
+        ]
+
+    async def complete(
+        self, messages: list[Any], tool_schemas: list[dict[str, Any]]
+    ) -> tuple[Any, list[ToolCall]]:
+        response = await self._adapter._client.messages.create(
+            model=self._model,
+            max_tokens=1500,
+            system=self._system,
+            messages=messages,
+            tools=self._anthropic_tools(tool_schemas),
         )
-        response = await self._client.messages.create(
-            model=model,
-            max_tokens=400,
-            messages=[{"role": "user", "content": critique_prompt}],
-        )
-        record_llm_usage(response.usage, model)
+        record_llm_usage(response.usage, self._model)
+        assistant_message = {"role": "assistant", "content": response.content}
         if response.stop_reason == "refusal":
-            return None
-        text_block = next((blk for blk in response.content if blk.type == "text"), None)
-        if text_block is None:
-            return None
-        directive = text_block.text.strip()
-        if not directive or directive.upper().startswith("APPROVE"):
-            return None
-        return directive
+            return assistant_message, []
+        calls = [
+            ToolCall(id=str(blk.id), name=str(blk.name), arguments=dict(blk.input or {}))
+            for blk in response.content
+            if getattr(blk, "type", None) == "tool_use"
+        ]
+        return assistant_message, calls
+
+    def tool_result_message(self, call: ToolCall, result: Any) -> Any:
+        return {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": call.id,
+                    "content": _summarize_result(result),
+                }
+            ],
+        }
 
 
 # --------------------------------------------------------------------------- #

@@ -216,18 +216,59 @@ async def test_write_script_revision_appended():
 
 
 # --------------------------------------------------------------------------- #
-# run_stage_agent / _agent_critique                                           #
+# run_stage_agent — loop de tool-calling (Fase 1)                             #
 # --------------------------------------------------------------------------- #
 
 
-async def test_run_stage_agent_approves_does_single_tool_call():
-    tool_calls: list[dict[str, Any]] = []
+def _tool_call_response(name: str, arguments: str = "{}") -> httpx.Response:
+    """Resposta OpenAI-compatible com um tool_call (o modelo decide chamar a tool)."""
+    return httpx.Response(
+        200,
+        json={
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": f"call-{name}",
+                                "type": "function",
+                                "function": {"name": name, "arguments": arguments},
+                            }
+                        ],
+                    }
+                }
+            ],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+        },
+    )
 
-    async def run_tool(**inputs: Any) -> Any:
-        tool_calls.append(inputs)
+
+def _queued_handler(responses: list[httpx.Response]):
+    """Handler que consome respostas em fila; a última repete (ex.: 'stop')."""
+    state = {"i": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        i = min(state["i"], len(responses) - 1)
+        state["i"] += 1
+        return responses[i]
+
+    return handler
+
+
+async def test_run_stage_agent_single_tool_call_then_stop():
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    async def run_tool(tool_name: str, **inputs: Any) -> Any:
+        calls.append((tool_name, inputs))
         return ["draft-concept"]
 
-    adapter = _adapter_with(lambda req: _chat_response("APPROVE"))
+    handler = _queued_handler([
+        _tool_call_response("generate_concepts"),
+        _chat_response("Looks great, done."),  # sem tool_calls → para
+    ])
+    adapter = _adapter_with(handler)
     result = await adapter.run_stage_agent(
         stage="concepts",
         allowed_tools=("generate_concepts",),
@@ -237,18 +278,22 @@ async def test_run_stage_agent_approves_does_single_tool_call():
     )
 
     assert result == ["draft-concept"]
-    assert len(tool_calls) == 1  # sem refino
-    assert "revision" not in tool_calls[0]
+    assert calls == [("generate_concepts", {})]
 
 
-async def test_run_stage_agent_refines_does_two_tool_calls():
-    tool_calls: list[dict[str, Any]] = []
+async def test_run_stage_agent_iterates_with_revision():
+    calls: list[tuple[str, dict[str, Any]]] = []
 
-    async def run_tool(**inputs: Any) -> Any:
-        tool_calls.append(inputs)
+    async def run_tool(tool_name: str, **inputs: Any) -> Any:
+        calls.append((tool_name, inputs))
         return f"draft/{inputs.get('revision', '')}"
 
-    adapter = _adapter_with(lambda req: _chat_response("Strengthen the hook."))
+    handler = _queued_handler([
+        _tool_call_response("write_script"),  # draft inicial
+        _tool_call_response("write_script", '{"revision": "Strengthen the hook."}'),
+        _chat_response("Done."),  # para
+    ])
+    adapter = _adapter_with(handler)
     result = await adapter.run_stage_agent(
         stage="scripts",
         allowed_tools=("write_script",),
@@ -256,30 +301,114 @@ async def test_run_stage_agent_refines_does_two_tool_calls():
         inputs={"concept": {"id": "c"}, "creator_ref": "cr", "platform": "tiktok"},
     )
 
-    assert len(tool_calls) == 2
-    assert tool_calls[1]["revision"] == "Strengthen the hook."
+    assert len(calls) == 2
+    assert calls[1] == ("write_script", {"revision": "Strengthen the hook."})
     assert result == "draft/Strengthen the hook."
 
 
-async def test_agent_critique_approve_returns_none():
-    adapter = _adapter_with(lambda req: _chat_response("APPROVE"))
-    assert await adapter._agent_critique("concepts", ["d"], model="m") is None
+async def test_run_stage_agent_respects_step_budget():
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    async def run_tool(tool_name: str, **inputs: Any) -> Any:
+        calls.append((tool_name, inputs))
+        return "draft"
+
+    # O modelo sempre pede outra tool call; sem budget seria infinito.
+    handler = _queued_handler([_tool_call_response("generate_concepts")])
+    adapter = _adapter_with(handler)
+    await adapter.run_stage_agent(
+        stage="concepts",
+        allowed_tools=("generate_concepts",),
+        run_tool=run_tool,
+        inputs={"offer": "o"},
+        max_steps=2,
+    )
+
+    assert len(calls) == 2  # cortado no budget
 
 
-async def test_agent_critique_empty_returns_none():
-    adapter = _adapter_with(lambda req: _chat_response("   "))
-    # conteúdo em branco levanta em _message_text → capturado → aprova (None)
-    assert await adapter._agent_critique("concepts", ["d"], model="m") is None
+async def test_run_stage_agent_safety_net_when_model_never_calls_tool():
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    async def run_tool(tool_name: str, **inputs: Any) -> Any:
+        calls.append((tool_name, inputs))
+        return ["fallback-draft"]
+
+    # O modelo responde sem nenhum tool_call de cara; a safety-net roda a tool primária.
+    adapter = _adapter_with(lambda req: _chat_response("I think we're done."))
+    result = await adapter.run_stage_agent(
+        stage="concepts",
+        allowed_tools=("generate_concepts",),
+        run_tool=run_tool,
+        inputs={"offer": "o"},
+    )
+
+    assert result == ["fallback-draft"]
+    assert calls == [("generate_concepts", {})]
 
 
-async def test_agent_critique_http_failure_returns_none():
-    adapter = _adapter_with(lambda req: httpx.Response(500, json={"error": "boom"}))
-    assert await adapter._agent_critique("concepts", ["d"], model="m") is None
+async def test_run_stage_agent_ignores_tool_outside_allowlist():
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    async def run_tool(tool_name: str, **inputs: Any) -> Any:
+        calls.append((tool_name, inputs))
+        return "draft"
+
+    handler = _queued_handler([
+        _tool_call_response("delete_everything"),  # fora da allowlist → não roda
+        _tool_call_response("generate_concepts"),
+        _chat_response("Done."),
+    ])
+    adapter = _adapter_with(handler)
+    await adapter.run_stage_agent(
+        stage="concepts",
+        allowed_tools=("generate_concepts",),
+        run_tool=run_tool,
+        inputs={"offer": "o"},
+    )
+
+    assert ("delete_everything", {}) not in calls
+    assert calls == [("generate_concepts", {})]
 
 
-async def test_agent_critique_returns_directive():
-    adapter = _adapter_with(lambda req: _chat_response("Tighten the CTA line."))
-    assert await adapter._agent_critique("scripts", "s", model="m") == "Tighten the CTA line."
+async def test_run_stage_agent_safety_net_on_malformed_response():
+    """Resposta sem ``choices`` → brain trata como 'sem tool call'; safety-net roda a tool."""
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    async def run_tool(tool_name: str, **inputs: Any) -> Any:
+        calls.append((tool_name, inputs))
+        return ["draft"]
+
+    adapter = _adapter_with(lambda req: httpx.Response(200, json={}))  # sem choices
+    result = await adapter.run_stage_agent(
+        stage="concepts",
+        allowed_tools=("generate_concepts",),
+        run_tool=run_tool,
+        inputs={"offer": "o"},
+    )
+
+    assert result == ["draft"]
+    assert calls == [("generate_concepts", {})]
+
+
+def test_gateway_parse_tool_calls_tolerates_bad_arguments():
+    from orchestrator.adapters.gateway_llm import _GatewayAgentBrain
+
+    calls = _GatewayAgentBrain._parse_tool_calls(
+        {"tool_calls": [{"id": "x", "function": {"name": "generate_concepts", "arguments": "{bad"}}]}
+    )
+    assert len(calls) == 1
+    assert calls[0].name == "generate_concepts"
+    assert calls[0].arguments == {}  # JSON inválido → dict vazio
+
+
+def test_gateway_summarize_result_falls_back_on_unserializable():
+    from orchestrator.adapters.gateway_llm import _summarize_result
+
+    circular: dict[str, Any] = {}
+    circular["self"] = circular  # referência circular → json.dumps levanta
+    out = _summarize_result(circular)
+    assert isinstance(out, str) and out
 
 
 # --------------------------------------------------------------------------- #

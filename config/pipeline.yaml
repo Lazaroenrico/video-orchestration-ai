@@ -48,3 +48,9 @@ assembly:
 
 roster:
   creators: 2               # quantos creators reutilizáveis no roster (Step 3)
+
+# Execução agentic (Fase 1): budget do loop de tool-calling nos stages LLM-only.
+# max_steps = nº máximo de rodadas de decisão do modelo por stage antes de cortar
+# (nunca loop infinito). Ausente → default do adapter (_agent_loop.DEFAULT_MAX_STEPS).
+agent:
+  max_steps: 4

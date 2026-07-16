@@ -718,14 +718,32 @@ async def test_write_script_revision_appended_to_prompt() -> None:
     assert "tighten CTA" in prompt
 
 
-async def test_run_stage_agent_approves_does_single_tool_call() -> None:
-    client = _make_fake_client(_make_response([_make_text_block("APPROVE")]))
+def _make_tool_use_block(name: str, input_dict: dict[str, Any] | None = None,
+                         block_id: str = "tu-1") -> types.SimpleNamespace:
+    """Bloco tool_use como o SDK retorna (o modelo decide chamar a tool)."""
+    return types.SimpleNamespace(
+        type="tool_use", id=block_id, name=name, input=input_dict or {}
+    )
+
+
+def _make_fake_client_seq(responses: list[types.SimpleNamespace]) -> MagicMock:
+    """Fake client cujo messages.create devolve uma sequência de respostas."""
+    client = MagicMock()
+    client.messages.create = AsyncMock(side_effect=responses)
+    return client
+
+
+async def test_run_stage_agent_single_tool_call_then_stop() -> None:
+    client = _make_fake_client_seq([
+        _make_response([_make_tool_use_block("generate_concepts")], stop_reason="tool_use"),
+        _make_response([_make_text_block("Looks great, done.")]),  # sem tool_use → para
+    ])
     adapter = AnthropicLLMAdapter(client=client)
 
-    calls: list[dict[str, Any]] = []
+    calls: list[tuple[str, dict[str, Any]]] = []
 
-    async def run_tool(**inputs: Any) -> Any:
-        calls.append(inputs)
+    async def run_tool(tool_name: str, **inputs: Any) -> Any:
+        calls.append((tool_name, inputs))
         return ["draft"]
 
     result = await adapter.run_stage_agent(
@@ -736,18 +754,24 @@ async def test_run_stage_agent_approves_does_single_tool_call() -> None:
     )
 
     assert result == ["draft"]
-    assert len(calls) == 1
-    assert "revision" not in calls[0]
+    assert calls == [("generate_concepts", {})]
 
 
-async def test_run_stage_agent_refines_does_two_tool_calls() -> None:
-    client = _make_fake_client(_make_response([_make_text_block("Strengthen the hook.")]))
+async def test_run_stage_agent_iterates_with_revision() -> None:
+    client = _make_fake_client_seq([
+        _make_response([_make_tool_use_block("write_script")], stop_reason="tool_use"),
+        _make_response(
+            [_make_tool_use_block("write_script", {"revision": "Strengthen the hook."}, "tu-2")],
+            stop_reason="tool_use",
+        ),
+        _make_response([_make_text_block("Done.")]),
+    ])
     adapter = AnthropicLLMAdapter(client=client, model="claude-opus-4-8")
 
-    calls: list[dict[str, Any]] = []
+    calls: list[tuple[str, dict[str, Any]]] = []
 
-    async def run_tool(**inputs: Any) -> Any:
-        calls.append(inputs)
+    async def run_tool(tool_name: str, **inputs: Any) -> Any:
+        calls.append((tool_name, inputs))
         return f"draft/{inputs.get('revision', '')}"
 
     result = await adapter.run_stage_agent(
@@ -759,25 +783,62 @@ async def test_run_stage_agent_refines_does_two_tool_calls() -> None:
     )
 
     assert len(calls) == 2
-    assert calls[1]["revision"] == "Strengthen the hook."
+    assert calls[1] == ("write_script", {"revision": "Strengthen the hook."})
     assert result == "draft/Strengthen the hook."
 
 
-async def test_agent_critique_refusal_returns_none() -> None:
-    response = _make_response([_make_text_block("whatever")], stop_reason="refusal")
-    adapter = AnthropicLLMAdapter(client=_make_fake_client(response))
+async def test_run_stage_agent_refusal_stops_and_safety_net_runs_tool() -> None:
+    """stop_reason=refusal → sem tool calls; a safety-net garante um output de domínio."""
+    client = _make_fake_client_seq([
+        _make_response([_make_text_block("whatever")], stop_reason="refusal"),
+    ])
+    adapter = AnthropicLLMAdapter(client=client)
 
-    assert await adapter._agent_critique("concepts", ["d"], model="m") is None
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    async def run_tool(tool_name: str, **inputs: Any) -> Any:
+        calls.append((tool_name, inputs))
+        return ["fallback"]
+
+    result = await adapter.run_stage_agent(
+        stage="concepts",
+        allowed_tools=("generate_concepts",),
+        run_tool=run_tool,
+        inputs={"offer": "o"},
+    )
+
+    assert result == ["fallback"]
+    assert calls == [("generate_concepts", {})]
 
 
-async def test_agent_critique_no_text_block_returns_none() -> None:
-    response = _make_response([_make_thinking_block()])
-    adapter = AnthropicLLMAdapter(client=_make_fake_client(response))
+async def test_run_stage_agent_respects_step_budget() -> None:
+    # cada step devolve um tool_use — sem budget seria infinito.
+    tool_use = _make_response([_make_tool_use_block("generate_concepts")], stop_reason="tool_use")
+    client = MagicMock()
+    client.messages.create = AsyncMock(return_value=tool_use)
+    adapter = AnthropicLLMAdapter(client=client)
 
-    assert await adapter._agent_critique("concepts", ["d"], model="m") is None
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    async def run_tool(tool_name: str, **inputs: Any) -> Any:
+        calls.append((tool_name, inputs))
+        return "draft"
+
+    await adapter.run_stage_agent(
+        stage="concepts",
+        allowed_tools=("generate_concepts",),
+        run_tool=run_tool,
+        inputs={"offer": "o"},
+        max_steps=2,
+    )
+
+    assert len(calls) == 2  # cortado no budget
 
 
-async def test_agent_critique_empty_directive_returns_none() -> None:
-    adapter = AnthropicLLMAdapter(client=_make_fake_client(_make_response([_make_text_block("  ")])))
+def test_anthropic_summarize_result_falls_back_on_unserializable() -> None:
+    from orchestrator.adapters.anthropic_llm import _summarize_result
 
-    assert await adapter._agent_critique("concepts", ["d"], model="m") is None
+    circular: dict[str, Any] = {}
+    circular["self"] = circular  # referência circular → json.dumps levanta
+    out = _summarize_result(circular)
+    assert isinstance(out, str) and out
