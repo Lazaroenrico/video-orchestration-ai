@@ -21,6 +21,8 @@ Hospedar o app na Cloudflare ficou **fora** — ver "Cloudflare" abaixo.
   passam adiante via `_persistence()`.
 - **Fase 5 (`696e450`)** — retenção: `keep` / `rejected` (3d) / `intermediate` (2d),
   `purge_expired` orientado pelo DB.
+- **Fase 4** — signed URLs sob demanda: `resolve_signed_uris` troca `r2://{bucket}/{key}`
+  por URL assinada (TTL 900s) **só na saída** de `/api/state/{run_id}` e `/api/creators`.
 
 ### Decisões de desenho
 - **`aiosqlite` trava neste ambiente** (já documentado em `graph/checkpoint.py`), então o
@@ -38,7 +40,15 @@ Hospedar o app na Cloudflare ficou **fora** — ver "Cloudflare" abaixo.
   `Artifact` sem `kind` num teste meu).
 - **Falhar alto**: backend desconhecido em `providers.yaml` e credencial R2 ausente
   levantam no boot, em vez de degradar para disco local (mídia paga em disco efêmero) ou
-  quebrar no meio de um run pago.
+  quebrar no meio de um run pago. **Exceção deliberada**: `_signing_storage` engole config
+  quebrada e devolve `None` — o run já falhou alto no boot, mas cegar o dashboard tiraria
+  justamente a tela onde o operador lê o erro.
+- **Assinar é transformação de saída, nunca mutação.** `resolve_signed_uris` devolve
+  cópia. Se escrevesse a URL de volta no estado, o checkpoint passaria a guardar uma URL
+  vencida como se fosse o ponteiro — exatamente o que a D30 proíbe. Cada key é assinada
+  uma vez por payload (o mesmo clip aparece em `results` e em `artifacts`).
+- **`r2://` é renderável para a UI**, porque vira https assinado na saída; os demais
+  schemes (`s3://`, `gs://`) seguem sendo referência opaca.
 
 ### Falhas investigadas (sintoma → causa → correção)
 - **Teste próprio com `RecursionError` de monkeypatch.** Sintoma: `transport` duplicado em
@@ -58,17 +68,29 @@ Pyodide/Wasm (langgraph, pillow e o SDK anthropic não têm wheel PyEmscripten);
 evaporariam — exigiria DB durável, que a própria D30 põe em *fora de escopo* ("trocar
 SQLite por Postgres nesta etapa"). Seria uma ADR nova (compute/DB), não a D30.
 
-**Pendente:** Fase 4 (signed URLs sob demanda na UI). `get_signed_url` está implementado e
-testado, e signed URL nunca é persistida — mas a consequência da ADR "a UI passa a receber
-signed URLs sob demanda" ainda não vale: `_normalize_artifact`/`_normalize_creator` são
-síncronos e `get_signed_url` é async, então falta um pre-pass async sobre o payload. Só
-importa quando `storage.backend: r2` for ligado, o que depende do bucket ser provisionado.
+**Critérios de aceite da ADR — todos atendidos:** `config-mock` offline/determinístico/sem
+custo; suíte verde sem credenciais R2; bytes no R2 + metadata no DB no perfil live; signed
+URLs sob demanda e não persistidas; reprovados 3 dias; intermediárias 2 dias; creator
+assets, aprovados e finais sem expiração automática.
 
-**Verificação:** `rtk proxy .venv/bin/python -m pytest` → **857 passed, 2 skipped**,
-cobertura 100% (era 772). Dirigido fora da suíte: run mock de batch 4 gravou 18 artifacts
-reais no DB com key canônica, content_type, size_bytes e sha256 — 8 `intermediate` com
-`expires_at` em +2 dias e 10 `keep` sem expiração, com a última take de cada item retida.
-Ao vivo não rodado: exige bucket R2 provisionado (`R2_*`), que ainda não existe.
+**Escopo mantido fora:** o SSE (`/api/stream/{run_id}`) ainda não assina — os eventos de
+progresso carregam creator/item, então em perfil R2 o preview ao vivo mostraria o ponteiro
+até o primeiro `/api/state`. Não bloqueia (o dashboard busca o state), mas fecha a lacuna
+quando o R2 for ligado de fato. Migrar artifacts existentes, Postgres e purge agendado
+seguem fora, como a própria ADR define.
+
+**Verificação:** `rtk proxy .venv/bin/python -m pytest` → **884 passed, 2 skipped**,
+cobertura 100% (era 772). Dirigido fora da suíte, em dois níveis:
+1. Run mock de batch 4 gravou 18 artifacts reais no DB com key canônica, content_type,
+   size_bytes e sha256 — 8 `intermediate` com `expires_at` em +2 dias e 10 `keep` sem
+   expiração, com a última take de cada item retida.
+2. Caminho **live** inteiro com stub de S3 (sem credencial): bytes no bucket, linha no DB
+   com `backend=r2`, estado guardando `r2://ugc-prod/run-1/items/item-0/clip-0.mp4`, UI
+   marcando `renderable=True`/`media_type=video`, API servindo
+   `https://acct.r2.cloudflarestorage.com/...?X-Amz-Expires=900&X-Amz-Signature=...` — e
+   estado e DB **inalterados** depois de assinar.
+
+Ao vivo de verdade não rodado: exige bucket R2 provisionado (`R2_*`), que ainda não existe.
 
 ## D35 — Persona antes de conceitos, scripts e creator (2026-07-16)
 

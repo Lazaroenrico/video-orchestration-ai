@@ -43,6 +43,8 @@ from orchestrator.graph.builder import build_graph
 from orchestrator.graph.checkpoint import open_checkpointer
 from orchestrator.nodes.stages import reroll_creator_voice as reroll_creator_voice_in_stage
 from orchestrator.registry import build_adapter_from_providers
+from orchestrator.storage.factory import build_media_storage
+from orchestrator.storage.resolve import resolve_signed_uris
 
 app = FastAPI(title="UGC Orchestrator")
 
@@ -178,6 +180,31 @@ def _to_plain(obj: Any) -> Any:
     return obj
 
 
+def _signing_storage(config_dir: Optional[str]) -> Optional[Any]:
+    """Backend de storage quando ele assina URLs; ``None`` quando não precisa.
+
+    O backend local serve ``/media`` e ``/videos`` direto do disco — não há o que
+    assinar. Config de storage quebrada devolve ``None`` em vez de propagar: um
+    ``providers.yaml`` inválido já derruba o *run* no boot (falha alto, D30), mas não
+    pode cegar o dashboard inteiro, que é justamente onde o operador vai ler o erro.
+    """
+    try:
+        storage = build_media_storage(
+            load_providers(config_dir), root=_media_root, web_prefix="/media",
+        )
+    except Exception:  # noqa: BLE001 — dashboard nunca cai por config de storage
+        return None
+    return storage if getattr(storage, "backend", "local") != "local" else None
+
+
+async def _sign_payload(payload: Any, config_dir: Optional[str]) -> Any:
+    """Troca ponteiros ``r2://`` por signed URLs de TTL curto, só na saída (D30).
+
+    Nunca persiste o resultado: a verdade a montante segue sendo o ``storage_key``.
+    """
+    return await resolve_signed_uris(payload, storage=_signing_storage(config_dir))
+
+
 def _media_type_for_uri(uri: str) -> str:
     lower = uri.lower()
     if lower.startswith("data:image/"):
@@ -202,6 +229,10 @@ def _is_renderable_uri(uri: str) -> bool:
         return _media_type_for_uri(uri) != "reference"
     if uri.startswith("data:"):
         return _media_type_for_uri(uri) in {"image", "video", "audio"}
+    # Ponteiro canônico do R2 (D30): vira signed URL https na saída (``_sign_payload``),
+    # então a UI consegue tocá-lo. Outros schemes seguem sendo referência opaca.
+    if parsed.scheme == "r2":
+        return _media_type_for_uri(uri) != "reference"
     if parsed.scheme:
         return False
     # Path local já servido pelo web app, absoluto ou relativo.
@@ -946,11 +977,14 @@ async def creators_history() -> dict[str, Any]:
             _normalize_creator_history(c)
             for c in _recover_creators_from_media(default_media_path())
         ]
-    return {
-        "creators": creators,
-        "store_path": str(store_path),
-        "exists": store_path.exists(),
-    }
+    return await _sign_payload(
+        {
+            "creators": creators,
+            "store_path": str(store_path),
+            "exists": store_path.exists(),
+        },
+        None,
+    )
 
 
 @app.get("/api/integrations")
@@ -1114,15 +1148,18 @@ async def run_state(run_id: str, config_dir: Optional[str] = None, db: Optional[
             if isinstance(c, dict)
         ]
 
-    return {
-        "run_id": run_id,
-        "phase": phase,
-        "items": items,
-        "edit_concepts": edit_concepts,
-        "awaiting": awaiting,
-        "summary": summary,
-        "error": runtime_state.get("error") if runtime_state is not None else None,
-    }
+    return await _sign_payload(
+        {
+            "run_id": run_id,
+            "phase": phase,
+            "items": items,
+            "edit_concepts": edit_concepts,
+            "awaiting": awaiting,
+            "summary": summary,
+            "error": runtime_state.get("error") if runtime_state is not None else None,
+        },
+        config_dir,
+    )
 
 
 # --------------------------------------------------------------------------- #
