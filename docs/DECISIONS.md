@@ -583,3 +583,31 @@ Datas absolutas. Apendar novas decisões ao final.
 - **Consequência:** todo stage downstream tem acesso à persona, e cada stage agentic tem
   guardrail próprio versionado. Segue fora: `roster`/`assembly`/`upscale` agentic, judge
   proxy ao vivo, R2 (D30).
+
+### D36 — Cloudflare na borda, containers para Python e contratos portáveis para AWS
+- **Contexto:** R2 já está em produção via API S3 (D30), mas o estado de run ainda é
+  SQLite/JSON local e o servidor mantém jobs, aprovações e buffer SSE em memória. Isso
+  impede recuperação correta após restart e não suporta múltiplas instâncias. Um run pode
+  conter montagem com timeout de 900 segundos; consumidor de Cloudflare Queues limita wall
+  time a 15 minutos. O produto também precisa poder migrar para AWS sem reescrever o motor.
+- **Decisão:** publicar SPA, WAF e autenticação de borda na Cloudflare Worker; manter
+  FastAPI e LangGraph em Containers Linux/amd64, separados em API e Runner. PostgreSQL
+  torna-se a fonte canônica de negócio e do checkpointer (`AsyncPostgresSaver`); uma fila
+  abstrata apenas acorda o Runner. R2/S3 ficam atrás do contrato atual de storage. A borda
+  não guarda estado de negócio, e Durable Objects não serão fonte canônica.
+- **Durabilidade:** criar `runs`, `jobs`, `outbox`, `run_gates` e `run_events`. Jobs usam
+  lease e idempotency key; interrupt encerra o job, aprovação cria resume job; SSE faz
+  replay por sequência e `Last-Event-ID`. Assim, reinício, reentrega de fila e reconexão
+  não duplicam chamada paga nem perdem aprovação/evento.
+- **Identidade:** Cloudflare Access/OIDC pode proteger a borda inicialmente, mas a API
+  valida JWT e resolve `users`/`organizations`/memberships no PostgreSQL. `organization_id`
+  entra em todo dado de cliente, com RLS como defesa adicional. Na AWS, Cognito ou outro
+  IdP troca apenas a emissão do JWT, não o modelo de autorização.
+- **Portabilidade:** mesma imagem OCI roda em Cloudflare Containers e ECS Fargate; Cloudflare
+  Queues mapeia para SQS; R2 para S3; PostgreSQL externo para RDS/Aurora; Worker/Access/WAF
+  pode ser mantido na frente ou mapeado para CloudFront/WAF/OIDC. Nenhum node LangGraph,
+  tool ou adapter de domínio conhece SDK/binding de plataforma.
+- **Consequência:** hospedar exige as fases de PostgreSQL e execução durável antes do primeiro
+  tráfego de produção. A ADR detalhada `docs/ADR-D36-cloudflare-aws-portability.md` é o
+  plano, com critérios de aceite e exercício de migração AWS. Nenhuma infraestrutura foi
+  provisionada por esta decisão.
