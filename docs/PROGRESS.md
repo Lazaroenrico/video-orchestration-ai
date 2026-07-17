@@ -1,5 +1,42 @@
 # PROGRESS — handoff
 
+## D36 — Plano Cloudflare com portabilidade AWS (2026-07-16)
+
+Foi documentado o plano em `docs/ADR-D36-cloudflare-aws-portability.md`; **nenhuma
+infraestrutura ou codigo de producao foi alterado**. A ordem obrigatoria antes de qualquer
+deploy e: imagem OCI API/Runner -> PostgreSQL e `AsyncPostgresSaver` -> jobs/gates/eventos
+duraveis -> Worker/Containers/Queues Cloudflare -> operacao -> exercicio ECS/SQS/S3.
+
+O ponto que nao pode ser pulado e substituir `_runs`, `BackgroundTasks`, `Future` e o buffer
+SSE em memoria por fonte de verdade PostgreSQL. R2 ja esta portavel por S3; o compute so fica
+portavel de verdade depois que essa persistencia existir. A D30 continua correta ao dizer que
+hospedagem nao fazia parte do seu escopo; D36 abre esse escopo como uma decisao nova.
+
+## D36 — Fase 1: empacotar como imagem OCI portável (2026-07-17)
+
+Empacotamento **sem mudar comportamento** (o app continua em SQLite/JSON; PostgreSQL é Fase
+2). Entregue:
+
+- **Comandos do container** em `cli.py`: `api` (= `serve`, que virou alias), `runner`
+  (reusa o caminho de `run` via novo helper `_do_run`; one-shot, sem fila ainda) e `migrate`
+  (idempotente: materializa o schema do checkpointer + `ArtifactDB` e os dirs de mídia).
+- **Health** em `web/server.py`: `GET /healthz` (liveness, sem IO) e `GET /readyz`
+  (readiness: valida `load_pipeline/providers/judge` e resolve o backend de storage —
+  `R2MediaStorage.from_env()` valida credencial sem request de rede; 503 com motivo se
+  quebrar). Rotas explícitas vencem o catch-all SPA por ordem de registro.
+- **Mounts condicionais**: `/media` e `/videos` extraídos para `_install_media_mounts`,
+  guardados por `ORCH_SERVE_LOCAL_MEDIA` (default ligado; em prod R2 serve por URL assinada).
+- **`R2_ENDPOINT_URL`** opcional em `r2.py:from_env` — mesmo código serve R2, MinIO (dev) e
+  S3 (AWS), só trocando endpoint/credencial.
+- **Infra**: `Dockerfile` multi-stage (build da SPA em Node → runtime Python 3.12 + Node LTS
+  copiado da imagem oficial, para o bridge Seedance), `.dockerignore`, `docker-compose.yml`
+  (app + MinIO + PostgreSQL-scaffolding), e envs novas no `.env.example`.
+
+**Verificação:** `rtk proxy .venv/bin/python -m pytest` → **900 passed, 2 skipped**,
+cobertura 100%. Build da imagem e `docker compose up` não rodados neste ambiente (sem Docker);
+a verificação de container fica para quem tiver o daemon (ver plano em
+`~/.claude/plans/tender-imagining-peacock.md`).
+
 ## D30 — R2 + DB relacional de mídia: implementação (2026-07-16)
 
 Execução da `docs/ADR-D30-media-storage-r2-db.md`, que estava aceita mas não implementada.

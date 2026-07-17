@@ -7,6 +7,8 @@ endpoint /api/integrations que lê providers.yaml.
 """
 from __future__ import annotations
 
+import json
+
 import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -117,3 +119,89 @@ async def test_integrations_empty_when_no_adapters(monkeypatch) -> None:
     monkeypatch.setattr(web_server, "load_providers", lambda config_dir=None: {})
     out = await web_server.integrations_index()
     assert out["stages"] == {}
+
+
+# --------------------------------------------------------------------------- #
+# Health/readiness (ADR-D36 Fase 1): liveness sem IO; readiness valida config   #
+# e credenciais de storage sem chamar provider pago.                            #
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_healthz_is_ok_without_touching_config() -> None:
+    assert await web_server.healthz() == {"status": "ok"}
+
+
+def _stub_config(monkeypatch, *, storage_backend=None) -> None:
+    monkeypatch.setattr(web_server, "load_pipeline", lambda path=None: {})
+    monkeypatch.setattr(web_server, "load_judge", lambda path=None: {})
+    providers = {"storage": {"backend": storage_backend}} if storage_backend else {}
+    monkeypatch.setattr(web_server, "load_providers", lambda path=None: providers)
+
+
+@pytest.mark.asyncio
+async def test_readyz_ready_for_local_backend(monkeypatch) -> None:
+    _stub_config(monkeypatch, storage_backend="local")
+    resp = await web_server.readyz()
+    assert resp.status_code == 200
+    body = json.loads(resp.body)
+    assert body == {"status": "ready", "storage": "local"}
+
+
+@pytest.mark.asyncio
+async def test_readyz_ready_defaults_to_local_when_unset(monkeypatch) -> None:
+    _stub_config(monkeypatch)
+    resp = await web_server.readyz()
+    assert resp.status_code == 200
+    assert json.loads(resp.body)["storage"] == "local"
+
+
+@pytest.mark.asyncio
+async def test_readyz_not_ready_when_r2_credentials_missing(monkeypatch) -> None:
+    _stub_config(monkeypatch, storage_backend="r2")
+    for var in ("R2_ACCOUNT_ID", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_BUCKET"):
+        monkeypatch.delenv(var, raising=False)
+    resp = await web_server.readyz()
+    assert resp.status_code == 503
+    assert json.loads(resp.body)["status"] == "not-ready"
+
+
+@pytest.mark.asyncio
+async def test_readyz_not_ready_for_unknown_backend(monkeypatch) -> None:
+    _stub_config(monkeypatch, storage_backend="weird")
+    resp = await web_server.readyz()
+    assert resp.status_code == 503
+    assert "weird" in json.loads(resp.body)["reason"]
+
+
+@pytest.mark.asyncio
+async def test_readyz_not_ready_when_config_fails_to_load(monkeypatch) -> None:
+    def boom(path=None):
+        raise RuntimeError("config quebrada")
+
+    monkeypatch.setattr(web_server, "load_pipeline", boom)
+    resp = await web_server.readyz()
+    assert resp.status_code == 503
+    assert "config quebrada" in json.loads(resp.body)["reason"]
+
+
+# --------------------------------------------------------------------------- #
+# Mounts /media e /videos condicionais (ADR-D36 Fase 1): default ligado, mas    #
+# desligáveis em produção (storage R2 serve por URL assinada).                  #
+# --------------------------------------------------------------------------- #
+
+
+def test_media_mounts_installed_by_default(monkeypatch) -> None:
+    monkeypatch.delenv("ORCH_SERVE_LOCAL_MEDIA", raising=False)
+    app = FastAPI()
+    web_server._install_media_mounts(app)
+    paths = {getattr(r, "path", None) for r in app.routes}
+    assert "/media" in paths and "/videos" in paths
+
+
+def test_media_mounts_skipped_when_disabled(monkeypatch) -> None:
+    monkeypatch.setenv("ORCH_SERVE_LOCAL_MEDIA", "0")
+    app = FastAPI()
+    web_server._install_media_mounts(app)
+    paths = {getattr(r, "path", None) for r in app.routes}
+    assert "/media" not in paths and "/videos" not in paths

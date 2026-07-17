@@ -19,7 +19,7 @@ from urllib.parse import urlparse
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -35,6 +35,7 @@ from orchestrator.config import (
     default_prompt_store_path,
     default_videos_path,
     load_agent_catalog,
+    load_judge,
     load_pipeline,
     load_providers,
 )
@@ -44,6 +45,7 @@ from orchestrator.graph.checkpoint import open_checkpointer
 from orchestrator.nodes.stages import reroll_creator_voice as reroll_creator_voice_in_stage
 from orchestrator.registry import build_adapter_from_providers
 from orchestrator.storage.factory import build_media_storage
+from orchestrator.storage.r2 import R2MediaStorage
 from orchestrator.storage.resolve import resolve_signed_uris
 
 app = FastAPI(title="UGC Orchestrator")
@@ -69,6 +71,34 @@ def _install_cors(app_: FastAPI, origins: list[str]) -> None:
 
 
 _install_cors(app, _cors_origins)
+
+
+@app.get("/healthz")
+async def healthz() -> dict[str, str]:
+    """Liveness: o processo respondeu. Não toca config nem IO externo."""
+    return {"status": "ok"}
+
+
+@app.get("/readyz")
+async def readyz() -> JSONResponse:
+    """Readiness: a config carrega e o backend de storage é resolvível.
+
+    Não chama provider pago nem faz request S3 — só valida config e credenciais.
+    """
+    try:
+        load_pipeline()
+        providers = load_providers()
+        load_judge()
+        backend = ((providers or {}).get("storage") or {}).get("backend", "local")
+        if backend == "local":
+            pass
+        elif backend == "r2":
+            R2MediaStorage.from_env()  # valida credenciais R2; não faz request de rede
+        else:
+            raise ValueError(f"unknown storage backend {backend!r}")
+    except Exception as exc:  # readiness: qualquer erro de config = not ready
+        return JSONResponse(status_code=503, content={"status": "not-ready", "reason": str(exc)})
+    return JSONResponse(status_code=200, content={"status": "ready", "storage": backend})
 
 # Front-end SPA ("Kinetic Command", Vite+React) built into front/dist. Repo layout:
 #   <repo>/front/dist/            ← this file is <repo>/src/orchestrator/web/server.py
@@ -96,11 +126,28 @@ _UNBUILT_FALLBACK = (
 # /media/{run_id}/{creator_id}/...; _is_renderable_uri já trata esses paths.
 _media_root = default_media_path()
 _media_root.mkdir(parents=True, exist_ok=True)
-app.mount("/media", StaticFiles(directory=str(_media_root)), name="media")
-
 _videos_root = default_videos_path()
 _videos_root.mkdir(parents=True, exist_ok=True)
-app.mount("/videos", StaticFiles(directory=str(_videos_root)), name="videos")
+
+
+def _serve_local_media_enabled() -> bool:
+    """Se o FastAPI deve servir /media e /videos do disco local.
+
+    Em produção com storage R2 o browser recebe URLs assinadas (D30), então o disco
+    local não precisa ser montado — ADR-D36 exige disco só como temporário. Default
+    ligado para preservar o comportamento local/dev.
+    """
+    return os.environ.get("ORCH_SERVE_LOCAL_MEDIA", "1").strip().lower() not in ("0", "false", "no", "")
+
+
+def _install_media_mounts(app_: FastAPI) -> None:
+    if not _serve_local_media_enabled():
+        return
+    app_.mount("/media", StaticFiles(directory=str(_media_root)), name="media")
+    app_.mount("/videos", StaticFiles(directory=str(_videos_root)), name="videos")
+
+
+_install_media_mounts(app)
 
 # Hashed JS/CSS emitted by Vite (front/dist/assets). Mounted unconditionally with
 # check_dir=False so import works in a Node-less CI/test env (unbuilt front); requests

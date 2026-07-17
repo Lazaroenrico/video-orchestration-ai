@@ -28,6 +28,59 @@ def test_serve_command_invokes_uvicorn(monkeypatch):
     assert calls["kwargs"]["host"] == "0.0.0.0"
 
 
+def test_api_command_invokes_uvicorn(monkeypatch):
+    """`orchestrator api` sobe o mesmo app FastAPI que `serve` (papel de API da ADR-D36)."""
+    import uvicorn
+
+    calls: dict = {}
+
+    def fake_run(*a, **k):
+        calls["import_string"] = a[0] if a else None
+        calls["kwargs"] = k
+
+    monkeypatch.setattr(uvicorn, "run", fake_run)
+
+    result = CliRunner().invoke(cli, ["api", "--port", "9200"], env=CLI_OFFLINE_ENV)
+
+    assert result.exit_code == 0, result.output
+    assert calls["import_string"] == "orchestrator.web.server:app"
+    assert calls["kwargs"]["port"] == 9200
+    assert calls["kwargs"]["host"] == "0.0.0.0"
+
+
+def test_cli_runner_command_runs_pipeline(tmp_path):
+    """`orchestrator runner` reusa o caminho de `run` (Fase 1 one-shot)."""
+    cr = CliRunner()
+    db = str(tmp_path / "runs.sqlite")
+    cfg = _mock_config_dir(tmp_path)
+
+    res = _invoke(cr, ["runner", "--batch", "3", "--run-id", "rn-1", "--db", db, "--config-dir", cfg])
+    assert res.exit_code == 0, res.output
+    assert "produzidos : 3" in res.output
+
+    res2 = _invoke(cr, ["list", "--db", db])
+    assert "rn-1" in res2.output
+
+
+def test_cli_migrate_materializes_state_and_is_idempotent(tmp_path):
+    """`orchestrator migrate` cria checkpointer + ArtifactDB + dirs de mídia; roda 2x sem falhar."""
+    cr = CliRunner()
+    db = tmp_path / "runs.sqlite"
+    art = tmp_path / "artifacts.sqlite"
+    media = tmp_path / "media"
+    videos = tmp_path / "videos"
+    env = {**CLI_OFFLINE_ENV, "ORCH_MEDIA": str(media), "ORCH_VIDEOS": str(videos)}
+
+    res = cr.invoke(cli, ["migrate", "--db", str(db), "--artifacts-db", str(art)], env=env)
+    assert res.exit_code == 0, res.output
+    assert db.exists() and art.exists()
+    assert media.is_dir() and videos.is_dir()
+    assert "estado materializado" in res.output
+
+    res2 = cr.invoke(cli, ["migrate", "--db", str(db), "--artifacts-db", str(art)], env=env)
+    assert res2.exit_code == 0, res2.output
+
+
 def _mock_config_dir(tmp_path):
     cfg = tmp_path / "config"
     cfg.mkdir()

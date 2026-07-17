@@ -210,6 +210,28 @@ def test_from_env_builds_the_s3_client_against_the_r2_endpoint(monkeypatch):
     assert captured["aws_secret_access_key"] == "sk"
 
 
+def test_from_env_honors_endpoint_override_for_minio_or_s3(monkeypatch):
+    """R2_ENDPOINT_URL aponta para outro endpoint S3-compatible (MinIO local / S3 na AWS)."""
+    import orchestrator.storage.r2 as r2_module
+
+    captured: dict = {}
+
+    def fake_client(service, **kwargs):
+        captured.update(kwargs)
+        return _FakeS3()
+
+    monkeypatch.setattr(r2_module.boto3, "client", fake_client)
+    monkeypatch.setenv("R2_ACCOUNT_ID", "acct123")
+    monkeypatch.setenv("R2_ACCESS_KEY_ID", "ak")
+    monkeypatch.setenv("R2_SECRET_ACCESS_KEY", "sk")
+    monkeypatch.setenv("R2_BUCKET", "ugc-dev")
+    monkeypatch.setenv("R2_ENDPOINT_URL", "http://localhost:9000")
+
+    R2MediaStorage.from_env()
+
+    assert captured["endpoint_url"] == "http://localhost:9000"
+
+
 @pytest.mark.parametrize(
     "missing", ["R2_ACCOUNT_ID", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_BUCKET"]
 )

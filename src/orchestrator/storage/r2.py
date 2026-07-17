@@ -50,9 +50,12 @@ class R2MediaStorage:
             raise ValueError(f"R2MediaStorage.from_env: variável de ambiente ausente: {', '.join(missing)}")
 
         account_id = os.environ["R2_ACCOUNT_ID"]
+        # R2_ENDPOINT_URL permite apontar para outro endpoint S3-compatible (MinIO no
+        # dev local, S3 na migração AWS da ADR-D36) sem tocar no código de domínio.
+        endpoint_url = os.environ.get("R2_ENDPOINT_URL") or f"https://{account_id}.r2.cloudflarestorage.com"
         client = boto3.client(
             "s3",
-            endpoint_url=f"https://{account_id}.r2.cloudflarestorage.com",
+            endpoint_url=endpoint_url,
             aws_access_key_id=os.environ["R2_ACCESS_KEY_ID"],
             aws_secret_access_key=os.environ["R2_SECRET_ACCESS_KEY"],
             region_name="auto",  # R2 não tem regiões no sentido da AWS
