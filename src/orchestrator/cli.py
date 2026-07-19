@@ -18,6 +18,7 @@ from orchestrator.config import (
 )
 from orchestrator.graph.checkpoint import open_checkpointer
 from orchestrator.logging_config import configure_logging
+from orchestrator.db import upgrade_database
 from orchestrator.storage.db import ArtifactDB
 
 
@@ -162,12 +163,23 @@ def runner_command(batch, offer, platform, run_id, config_dir, db, feedback_stor
 @cli.command()
 @click.option("--db", default=None, help="Checkpointer sqlite (default: .orchestrator/runs.sqlite).")
 @click.option("--artifacts-db", default=None, help="ArtifactDB sqlite (default: .orchestrator/artifacts.sqlite).")
-def migrate(db, artifacts_db):
+@click.option(
+    "--database-url",
+    envvar="DATABASE_URL",
+    default=None,
+    help="PostgreSQL da Fase 2; quando informado, aplica as migrações Alembic.",
+)
+def migrate(db, artifacts_db, database_url):
     """Materializa o estado local (papel de `migrate` do container OCI).
 
     Fase 1 da ADR-D36: cria o schema do checkpointer e do ArtifactDB e os diretórios de
     mídia. Idempotente. Substituído por migrações SQL do PostgreSQL na Fase 2.
     """
+    if database_url:
+        upgrade_database(database_url)
+        click.echo("PostgreSQL migrado: revision=head")
+        return
+
     db_path = db or default_db_path()
     artifacts_path = artifacts_db or default_artifacts_db_path()
     for directory in (default_media_path(), default_videos_path()):

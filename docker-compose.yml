@@ -15,8 +15,11 @@ services:
       R2_ACCESS_KEY_ID: "minioadmin"
       R2_SECRET_ACCESS_KEY: "minioadmin"
       R2_BUCKET: "ugc-dev"
-      # [Fase 2] ainda não consumido pelo app; exportado para o caminho estar pronto.
+      # Fundação PostgreSQL/RLS da Fase 2.
       DATABASE_URL: "postgresql://orchestrator:orchestrator@postgres:5432/orchestrator"
+      ORCH_ORGANIZATION_SLUG: "local"
+      ORCH_ORGANIZATION_NAME: "Local Development"
+      ORCH_USER_SUBJECT: "local|developer"
     volumes:
       - orchestrator-state:/app/.orchestrator
     depends_on:
@@ -35,17 +38,18 @@ services:
     volumes:
       - minio-data:/data
 
-  # Scaffolding da Fase 2 — ainda não consumido pelo app na Fase 1.
+  # PostgreSQL 16 usado pelas migrações e repositórios da Fase 2.
   postgres:
     image: postgres:16
     environment:
-      POSTGRES_USER: "orchestrator"
-      POSTGRES_PASSWORD: "orchestrator"
+      POSTGRES_USER: "postgres"
+      POSTGRES_PASSWORD: "postgres"
       POSTGRES_DB: "orchestrator"
     ports:
       - "5432:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
+      - ./infra/postgres/10-app-role.sql:/docker-entrypoint-initdb.d/10-app-role.sql:ro
 
 volumes:
   orchestrator-state:
@@ -55,13 +59,12 @@ volumes:
 
 
 # ============================================================================
-# Ambiente de desenvolvimento local (ADR-D36, Fase 1).
+# Ambiente de desenvolvimento local (ADR-D36, Fases 1-2).
 # Sobe a mesma imagem OCI de produção + um S3-compatible (MinIO) + PostgreSQL.
 #
 #   docker compose up --build
 #   → dashboard/API em http://localhost:8000/  (health: /healthz e /readyz)
 #
-# NOTA: na Fase 1 o app ainda persiste estado em SQLite (volume .orchestrator).
-# O PostgreSQL abaixo é scaffolding: sobe pronto, mas o app só passa a consumir
-# DATABASE_URL na Fase 2 (migração de checkpoints/estado).
+# O modo mock sem DATABASE_URL continua em SQLite. Com DATABASE_URL, `migrate`
+# aplica Alembic; os repositórios de negócio são ligados incrementalmente na Fase 2.
 # ============================================================================

@@ -37,6 +37,63 @@ cobertura 100%. Build da imagem e `docker compose up` não rodados neste ambient
 a verificação de container fica para quem tiver o daemon (ver plano em
 `~/.claude/plans/tender-imagining-peacock.md`).
 
+## D36 — Fase 2/T1: fundação PostgreSQL, Alembic e tenancy (2026-07-18)
+
+Primeira fatia da Fase 2 entregue sem ligar ainda os repositórios de negócio:
+
+- `orchestrator.db.Database` encapsula `AsyncConnectionPool`, abertura/fechamento
+  explícitos e transações que aplicam `app.organization_id`/`app.user_id` com
+  `set_config(..., true)`. O escopo é `SET LOCAL`, portanto não vaza quando a conexão
+  volta ao pool. O boot rejeita papéis `SUPERUSER`/`BYPASSRLS` para impedir configuração
+  que torne as policies inócuas.
+- `TenantIdentity.from_env()` exige `ORCH_ORGANIZATION_SLUG`,
+  `ORCH_ORGANIZATION_NAME` e `ORCH_USER_SUBJECT`; o bootstrap gera ids estáveis e cria
+  organization, user e membership de forma idempotente.
+- Alembic passou a versionar o schema PostgreSQL. A revisão `20260718_0001` cria
+  `organizations`, `users` e `organization_members`, habilita e força RLS e restringe
+  organizações/memberships ao tenant atual e identidades aos memberships visíveis.
+- `orchestrator migrate --database-url ...` (ou `DATABASE_URL`) aplica `head`
+  idempotentemente. Sem URL, o caminho SQLite da Fase 1 permanece inalterado para o modo
+  mock/local.
+- Dependências runtime: `alembic` e `psycopg[binary,pool]`; integração usa
+  `pytest-postgresql` contra PostgreSQL 16 real, sem mock de banco.
+- O Compose cria `orchestrator` como papel `NOSUPERUSER NOBYPASSRLS`; o `POSTGRES_USER`
+  administrativo fica limitado ao bootstrap do volume.
+
+### Red → Green e falhas investigadas
+
+- RED inicial: `tests/test_postgres_foundation.py` falhou com `ModuleNotFoundError` para
+  `orchestrator.db`. GREEN: migração, pool e bootstrap idempotente implementados pela
+  nova interface pública.
+- Sintoma: o teste RLS mostrou Alice/Acme lendo `oidc|bob` de Globex. Causa: `users` era
+  global e não tinha policy. Correção: `FORCE ROW LEVEL SECURITY` em `users`, leitura por
+  membership ou pela própria identidade da sessão e policies separadas de insert/update/
+  delete.
+- Sintoma: após a primeira policy de `users`, o bootstrap falhou com
+  `InsufficientPrivilege` antes de criar o membership. Causa: `INSERT ... ON CONFLICT DO
+  NOTHING` precisa avaliar a visibilidade do próprio usuário, mas a policy inicial só
+  reconhecia memberships já existentes. Correção: permitir `id = app.user_id` na leitura
+  e manter conflito como `DO NOTHING`, sem update cross-tenant.
+- Sintoma: o Compose entregava ao app o próprio `POSTGRES_USER`, que é superuser e ignora
+  RLS. Causa: o scaffolding da Fase 1 não separava bootstrap e runtime. Correção: init SQL
+  cria o papel `orchestrator` sem bypass, transfere database/schema e o pool falha cedo se
+  receber credenciais privilegiadas.
+- Sintoma: cobertura focada ficou em 97,62% apesar dos 9 testes funcionais verdes. Causa:
+  os ramos de DSN `postgresql+psycopg://` e rejeição de backend não PostgreSQL não tinham
+  regressão. Correção: testes públicos para ambos; pacote `orchestrator.db` voltou a 100%.
+- Sintoma: o primeiro gate global teve 3 falhas em `test_replicate_throttle` porque warnings
+  não chegavam ao `caplog` depois dos testes PostgreSQL. Causa: o `fileConfig()` padrão do
+  Alembic reconfigurava o root logger e desabilitava loggers existentes no processo da API.
+  Correção: migração programática marca `configure_logger=False`; a CLI mantém a configuração
+  da aplicação, e uma regressão prova que loggers continuam ativos após `upgrade_database()`.
+- Sintoma ambiental: PostgreSQL e testes com `asyncio.to_thread` não conseguem abrir
+  sockets/encerrar executor dentro do sandbox. Causa confirmada pelos logs (`Operation not
+  permitted`) e stack em `asyncio.Runner.close`. Correção operacional: executar somente os
+  testes de integração fora dessa restrição; código e asserções permaneceram intactos.
+
+**Verificação:** 13 testes PostgreSQL passaram; `orchestrator.db` com 94/94 statements
+cobertos. Gate global: `913 passed, 2 skipped`, 4209/4209 statements (100%).
+
 ## D30 — R2 + DB relacional de mídia: implementação (2026-07-16)
 
 Execução da `docs/ADR-D30-media-storage-r2-db.md`, que estava aceita mas não implementada.
