@@ -33,7 +33,7 @@ from orchestrator.storage.base import (
     ext_from_url as _ext_from_url,
     is_downloadable as _is_downloadable,
 )
-from orchestrator.storage.db import ArtifactDB, ArtifactRecord
+from orchestrator.storage.db import ArtifactRecord, ArtifactRepository
 from orchestrator.storage.local import LocalMediaStorage
 
 _log = logging.getLogger(__name__)
@@ -117,7 +117,7 @@ def _pointer(stored: StoredObject) -> dict[str, str]:
 
 
 async def _record(
-    db: Optional[ArtifactDB],
+    db: Optional[ArtifactRepository],
     stored: StoredObject,
     *,
     run_id: str,
@@ -168,7 +168,7 @@ async def persist_item_media(
     media_root: str | Path | None = None,
     client: Optional[httpx.AsyncClient] = None,
     storage: Optional[MediaStorage] = None,
-    db: Optional[ArtifactDB] = None,
+    db: Optional[ArtifactRepository] = None,
 ) -> Any:
     """Persiste os bytes dos clips e do vídeo montado de um ``Item``.
 
@@ -237,7 +237,7 @@ async def persist_creator_media(
     media_root: str | Path | None = None,
     client: Optional[httpx.AsyncClient] = None,
     storage: Optional[MediaStorage] = None,
-    db: Optional[ArtifactDB] = None,
+    db: Optional[ArtifactRepository] = None,
 ) -> dict[str, Any]:
     """Persiste imagem e voz (quando baixáveis) e reescreve as URIs do creator.
 

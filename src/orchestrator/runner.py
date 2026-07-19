@@ -18,7 +18,11 @@ from orchestrator.graph.builder import build_graph
 from orchestrator.graph.checkpoint import open_checkpointer
 from orchestrator.graph.state import Item
 from orchestrator.registry import build_adapter_from_providers
-from orchestrator.storage.db import ArtifactDB
+from orchestrator.storage.db import (
+    ArtifactDB,
+    ArtifactRepository,
+    open_artifact_repository,
+)
 from orchestrator.storage.factory import build_media_storage
 from orchestrator.tracing import run_trace_config
 
@@ -30,14 +34,16 @@ def _build_config(
     platform: str,
     feedback_store: Optional[str | Path] = None,
     agent_catalog: Optional[AgentCatalog] = None,
+    artifact_repository: Optional[ArtifactRepository] = None,
 ) -> dict[str, Any]:
     adapter = build_adapter_from_providers(providers, pipeline)
     catalog = agent_catalog or default_agent_catalog()
 
     # Storage e DB de artifacts (D30) são resolvidos uma vez por run, como o adapter:
     # construí-los por chamada recriaria o client S3 a cada clip.
-    artifact_db = ArtifactDB(default_artifacts_db_path())
-    artifact_db.setup()
+    if artifact_repository is None:
+        artifact_repository = ArtifactDB(default_artifacts_db_path())
+        artifact_repository.setup()
 
     configurable: dict[str, Any] = {
         "adapter": adapter,
@@ -51,7 +57,7 @@ def _build_config(
         "videos_storage": build_media_storage(
             providers, root=default_videos_path(), web_prefix="/videos",
         ),
-        "artifact_db": artifact_db,
+        "artifact_db": artifact_repository,
     }
     if feedback_store is not None:
         configurable["feedback_store"] = str(feedback_store)
@@ -75,23 +81,36 @@ async def run_pipeline(
     agent_catalog: Optional[AgentCatalog] = None,
 ) -> tuple[str, dict[str, Any]]:
     run_id = run_id or f"run-{uuid.uuid4().hex[:8]}"
-    cfg = _build_config(pipeline, providers, run_id, platform, feedback_store, agent_catalog)
-    cfg.update(run_trace_config(run_id, offer=offer, platform=platform, batch=batch))
-    # Step 10 -> Step 1: lê o feedback do ciclo anterior (se houver) e o injeta no
-    # estado inicial, fechando o loop (concepts pode usar isso como viés no futuro).
-    prior = None
-    if feedback_store is not None:
-        async with _feedback_store.open_repository(feedback_store) as repository:
-            prior = await repository.load_latest_feedback()
-    prior_styles = (prior or {}).get("winning_styles", [])
-    init = {
-        "run_id": run_id,
-        "config": {"offer": offer, "batch_size": batch, "prior_winning_styles": prior_styles},
-    }
-    async with open_checkpointer(db_path) as cp:
-        app = build_graph(pipeline, checkpointer=cp)
-        out = await app.ainvoke(init, cfg)
-    return run_id, out
+    async with open_artifact_repository(default_artifacts_db_path()) as artifact_repository:
+        cfg = _build_config(
+            pipeline,
+            providers,
+            run_id,
+            platform,
+            feedback_store,
+            agent_catalog,
+            artifact_repository,
+        )
+        cfg.update(run_trace_config(run_id, offer=offer, platform=platform, batch=batch))
+        # Step 10 -> Step 1: lê o feedback do ciclo anterior (se houver) e o injeta no
+        # estado inicial, fechando o loop (concepts pode usar isso como viés no futuro).
+        prior = None
+        if feedback_store is not None:
+            async with _feedback_store.open_repository(feedback_store) as repository:
+                prior = await repository.load_latest_feedback()
+        prior_styles = (prior or {}).get("winning_styles", [])
+        init = {
+            "run_id": run_id,
+            "config": {
+                "offer": offer,
+                "batch_size": batch,
+                "prior_winning_styles": prior_styles,
+            },
+        }
+        async with open_checkpointer(db_path) as cp:
+            app = build_graph(pipeline, checkpointer=cp)
+            out = await app.ainvoke(init, cfg)
+        return run_id, out
 
 
 async def run_cycles(
@@ -140,12 +159,21 @@ async def resume_pipeline(
     feedback_store: Optional[str | Path] = None,
     agent_catalog: Optional[AgentCatalog] = None,
 ) -> tuple[str, dict[str, Any]]:
-    cfg = _build_config(pipeline, providers, run_id, platform, feedback_store, agent_catalog)
-    cfg.update(run_trace_config(run_id, platform=platform))
-    async with open_checkpointer(db_path) as cp:
-        app = build_graph(pipeline, checkpointer=cp)
-        out = await app.ainvoke(None, cfg)  # None => retoma do checkpoint
-    return run_id, out
+    async with open_artifact_repository(default_artifacts_db_path()) as artifact_repository:
+        cfg = _build_config(
+            pipeline,
+            providers,
+            run_id,
+            platform,
+            feedback_store,
+            agent_catalog,
+            artifact_repository,
+        )
+        cfg.update(run_trace_config(run_id, platform=platform))
+        async with open_checkpointer(db_path) as cp:
+            app = build_graph(pipeline, checkpointer=cp)
+            out = await app.ainvoke(None, cfg)  # None => retoma do checkpoint
+        return run_id, out
 
 
 async def get_status(

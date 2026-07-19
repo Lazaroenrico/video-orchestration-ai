@@ -16,12 +16,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sqlite3
 import threading
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, AsyncIterator, Optional, Protocol
 
 from orchestrator.storage.base import StoredObject
 from orchestrator.storage.retention import RETENTION_KEEP, expires_at_for
@@ -133,6 +135,30 @@ def _to_record(row: sqlite3.Row) -> ArtifactRecord:
     )
 
 
+class ArtifactRepository(Protocol):
+    """Contrato compartilhado pelos backends SQLite e PostgreSQL."""
+
+    async def record(self, artifact: ArtifactRecord) -> ArtifactRecord: ...
+
+    async def get(self, artifact_id: str) -> Optional[ArtifactRecord]: ...
+
+    async def by_key(self, storage_key: str) -> Optional[ArtifactRecord]: ...
+
+    async def by_run(self, run_id: str) -> list[ArtifactRecord]: ...
+
+    async def set_retention(
+        self,
+        storage_key: str,
+        retention_class: str,
+        *,
+        now: datetime,
+    ) -> None: ...
+
+    async def expired(self, *, now: datetime) -> list[ArtifactRecord]: ...
+
+    async def delete(self, artifact_id: str) -> None: ...
+
+
 class ArtifactDB:
     """Fonte canônica de artifacts. Fachada async sobre ``sqlite3`` síncrono."""
 
@@ -223,3 +249,21 @@ class ArtifactDB:
     async def delete(self, artifact_id: str) -> None:
         with self._lock, self._connect() as conn:
             conn.execute("DELETE FROM artifacts WHERE id = ?", (artifact_id,))
+
+
+@asynccontextmanager
+async def open_artifact_repository(
+    path: str | Path,
+) -> AsyncIterator[ArtifactRepository]:
+    """Seleciona PostgreSQL por ``DATABASE_URL``; sem ela, mantém SQLite local."""
+    if not os.environ.get("DATABASE_URL"):
+        repository = ArtifactDB(path)
+        repository.setup()
+        yield repository
+        return
+
+    from orchestrator.db import Database, PostgresArtifactRepository, TenantIdentity
+
+    async with Database.from_env() as database:
+        tenant = await database.ensure_tenant(TenantIdentity.from_env())
+        yield PostgresArtifactRepository(database, tenant)

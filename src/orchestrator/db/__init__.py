@@ -1,6 +1,7 @@
 """Interface pública da persistência PostgreSQL multi-tenant."""
 
 from orchestrator.db.database import Database
+from orchestrator.db.artifacts import PostgresArtifactRepository
 from orchestrator.db.creators import PostgresCreatorRepository
 from orchestrator.db.feedback import PostgresFeedbackRepository
 from orchestrator.db.migrations import upgrade_database
@@ -9,6 +10,7 @@ from orchestrator.db.tenancy import TenantContext, TenantIdentity
 
 __all__ = [
     "Database",
+    "PostgresArtifactRepository",
     "PostgresCreatorRepository",
     "PostgresFeedbackRepository",
     "PostgresPromptRepository",

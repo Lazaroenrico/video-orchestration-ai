@@ -223,6 +223,54 @@ Quarta fatia da Fase 2 entregue sem alterar contratos de CLI/runner nem frontend
 upgrade real `0003 → 0004` preservando creators; 30 regressões de feedback/loop/bias/CLI
 passaram no JSON. Gate global: `938 passed, 2 skipped`, 4441/4441 statements (100%).
 
+## D36 — Fase 2/T5: artifacts em PostgreSQL, bytes no R2 (2026-07-19)
+
+Quinta fatia da Fase 2 entregue sem alterar nodes, contratos HTTP ou frontend:
+
+- A revisão Alembic `20260719_0005` cria `artifacts`, chaveada por tenant e id
+  determinístico, com unicidade de `(organization_id, storage_key)`, índices por run e
+  expiração, JSONB para metadata e `FORCE ROW LEVEL SECURITY` por
+  `app.organization_id`.
+- `PostgresArtifactRepository` preserva o contrato completo do `ArtifactDB`: record/get,
+  lookup por key/run, upsert idempotente, classificação de retenção, consulta de
+  expirados e delete. `purge_expired` continua apagando bytes primeiro e metadata depois.
+- O banco guarda somente metadata, proveniência e ponteiros canônicos
+  (`storage_backend` + `storage_key`). Os bytes continuam no R2/local; `r2://` e URLs
+  assinadas continuam derivados na fronteira de consumo e não viraram coluna canônica.
+- `open_artifact_repository()` seleciona PostgreSQL por `DATABASE_URL`; sem ela cria e
+  usa o mesmo SQLite offline. `run_pipeline` e `resume_pipeline` mantêm o pool aberto por
+  todo o `ainvoke`, sem criar o arquivo SQLite quando PostgreSQL está ativo.
+- `ArtifactRepository` formaliza o contrato comum e permite que `media_store`/nodes
+  permaneçam agnósticos ao backend. Nenhum arquivo em `front/**` mudou.
+
+### Red → Green e falhas investigadas
+
+- RED inicial: `ImportError` para `PostgresArtifactRepository`. GREEN: migration 0005 e
+  tracer record → fechar pool → reabrir → get de todos os campos canônicos.
+- RED de idempotência: o repositório ainda não expunha `by_run`. GREEN: consulta ordenada
+  e `ON CONFLICT` atualizam a mesma linha sem duplicar o ponteiro.
+- RED de retenção/purge: faltavam `set_retention`, `by_key`, `expired` e `delete`.
+  GREEN: o PostgreSQL implementa a mesma interface usada pelo QC e por `purge_expired`.
+- Sintoma no teste de retenção: esperado `2026-07-22T12:00:00+00:00`, recebido o mesmo
+  instante como `2026-07-22T09:00:00-03:00`. Causa: `timestamptz` foi renderizado no fuso
+  da sessão PostgreSQL, divergindo do contrato textual determinístico do SQLite.
+  Correção: normalização para UTC ao materializar `ArtifactRecord`; a asserção e o
+  instante esperado foram preservados.
+- RED de tenancy: antes da policy, uma conexão Globex lia as linhas Acme e atualizava o
+  ponteiro cruzado. GREEN: `ENABLE/FORCE RLS`; SQL raw vê só Globex e update cruzado afeta
+  zero linhas.
+- RED de seleção: faltava `open_artifact_repository`, portanto não havia factory comum.
+  GREEN: selector por `DATABASE_URL`, com restart real e prova de que o SQLite-trap não é
+  criado.
+- RED de wiring: o runner ainda instanciava `ArtifactDB` diretamente mesmo com
+  PostgreSQL. GREEN: repositório injetado com lifetime envolvendo o grafo; uma escrita
+  feita dentro de `ainvoke` sobrevive ao fechamento do pool.
+
+**Verificação:** 8 testes PostgreSQL cobrem restart, upsert, retenção/purge, RLS,
+seleção, lifetime no grafo e upgrade real `0004 → 0005` preservando feedback; 47
+regressões locais de artifacts/retenção/grafo passaram. Gate global:
+`946 passed, 2 skipped`, 4503/4503 statements (100%).
+
 ## D30 — R2 + DB relacional de mídia: implementação (2026-07-16)
 
 Execução da `docs/ADR-D30-media-storage-r2-db.md`, que estava aceita mas não implementada.
