@@ -900,11 +900,11 @@ async def start_run(req: RunRequest, background_tasks: BackgroundTasks) -> dict[
     db_path = req.db or str(default_db_path())
     # Todo run registra o "último prompt usado" por tipo — independente do gate de
     # aprovação (creators.json só persiste prompts quando o gate roda).
-    prompt_store.record_last_used(
-        default_prompt_store_path(),
-        creator_prompt=req.creator_prompt,
-        video_prompt=req.video_prompt,
-    )
+    async with prompt_store.open_repository(default_prompt_store_path()) as prompts:
+        await prompts.record_last_used(
+            creator_prompt=req.creator_prompt,
+            video_prompt=req.video_prompt,
+        )
     background_tasks.add_task(
         _execute_run,
         run_id, req.offer, req.batch, req.platform, req.config_dir, db_path,
@@ -982,23 +982,24 @@ class PromptTemplateRequest(BaseModel):
 
 @app.get("/api/prompts")
 async def prompts_index() -> dict[str, Any]:
-    """Templates salvos + último prompt usado por tipo (fonte: prompts.json)."""
+    """Templates salvos + último prompt usado, em PostgreSQL ou JSON local."""
     store_path = default_prompt_store_path()
-    return {
-        "templates": prompt_store.list_templates(store_path),
-        "last_used": prompt_store.get_last_used(store_path),
-        "store_path": str(store_path),
-        "exists": store_path.exists(),
-    }
+    async with prompt_store.open_repository(store_path) as prompts:
+        return {
+            "templates": await prompts.list_templates(),
+            "last_used": await prompts.get_last_used(),
+            "store_path": prompts.location,
+            "exists": prompts.exists,
+        }
 
 
 @app.post("/api/prompts")
 async def save_prompt_template(req: PromptTemplateRequest) -> dict[str, Any]:
     try:
-        saved = prompt_store.save_template(
-            default_prompt_store_path(),
-            kind=req.kind, title=req.title, text=req.text, desc=req.desc,
-        )
+        async with prompt_store.open_repository(default_prompt_store_path()) as prompts:
+            saved = await prompts.save_template(
+                kind=req.kind, title=req.title, text=req.text, desc=req.desc,
+            )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
     return {"ok": True, "template": saved}
@@ -1006,8 +1007,9 @@ async def save_prompt_template(req: PromptTemplateRequest) -> dict[str, Any]:
 
 @app.delete("/api/prompts/{template_id}")
 async def delete_prompt_template(template_id: str) -> dict[str, Any]:
-    if not prompt_store.delete_template(default_prompt_store_path(), template_id):
-        raise HTTPException(status_code=404, detail=f"template {template_id!r} not found")
+    async with prompt_store.open_repository(default_prompt_store_path()) as prompts:
+        if not await prompts.delete_template(template_id):
+            raise HTTPException(status_code=404, detail=f"template {template_id!r} not found")
     return {"ok": True}
 
 

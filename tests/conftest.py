@@ -27,6 +27,15 @@ def _force_mock_providers(monkeypatch):
     # precisam dessas vars as setam explicitamente via monkeypatch.
     for key in [k for k in os.environ if k.startswith("REPLICATE_ELEVENLABS_")]:
         monkeypatch.delenv(key, raising=False)
+    # O ambiente do desenvolvedor pode apontar para PostgreSQL real. Testes continuam
+    # JSON/SQLite por default; casos de integração optam explicitamente via monkeypatch.
+    for key in (
+        "DATABASE_URL",
+        "ORCH_ORGANIZATION_SLUG",
+        "ORCH_ORGANIZATION_NAME",
+        "ORCH_USER_SUBJECT",
+    ):
+        monkeypatch.delenv(key, raising=False)
 
 
 def pytest_addoption(parser):

@@ -1,9 +1,8 @@
 """Persistência de prompts do dashboard (templates + último usado por tipo).
 
-Antes, os templates de prompt viviam só no ``localStorage`` do browser — não
-sobreviviam a troca de máquina/browser e nunca chegavam ao servidor. Este store
-é um único arquivo JSON (``.orchestrator/prompts.json`` por padrão, override via
-``ORCH_PROMPTS``) espelhando o padrão de ``creator_store.py``:
+Antes, os templates de prompt viviam só no ``localStorage`` do browser. O primeiro
+backend no servidor foi um arquivo JSON (``.orchestrator/prompts.json`` por padrão,
+override via ``ORCH_PROMPTS``), ainda preservado para mock/offline:
 
     {
       "templates": {
@@ -13,18 +12,22 @@ sobreviviam a troca de máquina/browser e nunca chegavam ao servidor. Este store
       "last_used": {"creator": "...", "video": "..."}
     }
 
-``_idx`` incremental global define "mais recente" de forma determinística
+Com ``DATABASE_URL``, ``open_repository`` seleciona o repositório PostgreSQL
+tenant-scoped da ADR-D36. Sem ela, ``_idx`` incremental global no JSON define
+"mais recente" de forma determinística
 (timestamps de FS não são confiáveis em CI/containers). ``last_used`` guarda o
 último prompt enviado num run por tipo — a UI usa como valor inicial das
-textareas quando não há rascunho local.
+textareas quando não há rascunho local. Os dois backends mantêm o mesmo contrato.
 """
 from __future__ import annotations
 
 import json
+import os
+from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, AsyncIterator, Optional, Protocol
 
-KINDS = ("creator", "video")
+from orchestrator.prompts import KINDS, validate_template
 
 
 def _read_store(path: Path) -> dict[str, Any]:
@@ -51,14 +54,12 @@ def save_template(
     desc: str = "",
 ) -> dict[str, Any]:
     """Grava um template; retorna a entrada salva (com ``id``)."""
-    if kind not in KINDS:
-        raise ValueError(f"kind inválido: {kind!r} (esperado um de {KINDS})")
-    title = (title or "").strip()
-    text = (text or "").strip()
-    if not title:
-        raise ValueError("title é obrigatório")
-    if not text:
-        raise ValueError("text é obrigatório")
+    kind, title, text, desc = validate_template(
+        kind=kind,
+        title=title,
+        text=text,
+        desc=desc,
+    )
 
     path = Path(path)
     store = _read_store(path)
@@ -74,7 +75,7 @@ def save_template(
         "_idx": idx,
         "kind": kind,
         "title": title,
-        "desc": (desc or "").strip(),
+        "desc": desc,
         "text": text,
     }
     templates[entry["id"]] = entry
@@ -130,3 +131,77 @@ def record_last_used(
 def get_last_used(path: str | Path) -> dict[str, str]:
     last = _read_store(Path(path)).get("last_used", {})
     return {k: v for k, v in last.items() if k in KINDS and isinstance(v, str) and v}
+
+
+class PromptRepository(Protocol):
+    location: str
+    exists: bool
+
+    async def save_template(self, **values: Any) -> dict[str, Any]: ...
+
+    async def list_templates(self, kind: Optional[str] = None) -> list[dict[str, Any]]: ...
+
+    async def delete_template(self, template_id: str) -> bool: ...
+
+    async def record_last_used(
+        self,
+        *,
+        creator_prompt: Optional[str] = None,
+        video_prompt: Optional[str] = None,
+    ) -> None: ...
+
+    async def get_last_used(self) -> dict[str, str]: ...
+
+
+class JsonPromptRepository:
+    """Fachada assíncrona do store local, preservado para mock/offline."""
+
+    def __init__(self, path: str | Path) -> None:
+        self._path = Path(path)
+
+    @property
+    def location(self) -> str:
+        return str(self._path)
+
+    @property
+    def exists(self) -> bool:
+        return self._path.exists()
+
+    async def save_template(self, **values: Any) -> dict[str, Any]:
+        return save_template(self._path, **values)
+
+    async def list_templates(self, kind: Optional[str] = None) -> list[dict[str, Any]]:
+        return list_templates(self._path, kind)
+
+    async def delete_template(self, template_id: str) -> bool:
+        return delete_template(self._path, template_id)
+
+    async def record_last_used(
+        self,
+        *,
+        creator_prompt: Optional[str] = None,
+        video_prompt: Optional[str] = None,
+    ) -> None:
+        record_last_used(
+            self._path,
+            creator_prompt=creator_prompt,
+            video_prompt=video_prompt,
+        )
+
+    async def get_last_used(self) -> dict[str, str]:
+        return get_last_used(self._path)
+
+
+@asynccontextmanager
+async def open_repository(path: str | Path) -> AsyncIterator[PromptRepository]:
+    """Seleciona PostgreSQL por ``DATABASE_URL``; sem ela, mantém JSON local."""
+    if not os.environ.get("DATABASE_URL"):
+        yield JsonPromptRepository(path)
+        return
+
+    # Imports tardios evitam carregar a stack PostgreSQL no modo mock/local.
+    from orchestrator.db import Database, PostgresPromptRepository, TenantIdentity
+
+    async with Database.from_env() as database:
+        tenant = await database.ensure_tenant(TenantIdentity.from_env())
+        yield PostgresPromptRepository(database, tenant)

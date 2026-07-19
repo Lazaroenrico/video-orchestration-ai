@@ -94,6 +94,46 @@ Primeira fatia da Fase 2 entregue sem ligar ainda os repositórios de negócio:
 **Verificação:** 13 testes PostgreSQL passaram; `orchestrator.db` com 94/94 statements
 cobertos. Gate global: `913 passed, 2 skipped`, 4209/4209 statements (100%).
 
+## D36 — Fase 2/T2: prompts em PostgreSQL (2026-07-18)
+
+Segunda fatia da Fase 2 entregue sem alterar contratos HTTP nem frontend:
+
+- A revisão Alembic `20260718_0002` cria `prompt_templates` e `prompt_last_used`, ambas
+  com `organization_id`, FK para `organizations`, `FORCE ROW LEVEL SECURITY` e policy
+  por `app.organization_id`. Templates usam identity transacional e índice
+  `(organization_id, kind, id)` para listagem mais recente/filtro.
+- `PostgresPromptRepository` implementa o mesmo contrato observável do JSON:
+  save/list/delete de templates, validação de `creator`/`video` e upsert de `last_used`
+  que preserva valores anteriores quando a entrada nova é vazia.
+- `prompt_store.open_repository()` escolhe PostgreSQL quando `DATABASE_URL` existe e
+  mantém `JsonPromptRepository` no modo mock/local. O vocabulário/validação comum ficou
+  em `orchestrator.prompts`, sem acoplar o repositório SQL ao arquivo JSON.
+- `GET/POST/DELETE /api/prompts` e `POST /api/run` passaram a usar o contrato assíncrono.
+  O payload continua com `templates`, `last_used`, `store_path` e `exists`; no PostgreSQL,
+  `store_path` vale `postgresql`. Nenhum arquivo em `front/**` mudou.
+- A suíte limpa `DATABASE_URL` e as envs de tenant por default; somente testes de
+  integração optam pelo PostgreSQL real, preservando hermeticidade offline.
+
+### Red → Green e falhas investigadas
+
+- RED inicial: `ModuleNotFoundError: orchestrator.db.prompts`. GREEN: migração 0002 e
+  tracer end-to-end salvar → fechar pool → reabrir → listar template persistido.
+- RED de exclusão: `PostgresPromptRepository` não possuía `delete_template`. GREEN:
+  `DELETE ... RETURNING`, id inválido/inexistente retorna `False` e repetição é idempotente.
+- RED de contexto recente: ausência de `get_last_used`/`record_last_used`. GREEN: tabela
+  tenant-scoped com upsert por `(organization_id, kind)` e no-op para valores vazios.
+- RED HTTP: com `DATABASE_URL` definido, `/api/prompts` ainda devolvia o caminho JSON e
+  criava o arquivo-trap. Causa: rotas chamavam funções síncronas diretamente. Correção:
+  seletor assíncrono único; o teste prova `store_path=postgresql` e nenhum JSON criado.
+- Sintoma: cobertura focada inicial ficou em 97,89% com os 21 testes de prompts verdes.
+  Causa: o comando focado não incluiu regressões legadas de JSON corrompido e atualização
+  vazia em `tests/test_small_gaps.py`. Correção: incluir esses contratos no gate focado;
+  stores JSON/PostgreSQL/domínio atingiram 147/147 statements (100%).
+
+**Verificação focada:** 45 testes verdes, incluindo upgrade real `0001 → 0002`, restart,
+fallback JSON, HTTP, ordenação/filtro, validação e RLS que bloqueia leitura/update entre
+Acme e Globex. Gate global: `922 passed, 2 skipped`, 4300/4300 statements (100%).
+
 ## D30 — R2 + DB relacional de mídia: implementação (2026-07-16)
 
 Execução da `docs/ADR-D30-media-storage-r2-db.md`, que estava aceita mas não implementada.
