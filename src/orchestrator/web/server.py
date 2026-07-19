@@ -431,20 +431,22 @@ def _recover_creators_from_media(media_root: Path) -> list[dict[str, Any]]:
     return recovered
 
 
-def _find_creator_for_draft(
-    creator_id: str, creator_run_id: Optional[str] = None,
+async def _find_creator_for_draft_repository(
+    creator_id: str,
+    creator_run_id: Optional[str] = None,
 ) -> dict[str, Any]:
-    """Resolve um creator salvo/reconstruído para reutilizar em um novo run."""
-    for candidates in (
-        creator_store.load_creators(default_creator_store_path()),
-        _recover_creators_from_media(default_media_path()),
-    ):
-        for creator in candidates:
-            if _creator_id(creator) != creator_id:
-                continue
-            if creator_run_id is not None and str(creator.get("run_id") or "") != creator_run_id:
-                continue
-            return _normalize_creator(creator)
+    """Resolve no backend ativo e só cai para varredura local quando necessário."""
+    async with creator_store.open_repository(default_creator_store_path()) as repository:
+        creator = await repository.find_creator(creator_id, creator_run_id)
+    if creator is not None:
+        return _normalize_creator(creator)
+
+    for recovered in _recover_creators_from_media(default_media_path()):
+        if _creator_id(recovered) != creator_id:
+            continue
+        if creator_run_id is not None and str(recovered.get("run_id") or "") != creator_run_id:
+            continue
+        return _normalize_creator(recovered)
 
     detail = f"creator {creator_id!r} not found"
     if creator_run_id is not None:
@@ -822,16 +824,21 @@ async def _execute_run(
                             for c in intr_payload.get("creators", [])
                         ]
                     decision = await fut
-                    # Persiste creators no store
-                    creator_store.record_creators(
-                        store_path, run_id,
-                        decision.get("creators")
-                        or [_normalize_creator(c) for c in intr_payload.get("creators", [])],
-                        approved_ids=decision.get("approved", []),
-                        creator_prompt=creator_prompt,
-                        video_prompt=video_prompt,
-                        offer=offer,
-                    )
+                    # Persiste metadata e ponteiros canônicos; signed URLs nunca entram
+                    # no repositório (D30).
+                    async with creator_store.open_repository(store_path) as creators:
+                        await creators.record_creators(
+                            run_id,
+                            decision.get("creators")
+                            or [
+                                _normalize_creator(c)
+                                for c in intr_payload.get("creators", [])
+                            ],
+                            approved_ids=decision.get("approved", []),
+                            creator_prompt=creator_prompt,
+                            video_prompt=video_prompt,
+                            offer=offer,
+                        )
                     resume_input = Command(resume=decision)
                     continue
                 # Em fluxos com subgrafo + interrupts, o último evento "LangGraph"
@@ -891,10 +898,15 @@ async def dashboard() -> HTMLResponse:
 
 @app.post("/api/run")
 async def start_run(req: RunRequest, background_tasks: BackgroundTasks) -> dict[str, str]:
-    seed_creator = (
-        _find_creator_for_draft(req.creator_id, req.creator_run_id)
-        if req.creator_id else None
-    )
+    seed_creator = None
+    if req.creator_id:
+        canonical_creator = await _find_creator_for_draft_repository(
+            req.creator_id,
+            req.creator_run_id,
+        )
+        # Handoff ao provider é uma fronteira de consumo: ponteiros R2 viram URLs
+        # temporárias aqui, nunca no repositório (D30).
+        seed_creator = await _sign_payload(canonical_creator, req.config_dir)
     run_id = f"web-{uuid.uuid4().hex[:8]}"
     _runs[run_id] = {"queues": [], "buffer": [], "done": False}
     db_path = req.db or str(default_db_path())
@@ -1016,11 +1028,14 @@ async def delete_prompt_template(template_id: str) -> dict[str, Any]:
 @app.get("/api/creators")
 async def creators_history() -> dict[str, Any]:
     store_path = default_creator_store_path()
-    creators = [
-        _normalize_creator_history(c)
-        for c in creator_store.load_creators(str(store_path))
-        if _has_complete_media(c)
-    ]
+    async with creator_store.open_repository(store_path) as repository:
+        creators = [
+            _normalize_creator_history(c)
+            for c in await repository.load_creators()
+            if _has_complete_media(c)
+        ]
+        location = repository.location
+        exists = repository.exists
     if not creators:
         creators = [
             _normalize_creator_history(c)
@@ -1029,8 +1044,8 @@ async def creators_history() -> dict[str, Any]:
     return await _sign_payload(
         {
             "creators": creators,
-            "store_path": str(store_path),
-            "exists": store_path.exists(),
+            "store_path": location,
+            "exists": exists,
         },
         None,
     )

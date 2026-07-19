@@ -134,6 +134,52 @@ Segunda fatia da Fase 2 entregue sem alterar contratos HTTP nem frontend:
 fallback JSON, HTTP, ordenação/filtro, validação e RLS que bloqueia leitura/update entre
 Acme e Globex. Gate global: `922 passed, 2 skipped`, 4300/4300 statements (100%).
 
+## D36 — Fase 2/T3: creators em PostgreSQL + fronteira R2 (2026-07-19)
+
+Terceira fatia da Fase 2 entregue sem alterar contratos HTTP nem frontend:
+
+- A revisão Alembic `20260719_0003` cria `creators`, chaveada por
+  `(organization_id, run_id, creator_id)`, com posição identity para ordenação
+  determinística, metadata normalizada, `FORCE ROW LEVEL SECURITY` e policy por
+  `app.organization_id`.
+- `PostgresCreatorRepository` preserva record/list/find e o upsert do JSON: regravar o
+  mesmo creator no mesmo run atualiza voz/status/metadata sem duplicar e o promove a
+  mais recente. `JsonCreatorRepository` continua sendo o backend mock/offline.
+- O PostgreSQL guarda somente metadata e ponteiros canônicos (`r2://bucket/key`).
+  `/api/creators` deriva signed URLs de TTL curto na saída; ao reutilizar um creator,
+  `/api/run` também assina o ponteiro para o handoff ao provider. Os testes reabrem o
+  repositório depois dessas duas fronteiras e provam que nenhuma URL temporária voltou
+  para o banco.
+- O gate humano de creators passou a gravar pelo contrato assíncrono selecionado por
+  `DATABASE_URL`. Sem essa env, o JSON, a recuperação de `/media` e o modo dry-run
+  continuam inalterados. Nenhum arquivo em `front/**` mudou.
+
+### Red → Green e falhas investigadas
+
+- RED inicial: `ImportError` para `PostgresCreatorRepository`. GREEN: migração 0003,
+  vocabulário normalizado e tracer persistir → fechar pool → reabrir → listar.
+- Sintoma do primeiro GREEN focado: o comportamento passou, mas o comando saiu 1 com
+  cobertura global em 28%. Causa: `pytest` aplica `--cov=orchestrator`/100% mesmo ao
+  executar um único teste. Correção: ciclos unitários usam `--no-cov`; o gate global de
+  cobertura continua obrigatório e foi executado ao final.
+- RED de atualização: regravar `(run_id, creator_id)` levantava `UniqueViolation`.
+  GREEN: `ON CONFLICT` atualiza campos, status e posição sem criar duplicata.
+- RED HTTP/R2: `/api/creators` ainda devolvia o path JSON com `DATABASE_URL`. GREEN:
+  selector assíncrono; a resposta recebe HTTPS assinado e a releitura mantém `r2://`.
+- RED de reuso: `/api/run` buscava somente o JSON e respondia 404 para creator existente
+  no PostgreSQL. GREEN: lookup no backend ativo e assinatura somente no handoff.
+- RED de tenancy: sem a policy, a conexão Globex lia e atualizava a linha Acme. GREEN:
+  `ENABLE/FORCE RLS`; a leitura expõe apenas Globex e o update cruzado afeta zero linhas.
+- Sintoma do primeiro gate global: `929 passed, 2 skipped`, mas cobertura 99,61%
+  (17 statements). Causa: faltavam os comportamentos de lookup do fallback JSON e
+  recuperação/404 do finder assíncrono. Correção: testes públicos desses fluxos, sem
+  excluir linhas ou afrouxar asserções.
+
+**Verificação:** upgrade real `0002 → 0003` preservou tenant e prompts; persistência,
+restart, upsert, ordenação, lookup, fallback JSON, RLS, signed URL na API e handoff ao
+provider estão cobertos. Gate global: `931 passed, 2 skipped`, 4383/4383 statements
+(100%).
+
 ## D30 — R2 + DB relacional de mídia: implementação (2026-07-16)
 
 Execução da `docs/ADR-D30-media-storage-r2-db.md`, que estava aceita mas não implementada.

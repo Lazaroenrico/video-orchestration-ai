@@ -110,7 +110,10 @@ def test_creator_id_returns_none_without_id_alias():
     assert web_server._creator_id({"name": "Creator"}) is None
 
 
-def test_find_creator_for_draft_recovers_from_media_and_scopes_run(tmp_path, monkeypatch):
+async def test_find_creator_for_draft_recovers_from_media_and_scopes_run(
+    tmp_path,
+    monkeypatch,
+):
     media_root = tmp_path / "media"
     creator_dir = media_root / "web-old" / "creator-0"
     creator_dir.mkdir(parents=True)
@@ -124,16 +127,52 @@ def test_find_creator_for_draft_recovers_from_media_and_scopes_run(tmp_path, mon
         lambda path: [{"id": "creator-other"}],
     )
 
-    creator = web_server._find_creator_for_draft("creator-0", "web-old")
+    creator = await web_server._find_creator_for_draft_repository(
+        "creator-0", "web-old"
+    )
 
     assert creator["id"] == "creator-0"
     assert creator["image_uri"] == "/media/web-old/creator-0/image.png"
     assert creator["voice_preview_uri"] == "/media/web-old/creator-0/voice.wav"
 
     with pytest.raises(HTTPException) as ei:
-        web_server._find_creator_for_draft("creator-0", "web-other")
+        await web_server._find_creator_for_draft_repository(
+            "creator-0", "web-other"
+        )
     assert ei.value.status_code == 404
     assert "web-other" in ei.value.detail
+
+
+async def test_async_creator_lookup_recovers_local_media_and_reports_scoped_missing(
+    tmp_path,
+    monkeypatch,
+):
+    media_root = tmp_path / "media"
+    for creator_id in ("creator-0", "creator-1"):
+        creator_dir = media_root / "web-old" / creator_id
+        creator_dir.mkdir(parents=True)
+        (creator_dir / "image.png").write_bytes(b"png")
+        (creator_dir / "voice.wav").write_bytes(b"wav")
+    monkeypatch.setattr(
+        web_server,
+        "default_creator_store_path",
+        lambda: tmp_path / "missing.json",
+    )
+    monkeypatch.setattr(web_server, "default_media_path", lambda: media_root)
+
+    creator = await web_server._find_creator_for_draft_repository(
+        "creator-1", "web-old"
+    )
+
+    assert creator["id"] == "creator-1"
+    assert creator["image_uri"] == "/media/web-old/creator-1/image.png"
+
+    with pytest.raises(HTTPException) as exc_info:
+        await web_server._find_creator_for_draft_repository(
+            "creator-0", "web-other"
+        )
+    assert exc_info.value.status_code == 404
+    assert "web-other" in exc_info.value.detail
 
 
 def test_runtime_phase_branches():

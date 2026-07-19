@@ -25,12 +25,19 @@ Formato no disco (escrita determinística)::
       },
       ...
     }
+
+Com ``DATABASE_URL``, ``open_repository`` seleciona PostgreSQL tenant-scoped. Sem ela,
+o arquivo JSON permanece como fallback determinístico para mock/offline.
 """
 from __future__ import annotations
 
 import json
+import os
+from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, AsyncIterator, Optional, Protocol
+
+from orchestrator.creators import normalize_creator_fields as _normalize_creator_fields
 
 
 def _read_store(path: Path) -> dict[str, Any]:
@@ -47,34 +54,6 @@ def _write_store(path: Path, data: dict[str, Any]) -> None:
     """Escreve o store de forma determinística (indent=2, sort_keys=True)."""
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
-
-
-def _normalize_creator_fields(creator: dict[str, Any]) -> dict[str, Any]:
-    """Campos normalizados de creator, preservando aliases legados image/voice."""
-    image_uri = (
-        creator.get("image_uri")
-        or creator.get("image")
-        or creator.get("upscaled_base")
-    )
-    voice_ref = (
-        creator.get("voice_ref")
-        or creator.get("voice")
-        or creator.get("voice_id")
-    )
-    voice_preview_uri = (
-        creator.get("voice_preview_uri")
-        or creator.get("voice_preview")
-        or creator.get("preview_uri")
-    )
-    return {
-        "image_uri": image_uri,
-        "voice_ref": voice_ref,
-        "voice_preview_uri": voice_preview_uri,
-        "image": image_uri,
-        "voice": voice_ref,
-        "angles": list(creator.get("angles") or []),
-        "voice_reroll_count": creator.get("voice_reroll_count"),
-    }
 
 
 def record_creators(
@@ -138,3 +117,92 @@ def load_creators(path: str | Path) -> list[dict[str, Any]]:
         )
     ]
     return entries
+
+
+class CreatorRepository(Protocol):
+    location: str
+    exists: bool
+
+    async def record_creators(
+        self,
+        run_id: str,
+        creators: list[dict[str, Any]],
+        *,
+        approved_ids: list[str],
+        creator_prompt: Optional[str] = None,
+        video_prompt: Optional[str] = None,
+        offer: Optional[str] = None,
+    ) -> None: ...
+
+    async def load_creators(self) -> list[dict[str, Any]]: ...
+
+    async def find_creator(
+        self,
+        creator_id: str,
+        run_id: Optional[str] = None,
+    ) -> Optional[dict[str, Any]]: ...
+
+
+class JsonCreatorRepository:
+    """Fachada assíncrona do store local preservado para mock/offline."""
+
+    def __init__(self, path: str | Path) -> None:
+        self._path = Path(path)
+
+    @property
+    def location(self) -> str:
+        return str(self._path)
+
+    @property
+    def exists(self) -> bool:
+        return self._path.exists()
+
+    async def record_creators(
+        self,
+        run_id: str,
+        creators: list[dict[str, Any]],
+        *,
+        approved_ids: list[str],
+        creator_prompt: Optional[str] = None,
+        video_prompt: Optional[str] = None,
+        offer: Optional[str] = None,
+    ) -> None:
+        record_creators(
+            self._path,
+            run_id,
+            creators,
+            approved_ids=approved_ids,
+            creator_prompt=creator_prompt,
+            video_prompt=video_prompt,
+            offer=offer,
+        )
+
+    async def load_creators(self) -> list[dict[str, Any]]:
+        return load_creators(self._path)
+
+    async def find_creator(
+        self,
+        creator_id: str,
+        run_id: Optional[str] = None,
+    ) -> Optional[dict[str, Any]]:
+        for creator in load_creators(self._path):
+            if str(creator.get("creator_id") or "") != creator_id:
+                continue
+            if run_id is not None and str(creator.get("run_id") or "") != run_id:
+                continue
+            return creator
+        return None
+
+
+@asynccontextmanager
+async def open_repository(path: str | Path) -> AsyncIterator[CreatorRepository]:
+    """Seleciona PostgreSQL por ``DATABASE_URL``; sem ela, mantém JSON local."""
+    if not os.environ.get("DATABASE_URL"):
+        yield JsonCreatorRepository(path)
+        return
+
+    from orchestrator.db import Database, PostgresCreatorRepository, TenantIdentity
+
+    async with Database.from_env() as database:
+        tenant = await database.ensure_tenant(TenantIdentity.from_env())
+        yield PostgresCreatorRepository(database, tenant)
