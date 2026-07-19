@@ -25,12 +25,17 @@ Formato no disco (escrita determinística)::
         ...
       }
     }
+
+Com ``DATABASE_URL``, ``open_repository`` seleciona PostgreSQL tenant-scoped. Sem ela,
+o arquivo JSON permanece como fallback determinístico para mock/offline.
 """
 from __future__ import annotations
 
 import json
+import os
+from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, AsyncIterator, Protocol
 
 
 def _read_store(path: Path) -> dict[str, Any]:
@@ -111,3 +116,52 @@ def load_latest_feedback(path: str | Path) -> dict[str, Any] | None:
 
     latest_rid = max(valid, key=lambda rid: (valid[rid]["_idx"], rid))
     return {k: v for k, v in valid[latest_rid].items() if k != "_idx"}
+
+
+class FeedbackRepository(Protocol):
+    location: str
+    exists: bool
+
+    async def save_feedback(self, run_id: str, summary: dict[str, Any]) -> None: ...
+
+    async def load_feedback(self, run_id: str) -> dict[str, Any] | None: ...
+
+    async def load_latest_feedback(self) -> dict[str, Any] | None: ...
+
+
+class JsonFeedbackRepository:
+    """Fachada assíncrona do store local preservado para mock/offline."""
+
+    def __init__(self, path: str | Path) -> None:
+        self._path = Path(path)
+
+    @property
+    def location(self) -> str:
+        return str(self._path)
+
+    @property
+    def exists(self) -> bool:
+        return self._path.exists()
+
+    async def save_feedback(self, run_id: str, summary: dict[str, Any]) -> None:
+        save_feedback(self._path, run_id, summary)
+
+    async def load_feedback(self, run_id: str) -> dict[str, Any] | None:
+        return load_feedback(self._path, run_id)
+
+    async def load_latest_feedback(self) -> dict[str, Any] | None:
+        return load_latest_feedback(self._path)
+
+
+@asynccontextmanager
+async def open_repository(path: str | Path) -> AsyncIterator[FeedbackRepository]:
+    """Seleciona PostgreSQL por ``DATABASE_URL``; sem ela, mantém JSON local."""
+    if not os.environ.get("DATABASE_URL"):
+        yield JsonFeedbackRepository(path)
+        return
+
+    from orchestrator.db import Database, PostgresFeedbackRepository, TenantIdentity
+
+    async with Database.from_env() as database:
+        tenant = await database.ensure_tenant(TenantIdentity.from_env())
+        yield PostgresFeedbackRepository(database, tenant)

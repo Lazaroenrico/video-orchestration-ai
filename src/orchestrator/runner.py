@@ -13,7 +13,7 @@ from orchestrator.config import (
     default_media_path,
     default_videos_path,
 )
-from orchestrator.feedback_store import load_latest_feedback
+import orchestrator.feedback_store as _feedback_store
 from orchestrator.graph.builder import build_graph
 from orchestrator.graph.checkpoint import open_checkpointer
 from orchestrator.graph.state import Item
@@ -79,7 +79,10 @@ async def run_pipeline(
     cfg.update(run_trace_config(run_id, offer=offer, platform=platform, batch=batch))
     # Step 10 -> Step 1: lê o feedback do ciclo anterior (se houver) e o injeta no
     # estado inicial, fechando o loop (concepts pode usar isso como viés no futuro).
-    prior = load_latest_feedback(feedback_store) if feedback_store is not None else None
+    prior = None
+    if feedback_store is not None:
+        async with _feedback_store.open_repository(feedback_store) as repository:
+            prior = await repository.load_latest_feedback()
     prior_styles = (prior or {}).get("winning_styles", [])
     init = {
         "run_id": run_id,

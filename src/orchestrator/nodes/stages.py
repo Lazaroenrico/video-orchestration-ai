@@ -582,7 +582,8 @@ async def node_feedback(state: dict[str, Any], config: RunnableConfig) -> dict[s
     store_path = config["configurable"].get("feedback_store")
     if store_path:
         run_id = state.get("run_id") or ""
-        _feedback_store.save_feedback(store_path, run_id, summary)
+        async with _feedback_store.open_repository(store_path) as repository:
+            await repository.save_feedback(run_id, summary)
     add_trace_metadata(step=10, stage="feedback", **summary)
     return {"feedback": summary}
 

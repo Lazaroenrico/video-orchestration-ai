@@ -180,6 +180,49 @@ restart, upsert, ordenação, lookup, fallback JSON, RLS, signed URL na API e ha
 provider estão cobertos. Gate global: `931 passed, 2 skipped`, 4383/4383 statements
 (100%).
 
+## D36 — Fase 2/T4: feedback em PostgreSQL (2026-07-19)
+
+Quarta fatia da Fase 2 entregue sem alterar contratos de CLI/runner nem frontend:
+
+- A revisão Alembic `20260719_0004` cria `run_feedback`, chaveada por
+  `(organization_id, run_id)`, com summary JSONB, posição identity para ordem de
+  chegada determinística, `FORCE ROW LEVEL SECURITY` e policy por
+  `app.organization_id`.
+- `PostgresFeedbackRepository` preserva save/load/latest e o comportamento last-write-
+  wins do JSON: regravar o mesmo run atualiza o summary, não duplica a linha e o torna
+  o feedback mais recente.
+- `feedback_store.open_repository()` seleciona PostgreSQL por `DATABASE_URL` e mantém
+  `JsonFeedbackRepository` no modo mock/offline. O argumento `feedback_store` do runner
+  e o `--feedback-store` da CLI continuam iguais; no PostgreSQL, o path não é criado.
+- Tanto a leitura Step 10 → Step 1 em `runner.run_pipeline` quanto a gravação de
+  `node_feedback` usam o mesmo contrato assíncrono. O segundo ciclo recebe exatamente
+  os `winning_styles` persistidos pelo primeiro. Nenhum arquivo em `front/**` mudou.
+
+### Red → Green e falhas investigadas
+
+- RED inicial: `ImportError` para `PostgresFeedbackRepository`. GREEN: migração 0004
+  e tracer save → fechar pool → reabrir → load do summary completo.
+- RED de regravação: salvar novamente o mesmo run levantava `UniqueViolation`.
+  GREEN: `ON CONFLICT` atualiza summary, timestamp e posição; `latest` retorna a última
+  gravação.
+- RED de tenancy: sem a policy, uma conexão Globex lia e atualizava a linha Acme.
+  GREEN: `ENABLE/FORCE RLS`; a leitura raw expõe apenas Globex e o update cruzado afeta
+  zero linhas.
+- RED de wiring: `runner.run_pipeline` ainda criava o arquivo JSON mesmo com
+  `DATABASE_URL`. GREEN: selector assíncrono único no runner e no node Step 10; o teste
+  prova que o arquivo-trap não existe e o summary está no PostgreSQL.
+- RED do loop: sem leitura do repositório, o segundo run recebia
+  `prior_winning_styles=[]`. GREEN: `load_latest_feedback()` no backend ativo antes de
+  montar o estado inicial.
+- Sintoma do primeiro gate global: `937 passed, 2 skipped`, mas cobertura 99,93%
+  (3 statements). Causa: faltavam os comportamentos `location`, `exists` e lookup por
+  run da fachada JSON. Correção: teste de contrato do fallback, sem excluir linhas nem
+  afrouxar o gate.
+
+**Verificação:** 6 testes PostgreSQL cobrem restart, upsert/latest, RLS, pipeline, loop e
+upgrade real `0003 → 0004` preservando creators; 30 regressões de feedback/loop/bias/CLI
+passaram no JSON. Gate global: `938 passed, 2 skipped`, 4441/4441 statements (100%).
+
 ## D30 — R2 + DB relacional de mídia: implementação (2026-07-16)
 
 Execução da `docs/ADR-D30-media-storage-r2-db.md`, que estava aceita mas não implementada.
