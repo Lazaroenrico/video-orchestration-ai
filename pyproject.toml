@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "langgraph>=0.2.50",
+    "langgraph-checkpoint-postgres>=3.0.0",
     "langgraph-checkpoint-sqlite>=2.0.0",
     "langchain-core>=0.3.0",
     "langsmith>=0.1.140",

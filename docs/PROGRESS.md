@@ -271,6 +271,135 @@ seleção, lifetime no grafo e upgrade real `0004 → 0005` preservando feedback
 regressões locais de artifacts/retenção/grafo passaram. Gate global:
 `946 passed, 2 skipped`, 4503/4503 statements (100%).
 
+## D36 — Fase 2/T6: runs e read model durável (2026-07-22)
+
+Sexta fatia da Fase 2 entregue sem trocar ainda o checkpointer LangGraph:
+
+- A revisão Alembic `20260720_0006` cria `runs` e `run_items`, ambas tenant-scoped,
+  com chaves/FKs compostas por organização, fases limitadas a `running`, `editing`,
+  `awaiting`, `done` e `error`, índices de leitura e `FORCE ROW LEVEL SECURITY` por
+  `app.organization_id`.
+- `PostgresRunRepository` implementa start/save/get/list do read model. Cada `save` é
+  snapshot exato e atômico: faz upsert dos items atuais e remove os ausentes; fase e
+  shape mínimo são validados antes da transação. Recomeçar o mesmo id limpa summary,
+  erro e projeções antigas.
+- `run_store.open_repository()` liga PostgreSQL somente quando `DATABASE_URL` existe.
+  Sem ela, execução, checkpoint SQLite e APIs locais preservam o comportamento anterior.
+- `POST /api/run` registra o run antes de agendar a task. `_execute_run` mantém um único
+  pool durante o ciclo e persiste progresso antes do SSE `item_update`, os gates de
+  conceitos/creators, resultado final e erro terminal.
+- `/api/runs`, `/api/status/{run_id}` e `/api/state/{run_id}` usam o read model como
+  fallback quando `_runs` e o checkpoint local desaparecem. Os payloads pendentes dos
+  gates também são reidratados depois de restart. Runtime/checkpoint continuam com
+  precedência enquanto existem.
+- Ponteiros canônicos `r2://` permanecem no PostgreSQL; signed URLs são produzidas apenas
+  na fronteira HTTP. Duas organizações podem usar o mesmo `run_id` sem ler ou sobrescrever
+  dados uma da outra.
+
+Neste slice T6 o checkpointer ainda não havia migrado para `AsyncPostgresSaver`; essa
+lacuna é fechada pelo T7 abaixo. A substituição de `BackgroundTasks`, `Future` dos gates
+e buffer SSE em memória por jobs/eventos duráveis continua reservada à Fase 3.
+
+### Red → Green e falhas investigadas
+
+- Sintoma: PostgreSQL 16/`pg_ctl` não existiam no host; depois da extração dos pacotes,
+  faltava `libpq`, e sockets foram bloqueados pelo sandbox. Causa: ambiente de validação
+  sem servidor instalado e restrição de socket. Correção operacional: DEBs PostgreSQL 16
+  e `libpq` extraídos em `/tmp`, `LD_LIBRARY_PATH` explícito e somente os testes de
+  integração executados fora do sandbox; código e asserções permaneceram intactos.
+- RED de snapshot: um item removido no estado mais novo continuava em `run_items`.
+  Causa: `save` fazia apenas upsert. Correção: delete tenant-scoped dos ids ausentes na
+  mesma transação.
+- REDs de contrato: fase desconhecida vazava `CheckViolation` e item sem id vazava
+  `KeyError`. Causa: validação dependia do SQL/dicionário. Correção: validar fase e shape
+  antes de abrir a transação, com `ValueError` explícito.
+- RED de restart: APIs devolviam 404 após limpar `_runs` e apagar o checkpoint; falhas
+  ainda apareciam como `running`. Causa: leitura e exceção só atualizavam memória/SQLite.
+  Correção: fallback PostgreSQL nas três rotas e persistência terminal `error` no handler.
+- REDs dos gates: conceitos/creators continuavam `running`; após o primeiro fix, a fase
+  voltava mas os payloads pendentes ficavam vazios. Causa: interrupções e `/api/state`
+  só conheciam `_runs`. Correção: persistir `pending_concepts`/`pending_creators` no JSONB
+  e reidratá-los normalizados no fallback.
+- Sintoma no tracer de creators: o teste comparava o shape bruto inventado com a resposta
+  pública normalizada. Causa: fixture não respeitava o contrato já coberto da API.
+  Correção: usar aliases reais (`creator_id`, `image`, `voice`) e manter comparação exata
+  com o payload normalizado; nenhuma asserção de produção foi afrouxada.
+- RED de progresso: ao pausar a emissão de `item_update`, o banco ainda não continha o
+  item. Causa: evento era emitido logo após atualizar memória. Correção: snapshot durável
+  concluído antes da entrega SSE.
+- RED de reuso: `start` do mesmo id preservava summary/items do run anterior. Causa:
+  `ON CONFLICT` só atualizava parâmetros de entrada. Correção: reset do cabeçalho e delete
+  atômico das projeções antigas.
+- Sintoma durante refactor: a primeira integração abria um pool a cada evento persistido.
+  Causa: selector aplicado ao redor de cada `save`. Correção: lifetime único envolvendo
+  `_execute_run`, reutilizado por progresso, gates e término.
+- Sintoma no build: `tsc` não existia na worktree; `npm ci --offline` foi bloqueado com
+  `EPERM` ao validar o binário `esbuild`. Causa: dependências não materializadas e execução
+  de binário restrita pelo sandbox. Correção operacional: instalação offline e build fora
+  dessa restrição; lockfile e código frontend não mudaram.
+
+**Verificação:** 18 testes PostgreSQL cobrem restart, snapshots, listagem/erro, validação,
+gates, progresso antes do SSE, RLS, reset, upgrade real `0005 → 0006` e fronteira R2;
+83 regressões web afetadas passaram. Gate global: `964 passed, 2 skipped`, 4626/4626
+statements (100%). `npm run build`: TypeScript e Vite verdes (66 módulos).
+
+## D36 — Fase 2/T7: checkpointer PostgreSQL tenant-scoped (2026-07-22)
+
+Fatia T7 de persistência entregue; PostgreSQL agora também é a fonte do checkpoint
+LangGraph quando `DATABASE_URL` está presente:
+
+- `langgraph-checkpoint-postgres` 3.x entrou nas dependências e no `uv.lock`.
+  `open_checkpointer()` seleciona `AsyncPostgresSaver`; sem URL mantém exatamente o
+  `AsyncSqliteCompatSaver` offline e o `db_path` local.
+- `orchestrator migrate`/`upgrade_database(..., revision="head")` executa o `setup()`
+  oficial do saver e aplica `ENABLE/FORCE ROW LEVEL SECURITY` às três tabelas de dados.
+  Requests e runners não executam DDL: apenas configuram o tenant da sessão e fazem DML.
+- `TenantScopedPostgresSaver` preserva `thread_id = run_id` na interface LangGraph e
+  adiciona o UUID da organização somente à chave física. `get`, `list`, `put`, writes,
+  delete e delta history convertem a chave na fronteira, sem expor o prefixo ao grafo.
+- As policies conferem esse prefixo físico contra `app.organization_id`. Portanto duas
+  organizações podem reutilizar o mesmo `run_id`, e uma query SQL com o papel runtime
+  continua vendo apenas o tenant configurado.
+- `run_pipeline`, `resume_pipeline`, `get_status`, gates e execução web foram validados
+  abrindo novas instâncias e até recebendo `db_path` diferentes: o estado é retomado do
+  PostgreSQL e nenhum arquivo SQLite é criado.
+- `/api/status/{run_id}` continua usando o read model de T6 quando existe projeção
+  durável, mas não existe checkpoint (por exemplo, erro antes do primeiro super-step).
+
+Com T7, runs, items, prompts, creators, feedback, artifacts e checkpoints sobrevivem a
+restart no PostgreSQL, com modo mock local separado. A Fase 2 permanece aberta até o
+importador legado idempotente copiar e conferir SQLite, JSON e mídia local no PostgreSQL/R2.
+Jobs, outbox, gates sem `Future` e SSE persistido começam somente na Fase 3.
+
+### Red → Green e falhas investigadas
+
+- RED de restart: a segunda instância, usando outro `db_path`, retornou snapshot sem
+  `run_id`. Causa: o selector ainda abria SQLite mesmo com `DATABASE_URL`. Correção:
+  `AsyncPostgresSaver` com o serializer atual; reabrir a conexão recupera o mesmo estado
+  sem criar os arquivos-trap.
+- RED de tenancy: Globex leu todo o checkpoint Acme ao consultar o mesmo `run_id`.
+  Causa: as tabelas oficiais usam apenas `thread_id`/namespace e não conhecem organização.
+  Correção: wrapper profundo que compõe a chave física com organization UUID e devolve o
+  `run_id` original em todos os configs públicos.
+- RED de RLS: uma conexão Globex contou 20 linhas Acme em `checkpoints`. Causa: o wrapper
+  isolava a API, mas faltava a segunda barreira SQL. Correção: `FORCE RLS` em checkpoints,
+  blobs e writes, policies pelo prefixo tenant e `app.organization_id` na sessão do saver.
+- Sintoma web: `permission denied for schema public` ao abrir `/api/state`. Causa:
+  `open_checkpointer()` chamava `setup()` em toda leitura, exigindo CREATE do papel runtime.
+  Correção: setup/policies movidos para `migrate`; runtime permaneceu somente DML.
+- Sintoma no primeiro setup migratório: `PostgresSaver.from_conn_string()` rejeitou
+  `serde=`. Causa: na versão instalada, o context manager síncrono não aceita esse kwarg;
+  serializer é necessário para leitura/escrita async, não para criar schema. Correção:
+  setup síncrono sem serializer e saver async com `_serde()` preservado.
+- Sintoma no primeiro gate global: 99% de cobertura, com lifecycle do wrapper e fallback
+  de status sem regressão. Causa: os fluxos principais usavam get/put, mas não list/delete/
+  delta nem read-model-only. Correção: testes públicos de lifecycle e status; nenhum ramo
+  foi excluído e a cobertura voltou a 100%.
+
+**Verificação:** matriz PostgreSQL com 67 testes; 114 regressões focadas de checkpoint,
+resume, CLI e web. Gate global: `970 passed, 2 skipped`, 4700/4700 statements (100%).
+`npm run build`: TypeScript e Vite verdes (66 módulos).
+
 ## D30 — R2 + DB relacional de mídia: implementação (2026-07-16)
 
 Execução da `docs/ADR-D30-media-storage-r2-db.md`, que estava aceita mas não implementada.

@@ -107,7 +107,10 @@ O limite de concorrencia de Replicate, hoje local ao processo, deve ser substitu
 ### Fase 0 - Congelar os contratos e medir
 
 - Aceitar esta ADR, definir ambiente inicial e regiao de dados.
-- Registrar SLOs: duracao p95 do run, recuperacao de gate, perda tolerada de eventos, RPO e RTO.
+- SLOs congelados para o aceite: API p95 <= 500 ms, retomada de gate <= 30 s, nenhum
+  evento confirmado perdido, RPO <= 5 min e RTO <= 60 min.
+- Registrar a duracao p95 do smoke mock batch 2 como baseline de run; chamadas reais de
+  providers e corte de producao permanecem fora do escopo desta ADR.
 - Medir tamanho de imagem, memoria dos runs, chamadas simultaneas por provider e latencia Container-PostgreSQL.
 - Definir nomes de variaveis comuns: `DATABASE_URL`, `QUEUE_BACKEND`, `STORAGE_BACKEND`, `OIDC_ISSUER`, `OIDC_AUDIENCE` e segredos por provider.
 

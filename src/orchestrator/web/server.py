@@ -28,6 +28,7 @@ from langgraph.types import Command
 from orchestrator import runner, stream_bus
 import orchestrator.creator_store as creator_store
 import orchestrator.prompt_store as prompt_store
+import orchestrator.run_store as run_store
 from orchestrator.config import (
     default_creator_store_path,
     default_db_path,
@@ -160,6 +161,7 @@ app.mount(
 
 # run_id → {queues: list[Queue], buffer: list[dict], done: bool}
 _runs: dict[str, dict[str, Any]] = {}
+_RUN_REPOSITORY_UNSET = object()
 
 PIPELINE_NODES = {
     "persona", "roster", "approval", "concepts", "scripts", "concept_review",
@@ -662,6 +664,7 @@ async def _execute_run(
     approve_creators: bool = True,
     edit_concepts: bool = True,
     seed_creator: Optional[dict[str, Any]] = None,
+    _run_repository: Any = _RUN_REPOSITORY_UNSET,
 ) -> None:
     """Roda a pipeline completa, emitindo eventos para os subscribers SSE.
 
@@ -669,6 +672,23 @@ async def _execute_run(
     ``awaiting_approval`` e aguarda a resolução do Future criado por
     ``POST /api/approve/{run_id}``, depois retoma com ``Command(resume=...)``.
     """
+    if _run_repository is _RUN_REPOSITORY_UNSET:
+        async with run_store.open_repository() as repository:
+            await _execute_run(
+                run_id,
+                offer,
+                batch,
+                platform,
+                config_dir,
+                db_path,
+                creator_prompt,
+                video_prompt,
+                approve_creators,
+                edit_concepts,
+                seed_creator,
+                repository,
+            )
+        return
 
     def token_cb(event: dict[str, Any]) -> None:
         if event.get("type") == "creator_ready" and isinstance(event.get("creator"), dict):
@@ -774,6 +794,26 @@ async def _execute_run(
                                 run_state.setdefault("item_snapshots", {}),
                             )
                             if item_update:
+                                persisted_items = [
+                                    _safe_serialize(_complete_item_payload(snapshot))
+                                    for snapshot in run_state["item_snapshots"].values()
+                                    if isinstance(snapshot, dict)
+                                ]
+                                if _run_repository is not None:
+                                    await _run_repository.save(
+                                        run_id,
+                                        phase="running",
+                                        state={
+                                            "run_id": run_id,
+                                            "offer": offer,
+                                            "platform": platform,
+                                        },
+                                        summary=runner.summarize({
+                                            "run_id": run_id,
+                                            "results": persisted_items,
+                                        }),
+                                        items=persisted_items,
+                                    )
                                 await _emit(run_id, item_update)
 
                     # Captura o estado final do grafo raiz
@@ -802,27 +842,51 @@ async def _execute_run(
                         if run_state_ref is not None:
                             run_state_ref["concept_edit"] = cfut
                             run_state_ref["pending_concepts"] = concepts
+                        persisted_state = _to_plain(dict(snap.values or {}))
+                        persisted_state["pending_concepts"] = concepts
+                        if _run_repository is not None:
+                            await _run_repository.save(
+                                run_id,
+                                phase="editing",
+                                state=persisted_state,
+                                summary=runner.summarize({
+                                    **dict(snap.values or {}),
+                                    "run_id": run_id,
+                                }),
+                                items=[],
+                            )
                         cdecision = await cfut
                         resume_input = Command(resume=cdecision)
                         continue
                     # NÃO usar **intr_payload aqui: ele carrega seu próprio "type"
                     # ("approve_creators") que sobrescreveria o "awaiting_approval".
+                    pending_creators = [
+                        _normalize_creator(c)
+                        for c in intr_payload.get("creators", [])
+                    ]
                     await _emit(run_id, {
                         "type": "awaiting_approval",
-                        "creators": [
-                            _normalize_creator(c)
-                            for c in intr_payload.get("creators", [])
-                        ],
+                        "creators": pending_creators,
                     })
                     # Cria Future e aguarda decisão via POST /api/approve
                     fut: asyncio.Future = asyncio.get_event_loop().create_future()
                     run_state_ref = _runs.get(run_id)
                     if run_state_ref is not None:
                         run_state_ref["approval"] = fut
-                        run_state_ref["pending_creators"] = [
-                            _normalize_creator(c)
-                            for c in intr_payload.get("creators", [])
-                        ]
+                        run_state_ref["pending_creators"] = pending_creators
+                    persisted_state = _to_plain(dict(snap.values or {}))
+                    persisted_state["pending_creators"] = pending_creators
+                    if _run_repository is not None:
+                        await _run_repository.save(
+                            run_id,
+                            phase="awaiting",
+                            state=persisted_state,
+                            summary=runner.summarize({
+                                **dict(snap.values or {}),
+                                "run_id": run_id,
+                            }),
+                            items=[],
+                        )
                     decision = await fut
                     # Persiste metadata e ponteiros canônicos; signed URLs nunca entram
                     # no repositório (D30).
@@ -849,6 +913,17 @@ async def _execute_run(
                 break
 
         summary = runner.summarize({**final_output, "run_id": run_id}) if final_output else {}
+        if _run_repository is not None:
+            await _run_repository.save(
+                run_id,
+                phase="done",
+                state=_to_plain(final_output),
+                summary=_safe_serialize(summary),
+                items=[
+                    _item_payload_from_result(item)
+                    for item in (final_output.get("results") or [])
+                ],
+            )
         await _emit(run_id, {"type": "run_end", "run_id": run_id, "summary": summary})
 
     except Exception as exc:  # noqa: BLE001
@@ -858,6 +933,25 @@ async def _execute_run(
         state = _runs.get(run_id)
         if state is not None:
             state["error"] = str(exc)
+        snapshots = (state or {}).get("item_snapshots") or {}
+        items = [
+            _safe_serialize(_complete_item_payload(snapshot))
+            for snapshot in snapshots.values()
+            if isinstance(snapshot, dict)
+        ] if isinstance(snapshots, dict) else []
+        if _run_repository is not None:
+            await _run_repository.save(
+                run_id,
+                phase="error",
+                state={
+                    "run_id": run_id,
+                    "offer": offer,
+                    "platform": platform,
+                },
+                summary={},
+                items=items,
+                error=str(exc),
+            )
         await _emit(run_id, {"type": "error", "message": str(exc)})
 
     finally:
@@ -917,6 +1011,14 @@ async def start_run(req: RunRequest, background_tasks: BackgroundTasks) -> dict[
             creator_prompt=req.creator_prompt,
             video_prompt=req.video_prompt,
         )
+    async with run_store.open_repository() as runs:
+        if runs is not None:
+            await runs.start(
+                run_id,
+                offer=req.offer,
+                platform=req.platform,
+                batch_size=req.batch,
+            )
     background_tasks.add_task(
         _execute_run,
         run_id, req.offer, req.batch, req.platform, req.config_dir, db_path,
@@ -1119,11 +1221,25 @@ async def list_runs_endpoint(db: Optional[str] = None) -> dict[str, Any]:
     # `active` = só o que está realmente rodando; runs concluídos ou quebrados saem
     # daqui (senão a lista os rotularia "Generating" para sempre). `errored` deixa a
     # UI marcar os que falharam como "Failed".
-    errored = [rid for rid, s in _runs.items() if s.get("error")]
+    persisted_ids: list[str] = []
+    persisted_errors: list[str] = []
+    async with run_store.open_repository() as runs:
+        if runs is not None:
+            index = await runs.list_index()
+            persisted_ids = [entry.run_id for entry in index]
+            persisted_errors = [
+                entry.run_id
+                for entry in index
+                if entry.phase == "error" or entry.error
+            ]
+    errored = list(dict.fromkeys(
+        persisted_errors + [rid for rid, s in _runs.items() if s.get("error")]
+    ))
     active = [
         rid for rid, s in _runs.items() if not s.get("error") and not s.get("done")
     ]
-    return {"runs": runner.list_runs(db_path), "active": active, "errored": errored}
+    known = list(dict.fromkeys(persisted_ids + runner.list_runs(db_path)))
+    return {"runs": known, "active": active, "errored": errored}
 
 
 @app.get("/api/status/{run_id}")
@@ -1132,7 +1248,11 @@ async def run_status(run_id: str, config_dir: Optional[str] = None, db: Optional
     db_path = db or str(default_db_path())
     state = await runner.get_status(pipeline, db_path=db_path, run_id=run_id)
     if state is None:
-        raise HTTPException(status_code=404, detail=f"run {run_id!r} not found")
+        async with run_store.open_repository() as runs:
+            persisted = await runs.get(run_id) if runs is not None else None
+        if persisted is None:
+            raise HTTPException(status_code=404, detail=f"run {run_id!r} not found")
+        return persisted.summary
     return runner.summarize({**state, "run_id": run_id})
 
 
@@ -1142,12 +1262,16 @@ async def run_state(run_id: str, config_dir: Optional[str] = None, db: Optional[
     db_path = db or str(default_db_path())
     checkpoint_state = await runner.get_status(pipeline, db_path=db_path, run_id=run_id)
     runtime_state = _runs.get(run_id)
-    if checkpoint_state is None and runtime_state is None:
+    async with run_store.open_repository() as runs:
+        persisted = await runs.get(run_id) if runs is not None else None
+    if checkpoint_state is None and runtime_state is None and persisted is None:
         raise HTTPException(status_code=404, detail=f"run {run_id!r} not found")
 
     summary: dict[str, Any] | None = None
     if checkpoint_state is not None:
         summary = runner.summarize({**checkpoint_state, "run_id": run_id})
+    elif persisted is not None:
+        summary = persisted.summary
     if summary is None and runtime_state is not None:
         for event in reversed(runtime_state.get("buffer") or []):
             if event.get("type") == "run_end" and isinstance(event.get("summary"), dict):
@@ -1175,7 +1299,9 @@ async def run_state(run_id: str, config_dir: Optional[str] = None, db: Optional[
         (runtime_state or {}).get("item_snapshots")
         if runtime_state is not None else None
     )
-    if isinstance(runtime_snapshots, dict) and runtime_snapshots:
+    if checkpoint_state is None and persisted is not None and not runtime_snapshots:
+        items = [_safe_serialize(item) for item in persisted.items]
+    elif isinstance(runtime_snapshots, dict) and runtime_snapshots:
         snapshots: dict[str, dict[str, Any]] = {}
         order: list[str] = []
         for result in checkpoint_results:
@@ -1203,7 +1329,11 @@ async def run_state(run_id: str, config_dir: Optional[str] = None, db: Optional[
     else:
         items = [_item_payload_from_result(item) for item in checkpoint_results]
 
-    phase = _runtime_phase(runtime_state, summary)
+    phase = (
+        _runtime_phase(runtime_state, summary)
+        if runtime_state is not None
+        else persisted.phase if persisted is not None else _runtime_phase(None, summary)
+    )
     edit_concepts: list[dict[str, Any]] = []
     awaiting: list[dict[str, Any]] = []
     if runtime_state is not None and phase == "editing":
@@ -1212,10 +1342,22 @@ async def run_state(run_id: str, config_dir: Optional[str] = None, db: Optional[
             for c in runtime_state.get("pending_concepts") or []
             if isinstance(c, dict)
         ]
+    elif persisted is not None and phase == "editing":
+        edit_concepts = [
+            _safe_serialize(c)
+            for c in persisted.state.get("pending_concepts") or []
+            if isinstance(c, dict)
+        ]
     if runtime_state is not None and phase == "awaiting":
         awaiting = [
             _normalize_creator(c)
             for c in runtime_state.get("pending_creators") or []
+            if isinstance(c, dict)
+        ]
+    elif persisted is not None and phase == "awaiting":
+        awaiting = [
+            _normalize_creator(c)
+            for c in persisted.state.get("pending_creators") or []
             if isinstance(c, dict)
         ]
 
@@ -1227,7 +1369,11 @@ async def run_state(run_id: str, config_dir: Optional[str] = None, db: Optional[
             "edit_concepts": edit_concepts,
             "awaiting": awaiting,
             "summary": summary,
-            "error": runtime_state.get("error") if runtime_state is not None else None,
+            "error": (
+                runtime_state.get("error")
+                if runtime_state is not None
+                else persisted.error if persisted is not None else None
+            ),
         },
         config_dir,
     )

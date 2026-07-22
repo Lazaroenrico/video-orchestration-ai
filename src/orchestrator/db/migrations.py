@@ -25,3 +25,7 @@ def upgrade_database(database_url: str, revision: str = "head") -> None:
     config.set_main_option("script_location", str(_PROJECT_ROOT / "migrations"))
     config.set_main_option("sqlalchemy.url", _sqlalchemy_url(database_url).replace("%", "%%"))
     command.upgrade(config, revision)
+    if revision == "head":
+        from orchestrator.graph.checkpoint import setup_postgres_checkpointer
+
+        setup_postgres_checkpointer(database_url)
