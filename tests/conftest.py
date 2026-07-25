@@ -2,8 +2,14 @@
 import os
 
 import pytest
+from pytest_postgresql import factories
 
 from orchestrator.adapters.mock import MockAdapter
+
+# O projeto valida PostgreSQL em uma instância real e externa ao processo de pytest
+# (Docker no desenvolvimento/CI). Isso evita instalar/binários `pg_ctl` no host e faz
+# cada teste receber um database limpo pelo janitor do próprio pytest-postgresql.
+postgresql = factories.postgresql("postgresql_noproc")
 
 # providers.yaml pode ter adapters reais (MVP). Garantir que todos os testes
 # usem mock — testes que precisam de adapters reais optam via --live.

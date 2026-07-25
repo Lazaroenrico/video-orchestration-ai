@@ -273,19 +273,22 @@ async def _set_checkpoint_tenant(
 
 
 @asynccontextmanager
-async def open_checkpointer(db_path: str | Path) -> AsyncIterator[Any]:
-    """Seleciona PostgreSQL quando configurado; mantém SQLite no modo local."""
-    database_url = os.environ.get("DATABASE_URL")
-    if database_url:
-        async with AsyncPostgresSaver.from_conn_string(
-            database_url,
+async def open_tenant_postgres_checkpointer(
+    database_url: str,
+    organization_id: str,
+) -> AsyncIterator[TenantScopedPostgresSaver]:
+    """Abre o saver PostgreSQL já limitado a uma organização conhecida."""
+    async with AsyncPostgresSaver.from_conn_string(
+            database_url.replace("postgresql+psycopg://", "postgresql://", 1),
             serde=_serde(),
         ) as saver:
-            tenant = TenantIdentity.from_env().context()
-            await _set_checkpoint_tenant(saver, str(tenant.organization_id))
-            yield TenantScopedPostgresSaver(saver, str(tenant.organization_id))
-        return
+        await _set_checkpoint_tenant(saver, organization_id)
+        yield TenantScopedPostgresSaver(saver, organization_id)
 
+
+@asynccontextmanager
+async def open_sqlite_checkpointer(db_path: str | Path) -> AsyncIterator[AsyncSqliteCompatSaver]:
+    """Abre explicitamente uma fonte SQLite, mesmo quando DATABASE_URL existe."""
     path = Path(db_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(path), check_same_thread=False)
@@ -295,3 +298,20 @@ async def open_checkpointer(db_path: str | Path) -> AsyncIterator[Any]:
         yield saver
     finally:
         conn.close()
+
+
+@asynccontextmanager
+async def open_checkpointer(db_path: str | Path) -> AsyncIterator[Any]:
+    """Seleciona PostgreSQL quando configurado; mantém SQLite no modo local."""
+    database_url = os.environ.get("DATABASE_URL")
+    if database_url:
+        tenant = TenantIdentity.from_env().context()
+        async with open_tenant_postgres_checkpointer(
+            database_url,
+            str(tenant.organization_id),
+        ) as saver:
+            yield saver
+        return
+
+    async with open_sqlite_checkpointer(db_path) as saver:
+        yield saver

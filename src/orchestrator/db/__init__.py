@@ -2,6 +2,7 @@
 
 from orchestrator.db.database import Database
 from orchestrator.db.artifacts import PostgresArtifactRepository
+from orchestrator.db.admin import RUNTIME_ROLE, provision_runtime_role
 from orchestrator.db.creators import PostgresCreatorRepository
 from orchestrator.db.feedback import PostgresFeedbackRepository
 from orchestrator.db.migrations import upgrade_database
@@ -12,6 +13,7 @@ from orchestrator.db.tenancy import TenantContext, TenantIdentity
 __all__ = [
     "Database",
     "PostgresArtifactRepository",
+    "RUNTIME_ROLE",
     "PostgresCreatorRepository",
     "PostgresFeedbackRepository",
     "PostgresPromptRepository",
@@ -21,4 +23,5 @@ __all__ = [
     "TenantContext",
     "TenantIdentity",
     "upgrade_database",
+    "provision_runtime_role",
 ]

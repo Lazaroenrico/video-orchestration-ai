@@ -400,6 +400,49 @@ Jobs, outbox, gates sem `Future` e SSE persistido começam somente na Fase 3.
 resume, CLI e web. Gate global: `970 passed, 2 skipped`, 4700/4700 statements (100%).
 `npm run build`: TypeScript e Vite verdes (66 módulos).
 
+## D36 — Fase 2/T8: import legado idempotente (2026-07-25)
+
+A Fase 2 foi fechada com um importador explícito e reiniciável:
+
+- `scan_legacy()` valida SQLite/JSON/mídia e produz manifesto e checksum determinísticos
+  sem escrever. `orchestrator import-legacy` é dry-run por padrão; `--apply` exige
+  `DATABASE_URL`, resolve o storage por `--config-dir` e usa o tenant de `ORCH_*`.
+- A revisão `20260722_0007` registra batches/entries tenant-scoped com RLS. O mesmo
+  checksum vira `noop`; drift da origem é recusado; erro persistido vira `failed` e pode
+  ser retomado. Um advisory lock PostgreSQL serializa `(organization, source_id)`.
+- Checkpoints/runs, prompts, creators, feedback e artifacts são copiados para os
+  repositórios PostgreSQL. Bytes vão ao backend de mídia sob keys tenant-scoped; imagem
+  e preview de voz do creator viram ponteiros canônicos, enquanto `voice_ref` opaco é
+  preservado.
+
+### Red → Green e falhas investigadas
+
+- Sintoma: o teste nem iniciou com `python: No such file or directory`. Causa: a worktree
+  não ativa o venv automaticamente. Correção operacional: usar `.venv/bin/python`.
+- Sintoma: a fixture tentou a porta 5432 e depois deixou `pytest_db_tmpl` ao ser
+  interrompida. Causa: faltavam os parâmetros do PostgreSQL externo e o janitor não
+  tolera template ausente/parcial. Correção operacional: host/porta/banco explícitos e
+  remoção somente de `pytest_db`/`pytest_db_tmpl` confirmados como descartáveis.
+- Sintoma: Alembic não autenticou como admin e o pool runtime rejeitou a senha. Causa:
+  a URL construída pela fixture omitia credenciais; no caso runtime o teste havia acabado
+  de provisionar uma senha diferente. Correção: senha runtime explícita na URL do teste e
+  contêiner descartável alinhado ao contrato `trust` dos papéis temporários da suíte.
+- RED de assets: só um objeto era enviado ao storage. Causa: creators eram gravados antes
+  de materializar `image`/`voice_preview`. Correção: upload determinístico e substituição
+  apenas de `image_uri`/`voice_preview_uri`; três objetos e `voice_ref` preservado.
+- RED de tenancy: o import sempre criava `legacy-local`. Correção:
+  `TenantIdentity.from_env()`, comprovado com outro tenant.
+- RED de recuperação: batch permanecia `pending` após falha de storage. Correção: coluna
+  `error`, transições `pending → failed → pending → applied` e retry do mesmo checksum.
+- RED concorrente: duas tasks retornaram `applied` e duplicaram uploads. Correção: lock
+  advisory de sessão mantido por toda a aplicação; a segunda execução observa `applied`
+  e retorna `noop`.
+- RED CLI: `--apply` ainda abortava como indisponível. Correção: wiring de Database,
+  storage e importador, saída JSON uniforme para `applied`/`noop`.
+
+**Verificação focada:** 14 testes do importador e 87 testes do gate PostgreSQL/CLI
+verdes. Gate global: `990 passed, 2 skipped`, 4998/4998 statements (100%).
+
 ## D30 — R2 + DB relacional de mídia: implementação (2026-07-16)
 
 Execução da `docs/ADR-D30-media-storage-r2-db.md`, que estava aceita mas não implementada.

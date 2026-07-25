@@ -162,6 +162,47 @@ def test_cli_migrate_upgrades_postgres_idempotently(postgresql):
     assert "PostgreSQL migrado" in first.output
 
 
+def test_cli_migrate_uses_privileged_url_in_staging(postgresql):
+    migration_url = _database_url(postgresql)
+
+    result = CliRunner().invoke(
+        cli,
+        ["migrate"],
+        env={
+            "ORCH_ENV": "staging",
+            "MIGRATION_DATABASE_URL": migration_url,
+            "DATABASE_URL": "postgresql://runtime-invalid@127.0.0.1:1/orchestrator",
+        },
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "PostgreSQL migrado" in result.output
+
+
+def test_cli_provisions_fixed_runtime_role_without_echoing_password(postgresql):
+    password = "runtime-secret-for-test"
+
+    result = CliRunner().invoke(
+        cli,
+        ["db", "provision-runtime"],
+        env={
+            "MIGRATION_DATABASE_URL": _database_url(postgresql),
+            "ORCHESTRATOR_RUNTIME_PASSWORD": password,
+        },
+    )
+
+    assert result.exit_code == 0, result.output
+    assert password not in result.output
+    row = postgresql.execute(
+        """
+        SELECT rolname, rolcanlogin, rolsuper, rolbypassrls, rolcreatedb, rolcreaterole
+        FROM pg_roles
+        WHERE rolname = 'orchestrator_runtime'
+        """
+    ).fetchone()
+    assert row == ("orchestrator_runtime", True, False, False, False, False)
+
+
 async def test_database_builds_from_the_portable_database_url(monkeypatch, postgresql):
     database_url = _database_url(postgresql)
     upgrade_database(database_url)

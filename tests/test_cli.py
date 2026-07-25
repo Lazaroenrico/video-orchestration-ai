@@ -81,6 +81,35 @@ def test_cli_migrate_materializes_state_and_is_idempotent(tmp_path):
     assert res2.exit_code == 0, res2.output
 
 
+def test_cli_migrate_refuses_runtime_url_outside_local(monkeypatch):
+    monkeypatch.setenv("MIGRATION_DATABASE_URL", "")
+    result = CliRunner().invoke(
+        cli,
+        ["migrate"],
+        env={
+            **CLI_OFFLINE_ENV,
+            "ORCH_ENV": "production",
+            "MIGRATION_DATABASE_URL": "",
+            "DATABASE_URL": "postgresql://runtime@database/orchestrator",
+        },
+    )
+
+    assert result.exit_code != 0
+    assert "MIGRATION_DATABASE_URL" in result.output
+
+
+def test_cli_provision_runtime_requires_password(monkeypatch):
+    monkeypatch.delenv("ORCHESTRATOR_RUNTIME_PASSWORD", raising=False)
+
+    result = CliRunner().invoke(
+        cli,
+        ["db", "provision-runtime", "--migration-database-url", "postgresql://unused"],
+    )
+
+    assert result.exit_code != 0
+    assert "ORCHESTRATOR_RUNTIME_PASSWORD" in result.output
+
+
 def _mock_config_dir(tmp_path):
     cfg = tmp_path / "config"
     cfg.mkdir()

@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import os
+from pathlib import Path
 
 import click
 from dotenv import load_dotenv
@@ -18,8 +21,10 @@ from orchestrator.config import (
 )
 from orchestrator.graph.checkpoint import open_checkpointer
 from orchestrator.logging_config import configure_logging
-from orchestrator.db import upgrade_database
+from orchestrator.legacy_import import apply_legacy, scan_legacy
+from orchestrator.db import Database, provision_runtime_role, upgrade_database
 from orchestrator.storage.db import ArtifactDB
+from orchestrator.storage.factory import build_media_storage
 
 
 @click.group()
@@ -27,6 +32,85 @@ def cli() -> None:
     """Orquestrador da pipeline de AI UGC (v1 — mock/dry-run)."""
     load_dotenv(".env", override=False)
     configure_logging()
+
+
+@cli.group(name="db")
+def db_commands() -> None:
+    """Administração do PostgreSQL."""
+
+
+@db_commands.command(name="provision-runtime")
+@click.option(
+    "--migration-database-url",
+    envvar="MIGRATION_DATABASE_URL",
+    required=True,
+    help="Conexão direta e privilegiada.",
+)
+def provision_runtime(migration_database_url: str) -> None:
+    """Cria/atualiza o papel fixo e restrito da aplicação."""
+    password = os.environ.get("ORCHESTRATOR_RUNTIME_PASSWORD", "")
+    try:
+        provision_runtime_role(migration_database_url, password)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo("papel orchestrator_runtime provisionado com RLS obrigatório")
+
+
+@cli.command(name="import-legacy")
+@click.option(
+    "--legacy-root",
+    default=".orchestrator",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="Diretório contendo runs.sqlite, artifacts.sqlite e stores JSON.",
+)
+@click.option("--source-id", default="legacy-local", show_default=True)
+@click.option("--apply", is_flag=True, default=False, help="Confirma a escrita no destino.")
+@click.option("--config-dir", default=None, help="Diretório de providers.yaml.")
+def import_legacy(
+    legacy_root: Path,
+    source_id: str,
+    apply: bool,
+    config_dir: str | None,
+) -> None:
+    """Inventaria o legado; só escreve com --apply explícito."""
+    manifest = scan_legacy(legacy_root)
+    mode = "dry-run"
+    if apply:
+        database_url = os.environ.get("DATABASE_URL", "")
+        if not database_url:
+            raise click.ClickException("DATABASE_URL é obrigatória com --apply")
+        try:
+            storage = build_media_storage(
+                load_providers(config_dir),
+                root=default_media_path(),
+                web_prefix="/media",
+            )
+
+            async def _apply() -> str:
+                async with Database.from_env() as database:
+                    result = await apply_legacy(
+                        manifest,
+                        database=database,
+                        database_url=database_url,
+                        storage=storage,
+                        source_id=source_id,
+                    )
+                return result.mode
+
+            mode = asyncio.run(_apply())
+        except ValueError as exc:
+            raise click.ClickException(str(exc)) from exc
+    click.echo(
+        json.dumps(
+            {
+                "mode": mode,
+                "source_id": source_id,
+                "checksum": manifest.checksum,
+                "counts": manifest.counts,
+            },
+            sort_keys=True,
+        )
+    )
 
 
 def _do_run(*, batch, offer, platform, run_id, config_dir, db, feedback_store):
@@ -164,17 +248,33 @@ def runner_command(batch, offer, platform, run_id, config_dir, db, feedback_stor
 @click.option("--db", default=None, help="Checkpointer sqlite (default: .orchestrator/runs.sqlite).")
 @click.option("--artifacts-db", default=None, help="ArtifactDB sqlite (default: .orchestrator/artifacts.sqlite).")
 @click.option(
-    "--database-url",
-    envvar="DATABASE_URL",
+    "--migration-database-url",
+    envvar="MIGRATION_DATABASE_URL",
     default=None,
-    help="PostgreSQL da Fase 2; quando informado, aplica as migrações Alembic.",
+    help="Conexão PostgreSQL direta e privilegiada para Alembic.",
 )
-def migrate(db, artifacts_db, database_url):
+@click.option(
+    "--database-url",
+    "legacy_database_url",
+    default=None,
+    help="Alias explícito legado de --migration-database-url.",
+)
+def migrate(db, artifacts_db, migration_database_url, legacy_database_url):
     """Materializa o estado local (papel de `migrate` do container OCI).
 
     Fase 1 da ADR-D36: cria o schema do checkpointer e do ArtifactDB e os diretórios de
     mídia. Idempotente. Substituído por migrações SQL do PostgreSQL na Fase 2.
     """
+    database_url = migration_database_url or legacy_database_url
+    if database_url is None and os.environ.get("ORCH_ENV", "local") == "local":
+        database_url = os.environ.get("DATABASE_URL")
+    if (
+        database_url is None
+        and os.environ.get("ORCH_ENV", "local") in {"staging", "production"}
+    ):
+        raise click.ClickException(
+            "MIGRATION_DATABASE_URL é obrigatória em staging/production"
+        )
     if database_url:
         upgrade_database(database_url)
         click.echo("PostgreSQL migrado: revision=head")
