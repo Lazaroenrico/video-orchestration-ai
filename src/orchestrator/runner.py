@@ -7,6 +7,8 @@ import uuid
 from pathlib import Path
 from typing import Any, Optional
 
+from langgraph.types import Command
+
 from orchestrator.agent_catalog import AgentCatalog, default_agent_catalog
 from orchestrator.config import (
     default_artifacts_db_path,
@@ -35,6 +37,7 @@ def _build_config(
     feedback_store: Optional[str | Path] = None,
     agent_catalog: Optional[AgentCatalog] = None,
     artifact_repository: Optional[ArtifactRepository] = None,
+    run_options: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     adapter = build_adapter_from_providers(providers, pipeline)
     catalog = agent_catalog or default_agent_catalog()
@@ -59,6 +62,7 @@ def _build_config(
         ),
         "artifact_db": artifact_repository,
     }
+    configurable["run"].update(run_options or {})
     if feedback_store is not None:
         configurable["feedback_store"] = str(feedback_store)
     return {
@@ -79,6 +83,7 @@ async def run_pipeline(
     platform: str = "tiktok",
     feedback_store: Optional[str | Path] = None,
     agent_catalog: Optional[AgentCatalog] = None,
+    run_options: Optional[dict[str, Any]] = None,
 ) -> tuple[str, dict[str, Any]]:
     run_id = run_id or f"run-{uuid.uuid4().hex[:8]}"
     async with open_artifact_repository(default_artifacts_db_path()) as artifact_repository:
@@ -90,6 +95,7 @@ async def run_pipeline(
             feedback_store,
             agent_catalog,
             artifact_repository,
+            run_options,
         )
         cfg.update(run_trace_config(run_id, offer=offer, platform=platform, batch=batch))
         # Step 10 -> Step 1: lê o feedback do ciclo anterior (se houver) e o injeta no
@@ -158,6 +164,8 @@ async def resume_pipeline(
     platform: str = "tiktok",
     feedback_store: Optional[str | Path] = None,
     agent_catalog: Optional[AgentCatalog] = None,
+    resume_value: Any = None,
+    run_options: Optional[dict[str, Any]] = None,
 ) -> tuple[str, dict[str, Any]]:
     async with open_artifact_repository(default_artifacts_db_path()) as artifact_repository:
         cfg = _build_config(
@@ -168,12 +176,40 @@ async def resume_pipeline(
             feedback_store,
             agent_catalog,
             artifact_repository,
+            run_options,
         )
         cfg.update(run_trace_config(run_id, platform=platform))
         async with open_checkpointer(db_path) as cp:
             app = build_graph(pipeline, checkpointer=cp)
-            out = await app.ainvoke(None, cfg)  # None => retoma do checkpoint
+            resume_input = (
+                Command(resume=resume_value)
+                if resume_value is not None
+                else None
+            )
+            out = await app.ainvoke(resume_input, cfg)
         return run_id, out
+
+
+async def get_interrupt(
+    pipeline: dict[str, Any],
+    *,
+    db_path: str | Path,
+    run_id: str,
+) -> Optional[dict[str, Any]]:
+    """Devolve o primeiro gate pendente do checkpoint, se existir."""
+    async with open_checkpointer(db_path) as cp:
+        app = build_graph(pipeline, checkpointer=cp)
+        snapshot = await app.aget_state(
+            {"configurable": {"thread_id": run_id}}
+        )
+    if snapshot is None:
+        return None
+    for task in snapshot.tasks or []:
+        interrupts = getattr(task, "interrupts", ())
+        if interrupts:
+            value = interrupts[0].value
+            return value if isinstance(value, dict) else {"type": "unknown"}
+    return None
 
 
 async def get_status(

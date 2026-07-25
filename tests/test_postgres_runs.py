@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import suppress
+from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
@@ -12,11 +13,14 @@ from orchestrator.web import server as web_server
 from orchestrator.db import (
     Database,
     PostgresArtifactRepository,
+    PostgresCreatorRepository,
+    PostgresJobRepository,
     PostgresRunRepository,
     TenantIdentity,
     upgrade_database,
 )
 from orchestrator.storage.db import ArtifactRecord
+from orchestrator.worker import run_worker_once
 
 
 def _admin_url(postgresql) -> str:
@@ -261,6 +265,7 @@ async def test_completed_run_remains_available_over_http_after_restart(
         )
         assert response.status_code == 200
         run_id = response.json()["run_id"]
+        await run_worker_once(worker_id="runner-read-model")
 
         web_server._runs.clear()
         assert not checkpoint.exists()
@@ -355,6 +360,12 @@ async def test_failed_run_remains_available_over_http_after_restart(
         )
         assert response.status_code == 200
         run_id = response.json()["run_id"]
+        base = datetime.now(UTC) + timedelta(seconds=1)
+        for offset in (0, 5, 15, 35, 75):
+            await run_worker_once(
+                worker_id="runner-failure",
+                now=base + timedelta(seconds=offset),
+            )
         web_server._runs.clear()
 
         state_response = await client.get(
@@ -388,45 +399,43 @@ async def test_concept_gate_is_persisted_while_waiting_for_decision(
     monkeypatch.setenv("ORCH_USER_SUBJECT", "oidc|alice")
     monkeypatch.setenv("ORCH_MEDIA", str(tmp_path / "media"))
     monkeypatch.setenv("ORCH_VIDEOS", str(tmp_path / "videos"))
-    run_id = "run-editing"
-    web_server._runs[run_id] = {"queues": [], "buffer": [], "done": False}
-    async with run_store.open_repository() as repository:
-        assert repository is not None
-        await repository.start(run_id, offer="serum X", batch_size=1)
-
-    task = asyncio.create_task(
-        web_server._execute_run(
-            run_id,
+    response = await web_server.start_run(
+        web_server.RunRequest(
             offer="serum X",
             batch=1,
             platform="tiktok",
             config_dir="config-mock",
-            db_path=str(tmp_path / "checkpoint.sqlite"),
+            db=str(tmp_path / "checkpoint.sqlite"),
             approve_creators=False,
             edit_concepts=True,
-        )
+        ),
+        web_server.BackgroundTasks(),
     )
-    for _ in range(200):
-        pending = web_server._runs[run_id].get("pending_concepts")
-        if pending:
-            break
-        await asyncio.sleep(0.01)
-    else:
-        pytest.fail("concept gate did not become pending")
+    run_id = response["run_id"]
+    await run_worker_once(worker_id="runner-before-edit")
 
     async with run_store.open_repository() as repository:
         assert repository is not None
         persisted = await repository.get(run_id)
+    async with web_server.job_store.open_repository() as jobs:
+        assert jobs is not None
+        gate = await jobs.get_pending_gate(run_id)
 
     assert persisted is not None
     assert persisted.phase == "editing"
-    assert persisted.state["pending_concepts"] == pending
+    assert gate is not None
+    pending = gate.payload["concepts"]
+    assert persisted.state["concepts"] == pending
 
     await web_server.submit_concepts(
         run_id,
-        web_server.ConceptEditRequest(concepts=pending),
+        web_server.ConceptEditRequest(
+            concepts=pending,
+            gate_id=str(gate.gate_id),
+            version=gate.version,
+        ),
     )
-    await task
+    await run_worker_once(worker_id="runner-after-edit")
 
 
 async def test_creator_gate_is_persisted_while_waiting_for_approval(
@@ -441,45 +450,48 @@ async def test_creator_gate_is_persisted_while_waiting_for_approval(
     monkeypatch.setenv("ORCH_USER_SUBJECT", "oidc|alice")
     monkeypatch.setenv("ORCH_MEDIA", str(tmp_path / "media"))
     monkeypatch.setenv("ORCH_VIDEOS", str(tmp_path / "videos"))
-    run_id = "run-awaiting"
-    web_server._runs[run_id] = {"queues": [], "buffer": [], "done": False}
-    async with run_store.open_repository() as repository:
-        assert repository is not None
-        await repository.start(run_id, offer="serum X", batch_size=1)
-
-    task = asyncio.create_task(
-        web_server._execute_run(
-            run_id,
+    response = await web_server.start_run(
+        web_server.RunRequest(
             offer="serum X",
             batch=1,
             platform="tiktok",
             config_dir="config-mock",
-            db_path=str(tmp_path / "checkpoint.sqlite"),
+            db=str(tmp_path / "checkpoint.sqlite"),
             approve_creators=True,
             edit_concepts=False,
-        )
+        ),
+        web_server.BackgroundTasks(),
     )
-    for _ in range(200):
-        pending = web_server._runs[run_id].get("pending_creators")
-        if pending:
-            break
-        await asyncio.sleep(0.01)
-    else:
-        pytest.fail("creator gate did not become pending")
+    run_id = response["run_id"]
+    await run_worker_once(worker_id="runner-before-approval")
 
     async with run_store.open_repository() as repository:
         assert repository is not None
         persisted = await repository.get(run_id)
+    async with web_server.job_store.open_repository() as jobs:
+        assert jobs is not None
+        gate = await jobs.get_pending_gate(run_id)
 
     assert persisted is not None
     assert persisted.phase == "awaiting"
-    assert persisted.state["pending_creators"] == pending
+    assert gate is not None
+    pending = gate.payload["creators"]
+    assert pending and all(creator["id"] for creator in pending)
 
     await web_server.approve(
         run_id,
-        web_server.ApproveRequest(approved=[creator["id"] for creator in pending]),
+        web_server.ApproveRequest(
+            approved=[creator["id"] for creator in pending],
+            gate_id=str(gate.gate_id),
+            version=gate.version,
+        ),
     )
-    await task
+    await run_worker_once(worker_id="runner-after-approval")
+    async with Database(_runtime_url(postgresql)) as database:
+        tenant = await database.ensure_tenant(TenantIdentity.from_env())
+        creators = await PostgresCreatorRepository(database, tenant).load_creators()
+
+    assert {creator["status"] for creator in creators} == {"approved"}
 
 
 async def test_item_progress_is_persisted_before_stream_delivery(

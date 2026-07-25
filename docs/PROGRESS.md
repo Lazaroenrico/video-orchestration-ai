@@ -443,6 +443,68 @@ A Fase 2 foi fechada com um importador explícito e reiniciável:
 **Verificação focada:** 14 testes do importador e 87 testes do gate PostgreSQL/CLI
 verdes. Gate global: `990 passed, 2 skipped`, 4998/4998 statements (100%).
 
+## D36 — Fase 3: jobs, gates, SSE e efeitos duráveis (2026-07-25)
+
+A API PostgreSQL deixou de executar o grafo em `BackgroundTasks`: `POST /api/run`
+confirma, numa transação, `run` + job determinístico + eventos + outbox. O Runner
+`--once` reivindica com `FOR UPDATE SKIP LOCKED`, lease de 120 s e heartbeat de 30 s;
+recupera lease vencida, aplica retry exponencial limitado e encerra em `failed`.
+SQLite, `_runs`, `Future` e o SSE em memória permanecem somente no modo local offline.
+
+- Interrupts agora viram `run_gates` versionados; a decisão atômica rejeita versão stale,
+  cria exatamente um job `resume_run` e o Runner retoma com `Command(resume=...)`.
+- `run_events` fornece sequência monotônica, frames SSE com `id:` e replay por
+  `Last-Event-ID`. Eventos públicos (`run_start`, gates, `run_end`, `error`) continuam
+  compatíveis com `EventSource.onmessage`; reinício de API não perde o stream.
+- A outbox trata Cloudflare Queues, SQS ou sweep PostgreSQL como wake-up, nunca como
+  verdade do job. Falha de publicação volta a `pending` com backoff e, após cinco
+  tentativas, entra em `failed` como DLQ operacional.
+- `provider_quotas` serializa consumo global e `external_effects` reserva custo por
+  chave de negócio antes da chamada. Duplicata devolve o resultado persistido;
+  resultado `uncertain` nunca é reemitido automaticamente. Adapters pagos permanecem
+  bloqueados no v1 salvo opt-in explícito.
+- Creators reutilizados permanecem canônicos (`r2://`) no job. A URL temporária nasce
+  somente no Runner, imediatamente antes do handoff ao provider. Decisões de creator
+  são persistidas no repositório durante o resume.
+
+### Red → Green e falhas investigadas
+
+- RED inicial: `PostgresEffectLedger` não existia. Correção: migration `0008`, ledger
+  transacional e testes de idempotência, quota concorrente, resultado e estado incerto.
+- RED SQL: o claim falhou com `column reference "id" is ambiguous`. Causa: `UPDATE ...
+  FROM candidates RETURNING id` não qualificava a tabela. Correção: colunas qualificadas
+  no retorno do claim.
+- Sintoma: o teste SQS ficou preso ao executar `asyncio.to_thread`. Causa: o scheduler
+  real não é apropriado ao stub síncrono do contrato. Correção: fronteira async
+  injetável, mantendo `to_thread` como default de produção.
+- RED de heartbeat: `run_worker_once` não aceitava intervalo e o lease não era renovado.
+  Correção: task de heartbeat cancelada de forma segura ao terminar o executor.
+- RED de perda de lease: o heartbeat falhava, mas o executor continuava até um timeout
+  externo, abrindo janela de execução concorrente. Correção: corrida explícita entre
+  heartbeat e executor; perder o lease cancela imediatamente o trabalho.
+- RED de restart/UI: `/api/runs` ficou sem `active` após limpar `_runs`, e o SSE usava
+  `event:` nomeado, invisível ao `onmessage` atual. Correção: fases vêm do read model e
+  os frames persistidos usam `id:` + `data:` com tipos públicos.
+- RED de mídia: a API assinava o creator antes de gravar o job; ao mover a assinatura,
+  o primeiro Runner falhou com `default_media_path` ausente. Correção: job canônico,
+  import explícito e resolução no consumo.
+- RED de outbox: a primeira falha deixava a entrada em `publishing` até expirar o lease.
+  Correção: transição explícita `publishing → pending/failed`, erro persistido e backoff.
+- Regressão nos testes da Fase 2: cenários ainda esperavam conclusão imediata por
+  `BackgroundTasks` e gates por `Future`. Causa: contrato antigo corretamente
+  substituído. Correção: os mesmos casos agora acionam Runner, gate/version e resume
+  duráveis; nenhuma asserção de integridade foi removida.
+- RED de segurança/custo: um job com `config/providers.yaml` ainda alcançava o executor
+  live. Correção: o Runner recusa papéis não-mock sem
+  `ORCH_ENABLE_PAID_ADAPTERS=true`.
+- Primeiro gate global: 41 linhas novas sem exercício deixaram cobertura em 99,26%.
+  Correção: casos públicos de erro/lease, transições ambíguas, factories de fila,
+  polling/replay SSE e compatibilidade local; nenhum ramo foi excluído.
+
+**Verificação focada:** 35 testes de jobs/efeitos/filas verdes; migration real
+`0007 → 0008` preserva runs. Gate global: `1028 passed, 2 skipped`, 5552/5552
+statements (100%).
+
 ## D30 — R2 + DB relacional de mídia: implementação (2026-07-16)
 
 Execução da `docs/ADR-D30-media-storage-r2-db.md`, que estava aceita mas não implementada.

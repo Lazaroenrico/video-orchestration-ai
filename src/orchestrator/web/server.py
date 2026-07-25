@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import urlparse
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException
+from fastapi import BackgroundTasks, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -27,6 +27,7 @@ from langgraph.types import Command
 
 from orchestrator import runner, stream_bus
 import orchestrator.creator_store as creator_store
+import orchestrator.job_store as job_store
 import orchestrator.prompt_store as prompt_store
 import orchestrator.run_store as run_store
 from orchestrator.config import (
@@ -994,15 +995,11 @@ async def dashboard() -> HTMLResponse:
 async def start_run(req: RunRequest, background_tasks: BackgroundTasks) -> dict[str, str]:
     seed_creator = None
     if req.creator_id:
-        canonical_creator = await _find_creator_for_draft_repository(
+        seed_creator = await _find_creator_for_draft_repository(
             req.creator_id,
             req.creator_run_id,
         )
-        # Handoff ao provider é uma fronteira de consumo: ponteiros R2 viram URLs
-        # temporárias aqui, nunca no repositório (D30).
-        seed_creator = await _sign_payload(canonical_creator, req.config_dir)
     run_id = f"web-{uuid.uuid4().hex[:8]}"
-    _runs[run_id] = {"queues": [], "buffer": [], "done": False}
     db_path = req.db or str(default_db_path())
     # Todo run registra o "último prompt usado" por tipo — independente do gate de
     # aprovação (creators.json só persiste prompts quando o gate roda).
@@ -1011,6 +1008,33 @@ async def start_run(req: RunRequest, background_tasks: BackgroundTasks) -> dict[
             creator_prompt=req.creator_prompt,
             video_prompt=req.video_prompt,
         )
+    async with job_store.open_repository() as jobs:
+        if jobs is not None:
+            queued = await jobs.enqueue_run(
+                run_id,
+                offer=req.offer,
+                platform=req.platform,
+                batch_size=req.batch,
+                payload={
+                    "offer": req.offer,
+                    "batch": req.batch,
+                    "platform": req.platform,
+                    "config_dir": req.config_dir,
+                    "db_path": db_path,
+                    "creator_prompt": req.creator_prompt,
+                    "video_prompt": req.video_prompt,
+                    "approve_creators": req.approve_creators,
+                    "edit_concepts": req.edit_concepts,
+                    "seed_creator": seed_creator,
+                },
+            )
+            return {"run_id": run_id, "job_id": str(queued.job_id)}
+
+    # No caminho local, API e executor vivem no mesmo processo. No caminho durável,
+    # o job acima guarda só o ponteiro canônico e o Runner assina no consumo.
+    if seed_creator is not None:
+        seed_creator = await _sign_payload(seed_creator, req.config_dir)
+    _runs[run_id] = {"queues": [], "buffer": [], "done": False}
     async with run_store.open_repository() as runs:
         if runs is not None:
             await runs.start(
@@ -1030,6 +1054,8 @@ async def start_run(req: RunRequest, background_tasks: BackgroundTasks) -> dict[
 
 class ApproveRequest(BaseModel):
     approved: list[str] = []
+    gate_id: Optional[str] = None
+    version: Optional[int] = None
 
 
 @app.post("/api/approve/{run_id}/creators/{creator_id}/reroll-voice")
@@ -1060,6 +1086,22 @@ async def reroll_creator_voice(run_id: str, creator_id: str) -> dict[str, Any]:
 
 @app.post("/api/approve/{run_id}")
 async def approve(run_id: str, req: ApproveRequest) -> dict[str, Any]:
+    if os.environ.get("DATABASE_URL"):
+        if req.gate_id is None or req.version is None:
+            raise HTTPException(409, "gate_id e version são obrigatórios")
+        from orchestrator.db import StaleGateError
+
+        async with job_store.open_repository() as jobs:
+            assert jobs is not None
+            try:
+                resume = await jobs.resolve_gate(
+                    uuid.UUID(req.gate_id),
+                    version=req.version,
+                    resolution={"approved": req.approved},
+                )
+            except (ValueError, StaleGateError) as exc:
+                raise HTTPException(409, str(exc)) from exc
+        return {"ok": True, "job_id": str(resume.job_id)}
     st = _runs.get(run_id)
     fut = (st or {}).get("approval")
     if not fut or fut.done():
@@ -1075,10 +1117,32 @@ class ConceptEditRequest(BaseModel):
     # Conceitos editados e INCLUÍDOS (os excluídos simplesmente não vêm na lista).
     # Cada item é o dict do conceito com o campo "script" já editado.
     concepts: list[dict[str, Any]] = []
+    gate_id: Optional[str] = None
+    version: Optional[int] = None
 
 
 @app.post("/api/approve/{run_id}/concepts")
 async def submit_concepts(run_id: str, req: ConceptEditRequest) -> dict[str, Any]:
+    if os.environ.get("DATABASE_URL"):
+        if req.gate_id is None or req.version is None:
+            raise HTTPException(409, "gate_id e version são obrigatórios")
+        from orchestrator.db import StaleGateError
+
+        async with job_store.open_repository() as jobs:
+            assert jobs is not None
+            try:
+                resume = await jobs.resolve_gate(
+                    uuid.UUID(req.gate_id),
+                    version=req.version,
+                    resolution={"concepts": req.concepts},
+                )
+            except (ValueError, StaleGateError) as exc:
+                raise HTTPException(409, str(exc)) from exc
+        return {
+            "ok": True,
+            "count": len(req.concepts),
+            "job_id": str(resume.job_id),
+        }
     st = _runs.get(run_id)
     fut = (st or {}).get("concept_edit")
     if not fut or fut.done():
@@ -1164,7 +1228,60 @@ async def integrations_index(config_dir: Optional[str] = None) -> dict[str, Any]
 
 
 @app.get("/api/stream/{run_id}")
-async def stream_events(run_id: str, config_dir: Optional[str] = None) -> StreamingResponse:
+async def stream_events(
+    run_id: str,
+    config_dir: Optional[str] = None,
+    last_event_id: Optional[str] = Header(
+        default=None,
+        alias="Last-Event-ID",
+    ),
+) -> StreamingResponse:
+    if os.environ.get("DATABASE_URL"):
+        after_seq = 0
+        if isinstance(last_event_id, str) and last_event_id:
+            try:
+                after_seq = int(last_event_id)
+            except ValueError as exc:
+                raise HTTPException(400, "Last-Event-ID inválido") from exc
+        async with run_store.open_repository() as runs:
+            persisted = await runs.get(run_id) if runs is not None else None
+        if persisted is None:
+            raise HTTPException(status_code=404, detail=f"run {run_id!r} not found")
+        storage = _signing_storage(config_dir)
+
+        async def generate_persisted():
+            cursor = after_seq
+            while True:
+                async with job_store.open_repository() as jobs:
+                    assert jobs is not None
+                    events = await jobs.list_events(run_id, after_seq=cursor)
+                for event in events:
+                    cursor = event.seq
+                    payload = await resolve_signed_uris(
+                        {**event.data, "type": event.event_type},
+                        storage=storage,
+                    )
+                    yield (
+                        f"id: {event.seq}\n"
+                        f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                    )
+                async with run_store.open_repository() as runs:
+                    snapshot = await runs.get(run_id) if runs is not None else None
+                if snapshot is not None and snapshot.phase in {"done", "error"}:
+                    yield 'data: {"type": "stream_end"}\n\n'
+                    return
+                await asyncio.sleep(1)
+
+        return StreamingResponse(
+            generate_persisted(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+                "Connection": "keep-alive",
+            },
+        )
+
     state = _runs.get(run_id)
     if state is None:
         raise HTTPException(status_code=404, detail=f"run {run_id!r} not found")
@@ -1223,8 +1340,11 @@ async def list_runs_endpoint(db: Optional[str] = None) -> dict[str, Any]:
     # UI marcar os que falharam como "Failed".
     persisted_ids: list[str] = []
     persisted_errors: list[str] = []
+    persisted_active: list[str] = []
+    postgres_enabled = False
     async with run_store.open_repository() as runs:
         if runs is not None:
+            postgres_enabled = True
             index = await runs.list_index()
             persisted_ids = [entry.run_id for entry in index]
             persisted_errors = [
@@ -1232,13 +1352,24 @@ async def list_runs_endpoint(db: Optional[str] = None) -> dict[str, Any]:
                 for entry in index
                 if entry.phase == "error" or entry.error
             ]
-    errored = list(dict.fromkeys(
-        persisted_errors + [rid for rid, s in _runs.items() if s.get("error")]
-    ))
-    active = [
-        rid for rid, s in _runs.items() if not s.get("error") and not s.get("done")
-    ]
-    known = list(dict.fromkeys(persisted_ids + runner.list_runs(db_path)))
+            persisted_active = [
+                entry.run_id
+                for entry in index
+                if entry.phase in {"running", "editing", "awaiting"}
+                and not entry.error
+            ]
+    if postgres_enabled:
+        errored = persisted_errors
+        active = persisted_active
+        known = persisted_ids
+    else:
+        errored = [rid for rid, state in _runs.items() if state.get("error")]
+        active = [
+            rid
+            for rid, state in _runs.items()
+            if not state.get("error") and not state.get("done")
+        ]
+        known = runner.list_runs(db_path)
     return {"runs": known, "active": active, "errored": errored}
 
 

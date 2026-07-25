@@ -25,6 +25,7 @@ from orchestrator.legacy_import import apply_legacy, scan_legacy
 from orchestrator.db import Database, provision_runtime_role, upgrade_database
 from orchestrator.storage.db import ArtifactDB
 from orchestrator.storage.factory import build_media_storage
+from orchestrator.worker import run_worker_once
 
 
 @click.group()
@@ -232,12 +233,31 @@ def list_runs(db):
 @click.option("--config-dir", default=None, help="Diretório de configs (default: ./config).")
 @click.option("--db", default=None, help="Arquivo sqlite de estado (default: .orchestrator/runs.sqlite).")
 @click.option("--feedback-store", default=None, help="JSON p/ persistir o feedback (Step 10).")
-def runner_command(batch, offer, platform, run_id, config_dir, db, feedback_store):
+@click.option("--once", is_flag=True, help="Consome no máximo um job PostgreSQL.")
+@click.option(
+    "--worker-id",
+    default=lambda: os.environ.get("HOSTNAME", "runner"),
+    show_default="HOSTNAME ou runner",
+)
+def runner_command(
+    batch,
+    offer,
+    platform,
+    run_id,
+    config_dir,
+    db,
+    feedback_store,
+    once,
+    worker_id,
+):
     """Executa a pipeline (papel de Runner do container OCI).
 
-    Fase 1 da ADR-D36: reusa o caminho atual (one-shot, sem fila/lease); a execução
-    durável orientada por jobs entra na Fase 3.
+    Com ``--once``, consome um job durável; sem a flag, preserva o one-shot local.
     """
+    if once:
+        worked = asyncio.run(run_worker_once(worker_id=worker_id))
+        click.echo("job processado" if worked else "fila vazia")
+        return
     _do_run(
         batch=batch, offer=offer, platform=platform, run_id=run_id,
         config_dir=config_dir, db=db, feedback_store=feedback_store,

@@ -1,11 +1,14 @@
 """Integração real do repositório PostgreSQL de creators (ADR-D36, Fase 2)."""
 from __future__ import annotations
 
+from uuid import UUID
+
 from fastapi import BackgroundTasks
 
 from orchestrator.db import (
     Database,
     PostgresCreatorRepository,
+    PostgresJobRepository,
     PostgresPromptRepository,
     TenantIdentity,
     upgrade_database,
@@ -210,7 +213,7 @@ async def test_creators_api_signs_r2_pointers_without_persisting_signed_urls(
     assert persisted[0]["voice_preview_uri"] == "r2://ugc-prod/run-1/creator-0/voice.mp3"
 
 
-async def test_reused_postgres_creator_is_signed_for_provider_handoff(
+async def test_reused_postgres_creator_stays_canonical_in_durable_handoff(
     monkeypatch,
     postgresql,
 ):
@@ -235,11 +238,6 @@ async def test_reused_postgres_creator_is_signed_for_provider_handoff(
             approved_ids=["creator-0"],
         )
 
-    class SigningStorage:
-        async def get_signed_url(self, key: str, *, ttl_seconds: int) -> str:
-            return f"https://provider.example/{key}?ttl={ttl_seconds}"
-
-    monkeypatch.setattr(web_server, "_signing_storage", lambda _config: SigningStorage())
     background = BackgroundTasks()
 
     response = await web_server.start_run(
@@ -252,16 +250,21 @@ async def test_reused_postgres_creator_is_signed_for_provider_handoff(
         background,
     )
 
-    try:
-        seed_creator = background.tasks[0].args[-1]
-        assert seed_creator["image_uri"] == (
-            "https://provider.example/run-source/creator-0/image.webp?ttl=900"
+    assert background.tasks == []
+    async with Database(runtime_url) as database:
+        tenant = await database.ensure_tenant(identity)
+        job = await PostgresJobRepository(database, tenant).get(
+            UUID(response["job_id"])
         )
-        assert seed_creator["voice_preview_uri"] == (
-            "https://provider.example/run-source/creator-0/voice.mp3?ttl=900"
-        )
-    finally:
-        web_server._runs.pop(response["run_id"], None)
+
+    assert job is not None
+    seed_creator = job.payload["seed_creator"]
+    assert seed_creator["image_uri"] == (
+        "r2://ugc-prod/run-source/creator-0/image.webp"
+    )
+    assert seed_creator["voice_preview_uri"] == (
+        "r2://ugc-prod/run-source/creator-0/voice.mp3"
+    )
 
     async with Database(runtime_url) as database:
         tenant = await database.ensure_tenant(identity)

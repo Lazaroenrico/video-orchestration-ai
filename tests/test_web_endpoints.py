@@ -7,11 +7,12 @@ global ``web_server._runs`` é limpo por fixture.
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 import sqlite3
 from pathlib import Path
 
 import pytest
-from fastapi import HTTPException
+from fastapi import BackgroundTasks, HTTPException
 
 from orchestrator import runner
 from orchestrator.graph.state import Artifact
@@ -676,3 +677,122 @@ async def test_execute_run_emits_error_on_failure(monkeypatch, tmp_path):
     assert state["done"] is True
     assert any(e.get("type") == "error" for e in state["buffer"])
     assert _drain(q)[-1] is None  # sentinel do finally por último
+
+
+async def test_local_start_signs_seed_and_can_persist_run_index(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setenv("ORCH_PROMPTS", str(tmp_path / "prompts.json"))
+    canonical = {
+        "id": "creator-0",
+        "image_uri": "r2://bucket/creator-0.webp",
+    }
+    signed = {
+        "id": "creator-0",
+        "image_uri": "https://signed.test/creator-0.webp",
+    }
+
+    async def find_creator(*_args, **_kwargs):
+        return canonical
+
+    async def sign_payload(payload, _config_dir):
+        assert payload == canonical
+        return signed
+
+    class RecordingRuns:
+        async def start(self, run_id, **metadata):
+            self.started = (run_id, metadata)
+
+    runs = RecordingRuns()
+
+    @asynccontextmanager
+    async def open_runs():
+        yield runs
+
+    monkeypatch.setattr(
+        web_server,
+        "_find_creator_for_draft_repository",
+        find_creator,
+    )
+    monkeypatch.setattr(web_server, "_sign_payload", sign_payload)
+    monkeypatch.setattr(web_server.run_store, "open_repository", open_runs)
+    background = BackgroundTasks()
+
+    response = await web_server.start_run(
+        web_server.RunRequest(
+            creator_id="creator-0",
+            approve_creators=False,
+            edit_concepts=False,
+        ),
+        background,
+    )
+
+    assert runs.started[0] == response["run_id"]
+    assert background.tasks[0].args[-1] == signed
+
+
+async def test_local_execute_persists_both_gates_completion_and_error(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setenv("ORCH_CREATORS", str(tmp_path / "creators.json"))
+    phases = []
+
+    class RecordingRuns:
+        async def save(self, _run_id, *, phase, **_payload):
+            phases.append(phase)
+
+    run_id = "local-persisted-gates"
+    web_server._runs[run_id] = {"queues": [], "buffer": [], "done": False}
+    task = asyncio.create_task(
+        web_server._execute_run(
+            run_id,
+            offer="serum X",
+            batch=1,
+            platform="tiktok",
+            config_dir="config-mock",
+            db_path=str(tmp_path / "gates.sqlite"),
+            approve_creators=True,
+            edit_concepts=True,
+            _run_repository=RecordingRuns(),
+        )
+    )
+    runtime = await _wait_for_run_key(run_id, "concept_edit", task)
+    runtime["concept_edit"].set_result({"concepts": runtime["pending_concepts"]})
+    runtime = await _wait_for_run_key(run_id, "approval", task)
+    runtime["approval"].set_result({
+        "approved": [creator["id"] for creator in runtime["pending_creators"]],
+        "creators": runtime["pending_creators"],
+    })
+    await asyncio.wait_for(task, timeout=8)
+
+    original_load_pipeline = web_server.load_pipeline
+
+    def broken_config(*_args, **_kwargs):
+        raise RuntimeError("broken local config")
+
+    monkeypatch.setattr(web_server, "load_pipeline", broken_config)
+    web_server._runs["local-persisted-error"] = {
+        "queues": [],
+        "buffer": [],
+        "done": False,
+    }
+    await web_server._execute_run(
+        "local-persisted-error",
+        offer="serum X",
+        batch=1,
+        platform="tiktok",
+        config_dir=None,
+        db_path=str(tmp_path / "error.sqlite"),
+        approve_creators=False,
+        edit_concepts=False,
+        _run_repository=RecordingRuns(),
+    )
+    monkeypatch.setattr(web_server, "load_pipeline", original_load_pipeline)
+
+    assert phases[:2] == ["editing", "awaiting"]
+    assert "running" in phases
+    assert phases[-2:] == ["done", "error"]

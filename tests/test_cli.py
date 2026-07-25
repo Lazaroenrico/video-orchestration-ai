@@ -62,6 +62,28 @@ def test_cli_runner_command_runs_pipeline(tmp_path):
     assert "rn-1" in res2.output
 
 
+def test_cli_runner_once_processes_one_durable_job(monkeypatch):
+    observed = {}
+
+    async def fake_run_worker_once(*, worker_id):
+        observed["worker_id"] = worker_id
+        return True
+
+    monkeypatch.setattr(
+        "orchestrator.cli.run_worker_once",
+        fake_run_worker_once,
+        raising=False,
+    )
+    result = _invoke(
+        CliRunner(),
+        ["runner", "--once", "--worker-id", "runner-cli"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert observed == {"worker_id": "runner-cli"}
+    assert "job processado" in result.output
+
+
 def test_cli_migrate_materializes_state_and_is_idempotent(tmp_path):
     """`orchestrator migrate` cria checkpointer + ArtifactDB + dirs de mídia; roda 2x sem falhar."""
     cr = CliRunner()
