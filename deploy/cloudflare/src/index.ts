@@ -7,6 +7,7 @@ const sharedEnv = () => ({
   ORCH_CONFIG_DIR: "/app/config-staging",
   ORCH_AUTH_MODE: "cloudflare_access",
   ORCH_QUEUE_BACKEND: "database",
+  ORCHESTRATOR_LOG_FORMAT: "json",
   ORCH_SERVE_LOCAL_MEDIA: "0",
   ORCH_CORS_ORIGINS: env.ORCH_APP_ORIGIN,
   ORCH_ENABLE_PAID_ADAPTERS: "false",

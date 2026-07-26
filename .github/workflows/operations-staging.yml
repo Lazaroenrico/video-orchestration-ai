@@ -1,0 +1,88 @@
+name: Operate staging
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: staging-operations
+  cancel-in-progress: false
+
+jobs:
+  backup-and-restore:
+    runs-on: ubuntu-latest
+    services:
+      restore:
+        image: postgres:16
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports: ["55433:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Logical backup from the direct Neon endpoint
+        env:
+          DATABASE_URL: ${{ secrets.STAGING_MIGRATION_DATABASE_URL }}
+        run: |
+          mkdir -p .backup
+          docker run --rm --network host \
+            -e DATABASE_URL \
+            -v "$PWD/.backup:/backup" \
+            postgres:16-alpine \
+            sh -ec 'pg_dump "$DATABASE_URL" --format=custom --file=/backup/staging.dump'
+          sha256sum .backup/staging.dump > .backup/staging.dump.sha256
+      - name: Restore into an empty disposable PostgreSQL
+        run: |
+          docker run --rm --network host postgres:16-alpine \
+            createdb --host=127.0.0.1 --port=55433 --username=postgres restore_verify
+          docker run --rm --network host \
+            -v "$PWD/.backup:/backup:ro" \
+            postgres:16-alpine \
+            pg_restore --host=127.0.0.1 --port=55433 --username=postgres \
+            --dbname=restore_verify --clean --if-exists /backup/staging.dump
+          docker run --rm --network host postgres:16-alpine \
+            psql --host=127.0.0.1 --port=55433 --username=postgres \
+            --dbname=restore_verify --tuples-only \
+            --command="SELECT version_num FROM alembic_version"
+      - name: Archive backup and checksum in private R2
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          R2_ENDPOINT_URL: ${{ secrets.R2_ENDPOINT_URL }}
+          BACKUP_BUCKET: ${{ vars.R2_BACKUP_BUCKET }}
+        run: |
+          KEY="postgres/$(date -u +%Y/%m/%d)/staging-${GITHUB_RUN_ID}.dump"
+          aws s3 cp .backup/staging.dump "s3://${BACKUP_BUCKET}/${KEY}" \
+            --endpoint-url "$R2_ENDPOINT_URL"
+          aws s3 cp .backup/staging.dump.sha256 "s3://${BACKUP_BUCKET}/${KEY}.sha256" \
+            --endpoint-url "$R2_ENDPOINT_URL"
+
+  inventory-retention-and-alerts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --all-extras
+      - name: Purge expired media, verify inventory and evaluate alerts
+        env:
+          DATABASE_URL: ${{ secrets.STAGING_DATABASE_URL }}
+          ORCH_AUTH_MODE: disabled
+          ORCH_ORGANIZATION_SLUG: ${{ vars.STAGING_ORGANIZATION_SLUG }}
+          ORCH_ORGANIZATION_NAME: ${{ vars.STAGING_ORGANIZATION_NAME }}
+          ORCH_USER_SUBJECT: operations-scheduler
+          R2_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET: ${{ vars.R2_MEDIA_BUCKET }}
+          LANGSMITH_TRACING: "true"
+          LANGSMITH_API_KEY: ${{ secrets.LANGSMITH_API_KEY }}
+        run: uv run orchestrator ops maintain --config-dir config-staging

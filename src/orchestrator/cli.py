@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
 import json
 import os
 from pathlib import Path
@@ -21,18 +22,22 @@ from orchestrator.config import (
 )
 from orchestrator.graph.checkpoint import open_checkpointer
 from orchestrator.logging_config import configure_logging
+from orchestrator.operations import PostgresOperations
 from orchestrator.legacy_import import apply_legacy, scan_legacy
 from orchestrator.db import (
     MEMBERSHIP_ROLES,
     Database,
+    TenantIdentity,
     create_organization,
     grant_membership,
     provision_runtime_role,
     revoke_membership,
     upgrade_database,
 )
+from orchestrator.db.artifacts import PostgresArtifactRepository
 from orchestrator.storage.db import ArtifactDB
 from orchestrator.storage.factory import build_media_storage
+from orchestrator.storage.retention import purge_expired
 from orchestrator.worker import run_worker_once
 
 
@@ -46,6 +51,55 @@ def cli() -> None:
 @cli.group(name="db")
 def db_commands() -> None:
     """Administração do PostgreSQL."""
+
+
+@cli.group(name="ops")
+def operations_commands() -> None:
+    """Diagnóstico operacional tenant-scoped."""
+
+
+@operations_commands.command(name="inspect-run")
+@click.argument("run_id")
+def inspect_run(run_id: str) -> None:
+    """Reconstrói um run exclusivamente a partir do estado durável."""
+
+    async def _inspect() -> dict:
+        async with Database.from_env() as database:
+            tenant = await database.resolve_tenant(TenantIdentity.from_env())
+            return await PostgresOperations(database, tenant).inspect_run(run_id)
+
+    try:
+        report = asyncio.run(_inspect())
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps(report, ensure_ascii=False, sort_keys=True))
+
+
+@operations_commands.command(name="maintain")
+@click.option("--config-dir", default=None, help="Diretório de providers.yaml.")
+def maintain(config_dir: str | None) -> None:
+    """Executa purge orientado pelo DB, inventário e health snapshot."""
+    storage = build_media_storage(
+        load_providers(config_dir),
+        root=default_media_path(),
+        web_prefix="/media",
+    )
+
+    async def _maintain() -> dict:
+        now = datetime.now(UTC)
+        async with Database.from_env() as database:
+            tenant = await database.resolve_tenant(TenantIdentity.from_env())
+            artifacts = PostgresArtifactRepository(database, tenant)
+            purged = await purge_expired(artifacts, storage, now=now)
+            operations = PostgresOperations(database, tenant)
+            return {
+                "purged": purged,
+                "inventory": await operations.object_inventory(storage),
+                "health": await operations.health_snapshot(now=now),
+            }
+
+    report = asyncio.run(_maintain())
+    click.echo(json.dumps(report, ensure_ascii=False, sort_keys=True))
 
 
 @db_commands.command(name="provision-runtime")

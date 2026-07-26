@@ -557,6 +557,46 @@ infraestrutura real:
 `wrangler deploy --dry-run`, `tofu fmt -check` e `tofu validate` verdes. Gate global:
 `1058 passed, 2 skipped`, 5797/5797 statements (100%).
 
+## D36 — Fase 5: operação, backup e segurança (2026-07-25)
+
+- `ORCHESTRATOR_LOG_FORMAT=json` produz JSON Lines UTC com logger, nível, mensagem e
+  correlação por `run_id`, `job_id`, `organization_id`, `provider` e evento. O staging
+  ativa esse formato; LangSmith continua opt-in por env.
+- `PostgresOperations.inspect_run()` e `orchestrator ops inspect-run RUN_ID` reconstroem
+  read model, items, jobs/leases, gates/resoluções, eventos ordenados, artifacts, efeitos,
+  bytes e custo exclusivamente das fontes duráveis e sob RLS.
+- `health_snapshot()` agrega fila/outbox, leases expiradas, lag de stream, erros de
+  assinatura, quotas e gasto. Alertas têm códigos estáveis: `expired_job_lease`,
+  `outbox_dlq`, `storage_signing_error`, `stream_lag`, `provider_limit` e
+  `anomalous_spend`.
+- `orchestrator ops maintain` executa purge orientado por metadata, inventário via
+  `HeadObject`/`exists` e health no mesmo contexto tenant. O workflow diário agenda
+  manutenção, cria dump PostgreSQL custom, calcula SHA-256, restaura em PostgreSQL 16
+  vazio e só então arquiva dump/checksum no R2 privado.
+- `docs/OPERATIONS.md` fixa RPO <= 5 min pelo PITR Neon, RTO <= 60 min, resposta a alertas,
+  restore, inventário e exercícios trimestrais de carga/restart/SSE/isolamento.
+
+### Red → Green e falhas investigadas
+
+- RED de logs: a saída continuava textual mesmo com `ORCHESTRATOR_LOG_FORMAT=json`.
+  Correção: formatter JSON central e staging configurado para ativá-lo.
+- RED de reconstrução: `orchestrator.operations` inexistente. Correção: read model
+  operacional tenant-scoped; o tracer reúne todas as fontes de um run e custo/bytes.
+- Sintoma no primeiro teste CLI: `asyncio.run()` foi chamado dentro do loop do próprio
+  teste. Causa: teste async dirigindo uma interface Click síncrona. Correção: setup async
+  concluído antes da invocação, preservando o contrato real da CLI.
+- RED de inventário/manutenção: não havia interface para conferir ponteiros nem agendar
+  purge. Correção: inventário derivado do PostgreSQL e comando `ops maintain`; bytes são
+  apagados antes da metadata.
+- Primeiro exercício de restore: `pg_dump` falhou porque a fixture já havia removido
+  `pytest_db`. Correção operacional: banco origem descartável explícito, migração real,
+  dump, restore em segundo banco e remoção somente desses dois alvos.
+
+**Verificação:** 18 testes focados verdes; `orchestrator.operations` 85/85 statements
+(100%); TypeScript verde e `npm audit` sem vulnerabilidades. O exercício Docker restaurou
+o dump e leu `alembic_version=20260725_0008` antes de remover os bancos descartáveis.
+Gate global: `1066 passed, 2 skipped`, 5925/5925 statements (100%).
+
 ## D30 — R2 + DB relacional de mídia: implementação (2026-07-16)
 
 Execução da `docs/ADR-D30-media-storage-r2-db.md`, que estava aceita mas não implementada.

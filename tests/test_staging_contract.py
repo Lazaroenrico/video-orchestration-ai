@@ -103,3 +103,27 @@ def test_deploy_workflow_builds_one_digest_migrates_then_rolls_out():
     assert "wrangler deploy" in workflow
     assert "containers-rollout" in workflow
     assert ":latest" not in workflow
+
+
+def test_operations_workflow_verifies_restore_inventory_and_retention():
+    workflow = (
+        ROOT / ".github/workflows/operations-staging.yml"
+    ).read_text(encoding="utf-8")
+    runbook = (ROOT / "docs/OPERATIONS.md").read_text(encoding="utf-8")
+
+    assert "schedule:" in workflow
+    assert "pg_dump" in workflow
+    assert "--format=custom" in workflow
+    assert "pg_restore" in workflow
+    assert "sha256sum" in workflow
+    assert "orchestrator ops maintain" in workflow
+    assert "LANGSMITH_TRACING" in workflow
+    assert "RPO <= 5 min" in runbook
+    assert "RTO <= 60 min" in runbook
+    assert "orchestrator ops inspect-run" in runbook
+    assert "expired_job_lease" in runbook
+    assert "outbox_dlq" in runbook
+    assert "storage_signing_error" in runbook
+    assert "stream_lag" in runbook
+    assert "provider_limit" in runbook
+    assert "anomalous_spend" in runbook

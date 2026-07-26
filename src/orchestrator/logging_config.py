@@ -7,14 +7,46 @@ do logger, sem nível controlável — daí "muitos erros que não sei o que sã
 ``configure_logging`` é idempotente (seguro chamar em cada entrypoint) e lê:
 - ``ORCHESTRATOR_LOG_LEVEL`` — nível do root (default ``INFO``).
 - ``ORCHESTRATOR_LOG_FILE``  — se setado, também escreve num arquivo.
+- ``ORCHESTRATOR_LOG_FORMAT`` — ``json`` em ambientes operacionais; texto por default.
 """
 from __future__ import annotations
 
+from datetime import UTC, datetime
+import json
 import logging
 import os
 
 _FORMAT = "%(asctime)s %(levelname)-7s %(name)s: %(message)s"
 _DATEFMT = "%H:%M:%S"
+_CORRELATION_FIELDS = (
+    "event",
+    "run_id",
+    "job_id",
+    "organization_id",
+    "provider",
+)
+
+
+class _JsonFormatter(logging.Formatter):
+    """JSON Lines estável para ingestão por Cloudflare ou CloudWatch."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        payload = {
+            "timestamp": datetime.fromtimestamp(record.created, UTC)
+            .isoformat()
+            .replace("+00:00", "Z"),
+            "level": record.levelname,
+            "logger": record.name,
+            "message": record.getMessage(),
+        }
+        payload.update(
+            {
+                field: getattr(record, field)
+                for field in _CORRELATION_FIELDS
+                if hasattr(record, field)
+            }
+        )
+        return json.dumps(payload, ensure_ascii=False, sort_keys=True)
 
 
 def _resolve_level(raw: str | None) -> int:
@@ -27,7 +59,12 @@ def _resolve_level(raw: str | None) -> int:
 
 def _make_handler(handler: logging.Handler) -> logging.Handler:
     """Marca e formata um handler para ownership/idempotência."""
-    handler.setFormatter(logging.Formatter(_FORMAT, datefmt=_DATEFMT))
+    formatter: logging.Formatter
+    if os.environ.get("ORCHESTRATOR_LOG_FORMAT", "").strip().lower() == "json":
+        formatter = _JsonFormatter()
+    else:
+        formatter = logging.Formatter(_FORMAT, datefmt=_DATEFMT)
+    handler.setFormatter(formatter)
     handler._orchestrator_handler = True  # type: ignore[attr-defined]
     return handler
 
