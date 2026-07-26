@@ -22,7 +22,15 @@ from orchestrator.config import (
 from orchestrator.graph.checkpoint import open_checkpointer
 from orchestrator.logging_config import configure_logging
 from orchestrator.legacy_import import apply_legacy, scan_legacy
-from orchestrator.db import Database, provision_runtime_role, upgrade_database
+from orchestrator.db import (
+    MEMBERSHIP_ROLES,
+    Database,
+    create_organization,
+    grant_membership,
+    provision_runtime_role,
+    revoke_membership,
+    upgrade_database,
+)
 from orchestrator.storage.db import ArtifactDB
 from orchestrator.storage.factory import build_media_storage
 from orchestrator.worker import run_worker_once
@@ -55,6 +63,82 @@ def provision_runtime(migration_database_url: str) -> None:
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
     click.echo("papel orchestrator_runtime provisionado com RLS obrigatório")
+
+
+@db_commands.command(name="org-create")
+@click.option(
+    "--migration-database-url",
+    envvar="MIGRATION_DATABASE_URL",
+    required=True,
+    help="Conexão direta e privilegiada.",
+)
+@click.option("--slug", required=True)
+@click.option("--name", required=True)
+def organization_create(
+    migration_database_url: str,
+    slug: str,
+    name: str,
+) -> None:
+    """Cria ou atualiza uma organização explicitamente."""
+    create_organization(migration_database_url, slug=slug, name=name)
+    click.echo(f"organização {slug!r} provisionada")
+
+
+@db_commands.command(name="membership-grant")
+@click.option(
+    "--migration-database-url",
+    envvar="MIGRATION_DATABASE_URL",
+    required=True,
+    help="Conexão direta e privilegiada.",
+)
+@click.option("--organization-slug", required=True)
+@click.option("--user-subject", required=True)
+@click.option("--role", type=click.Choice(MEMBERSHIP_ROLES), required=True)
+def membership_grant(
+    migration_database_url: str,
+    organization_slug: str,
+    user_subject: str,
+    role: str,
+) -> None:
+    """Concede membership; nunca é executado pela API pública."""
+    try:
+        grant_membership(
+            migration_database_url,
+            organization_slug=organization_slug,
+            user_subject=user_subject,
+            role=role,
+        )
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(
+        f"membership {role!r} concedida a {user_subject!r} em {organization_slug!r}"
+    )
+
+
+@db_commands.command(name="membership-revoke")
+@click.option(
+    "--migration-database-url",
+    envvar="MIGRATION_DATABASE_URL",
+    required=True,
+    help="Conexão direta e privilegiada.",
+)
+@click.option("--organization-slug", required=True)
+@click.option("--user-subject", required=True)
+def membership_revoke(
+    migration_database_url: str,
+    organization_slug: str,
+    user_subject: str,
+) -> None:
+    """Revoga uma membership mantendo o usuário para auditoria."""
+    removed = revoke_membership(
+        migration_database_url,
+        organization_slug=organization_slug,
+        user_subject=user_subject,
+    )
+    suffix = "" if removed else " (já ausente)"
+    click.echo(
+        f"membership de {user_subject!r} em {organization_slug!r} revogada{suffix}"
+    )
 
 
 @cli.command(name="import-legacy")
@@ -314,7 +398,7 @@ def migrate(db, artifacts_db, migration_database_url, legacy_database_url):
     click.echo(f"estado materializado: checkpointer={db_path} artifacts={artifacts_path}")
 
 
-def _run_uvicorn(host, port, reload):
+def _run_uvicorn(host, port, reload, *, application: str = "orchestrator.web.server:app"):
     """Sobe o servidor web (dashboard + API + SSE). Compartilhado por `api`/`serve`."""
     try:
         import uvicorn
@@ -326,7 +410,7 @@ def _run_uvicorn(host, port, reload):
     configure_logging()
     click.echo(f"Dashboard disponível em: http://localhost:{port}/")
     uvicorn.run(
-        "orchestrator.web.server:app",
+        application,
         host=host,
         port=port,
         reload=reload,
@@ -350,6 +434,19 @@ def api(host, port, reload):
 def serve(host, port, reload):
     """Alias retrocompatível de `api`."""
     _run_uvicorn(host, port, reload)
+
+
+@cli.command(name="runner-service")
+@click.option("--host", default="0.0.0.0", help="Host de escuta.")
+@click.option("--port", default=8000, type=int, help="Porta de escuta.")
+def runner_service(host: str, port: int) -> None:
+    """Inicia o launcher HTTP interno do Runner Container."""
+    _run_uvicorn(
+        host,
+        port,
+        False,
+        application="orchestrator.runner_service:app",
+    )
 
 
 if __name__ == "__main__":  # pragma: no cover - entrypoint executado só via `python -m`

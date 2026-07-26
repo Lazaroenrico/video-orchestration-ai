@@ -11,6 +11,10 @@ from psycopg_pool import AsyncConnectionPool
 from orchestrator.db.tenancy import TenantContext, TenantIdentity
 
 
+class TenantAuthorizationError(PermissionError):
+    """O usuário foi identificado, mas não possui membership no tenant."""
+
+
 class Database:
     """Esconde pool, transação e configuração RLS atrás de uma interface pequena."""
 
@@ -30,6 +34,11 @@ class Database:
         return cls(database_url)
 
     async def __aenter__(self) -> "Database":
+        await self.open()
+        return self
+
+    async def open(self) -> None:
+        """Abre o pool e recusa papéis que conseguem furar RLS."""
         await self._pool.open(wait=True)
         try:
             async with self._pool.connection() as connection:
@@ -48,9 +57,11 @@ class Database:
         except BaseException:
             await self._pool.close()
             raise
-        return self
 
     async def __aexit__(self, *_exc: object) -> None:
+        await self.close()
+
+    async def close(self) -> None:
         await self._pool.close()
 
     @asynccontextmanager
@@ -105,3 +116,39 @@ class Database:
                 (tenant.organization_id, tenant.user_id),
             )
         return tenant
+
+    async def authorize_tenant(self, identity: TenantIdentity) -> TenantContext:
+        """Resolve uma membership existente sem materializar identidade ou acesso."""
+        tenant = identity.context()
+        async with self.connection(tenant) as connection:
+            cursor = await connection.execute(
+                """
+                SELECT membership.role
+                FROM organization_members AS membership
+                JOIN organizations AS organization
+                  ON organization.id = membership.organization_id
+                JOIN users AS app_user
+                  ON app_user.id = membership.user_id
+                WHERE membership.organization_id = %s
+                  AND membership.user_id = %s
+                  AND organization.slug = %s
+                  AND app_user.subject = %s
+                """,
+                (
+                    tenant.organization_id,
+                    tenant.user_id,
+                    identity.organization_slug,
+                    identity.user_subject,
+                ),
+            )
+            if await cursor.fetchone() is None:
+                raise TenantAuthorizationError(
+                    "membership inexistente para usuário e organização informados"
+                )
+        return tenant
+
+    async def resolve_tenant(self, identity: TenantIdentity) -> TenantContext:
+        """Bootstrap local; em Access exige provisionamento administrativo prévio."""
+        if os.environ.get("ORCH_AUTH_MODE", "disabled") == "cloudflare_access":
+            return await self.authorize_tenant(identity)
+        return await self.ensure_tenant(identity)

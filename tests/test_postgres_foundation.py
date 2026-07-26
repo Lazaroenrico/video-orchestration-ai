@@ -7,7 +7,15 @@ import pytest
 from click.testing import CliRunner
 
 from orchestrator.cli import cli
-from orchestrator.db import Database, TenantIdentity, upgrade_database
+from orchestrator.db import (
+    Database,
+    TenantAuthorizationError,
+    TenantIdentity,
+    create_organization,
+    grant_membership,
+    revoke_membership,
+    upgrade_database,
+)
 
 
 def _database_url(postgresql) -> str:
@@ -240,6 +248,147 @@ async def test_database_rejects_a_runtime_role_that_bypasses_rls(postgresql):
     with pytest.raises(ValueError, match="SUPERUSER/BYPASSRLS"):
         async with Database(_database_url(postgresql)):
             pass
+
+
+async def test_membership_authorization_never_bootstraps_access_identity(postgresql):
+    migration_url = _database_url(postgresql)
+    upgrade_database(migration_url)
+    runtime_url = _runtime_database_url(postgresql)
+    identity = TenantIdentity("acme", "Acme", "access|alice")
+    create_organization(migration_url, slug="acme", name="Acme")
+
+    async with Database(runtime_url) as database:
+        with pytest.raises(TenantAuthorizationError, match="membership"):
+            await database.authorize_tenant(identity)
+
+        grant_membership(
+            migration_url,
+            organization_slug="acme",
+            user_subject="access|alice",
+            role="member",
+        )
+        assert await database.authorize_tenant(identity) == identity.context()
+
+        revoke_membership(
+            migration_url,
+            organization_slug="acme",
+            user_subject="access|alice",
+        )
+        with pytest.raises(TenantAuthorizationError, match="membership"):
+            await database.authorize_tenant(identity)
+
+
+async def test_resolve_tenant_requires_membership_in_access_mode(
+    monkeypatch,
+    postgresql,
+):
+    migration_url = _database_url(postgresql)
+    upgrade_database(migration_url)
+    runtime_url = _runtime_database_url(postgresql)
+    identity = TenantIdentity("locked", "Locked", "access|mallory")
+    create_organization(migration_url, slug="locked", name="Locked")
+    monkeypatch.setenv("ORCH_AUTH_MODE", "cloudflare_access")
+
+    async with Database(runtime_url) as database:
+        with pytest.raises(TenantAuthorizationError):
+            await database.resolve_tenant(identity)
+
+    row = postgresql.execute(
+        "SELECT count(*) FROM organization_members"
+    ).fetchone()
+    assert row == (0,)
+
+
+def test_cli_admin_manages_organization_memberships(postgresql):
+    migration_url = _database_url(postgresql)
+    upgrade_database(migration_url)
+    command_env = {"MIGRATION_DATABASE_URL": migration_url}
+    cli_runner = CliRunner()
+
+    created = cli_runner.invoke(
+        cli,
+        ["db", "org-create", "--slug", "acme", "--name", "Acme Inc."],
+        env=command_env,
+    )
+    granted = cli_runner.invoke(
+        cli,
+        [
+            "db",
+            "membership-grant",
+            "--organization-slug",
+            "acme",
+            "--user-subject",
+            "access|alice",
+            "--role",
+            "admin",
+        ],
+        env=command_env,
+    )
+    revoked = cli_runner.invoke(
+        cli,
+        [
+            "db",
+            "membership-revoke",
+            "--organization-slug",
+            "acme",
+            "--user-subject",
+            "access|alice",
+        ],
+        env=command_env,
+    )
+
+    assert created.exit_code == 0, created.output
+    assert granted.exit_code == 0, granted.output
+    assert revoked.exit_code == 0, revoked.output
+    assert "acme" in created.output
+    assert "admin" in granted.output
+    assert "revogada" in revoked.output
+    assert postgresql.execute(
+        "SELECT slug, name FROM organizations"
+    ).fetchall() == [("acme", "Acme Inc.")]
+    assert postgresql.execute(
+        "SELECT subject FROM users"
+    ).fetchall() == [("access|alice",)]
+    assert postgresql.execute(
+        "SELECT count(*) FROM organization_members"
+    ).fetchone() == (0,)
+
+
+def test_membership_admin_rejects_invalid_role_and_unknown_organization(postgresql):
+    migration_url = _database_url(postgresql)
+    upgrade_database(migration_url)
+
+    with pytest.raises(ValueError, match="papel de membership inválido"):
+        grant_membership(
+            migration_url,
+            organization_slug="missing",
+            user_subject="access|alice",
+            role="superuser",
+        )
+    with pytest.raises(ValueError, match="não existe"):
+        grant_membership(
+            migration_url,
+            organization_slug="missing",
+            user_subject="access|alice",
+            role="member",
+        )
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "db",
+            "membership-grant",
+            "--organization-slug",
+            "missing",
+            "--user-subject",
+            "access|alice",
+            "--role",
+            "member",
+        ],
+        env={"MIGRATION_DATABASE_URL": migration_url},
+    )
+    assert result.exit_code == 1
+    assert "não existe" in result.output
 
 
 def test_migrations_preserve_application_loggers(caplog, postgresql):

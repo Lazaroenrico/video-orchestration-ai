@@ -13,6 +13,7 @@ import asyncio
 import json
 import os
 import uuid
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import urlparse
@@ -26,6 +27,7 @@ from pydantic import BaseModel
 from langgraph.types import Command
 
 from orchestrator import runner, stream_bus
+from orchestrator.auth import CloudflareAccessMiddleware
 import orchestrator.creator_store as creator_store
 import orchestrator.job_store as job_store
 import orchestrator.prompt_store as prompt_store
@@ -41,6 +43,7 @@ from orchestrator.config import (
     load_pipeline,
     load_providers,
 )
+from orchestrator.db import Database
 from orchestrator.tracing import run_trace_config
 from orchestrator.graph.builder import build_graph
 from orchestrator.graph.checkpoint import open_checkpointer
@@ -50,7 +53,22 @@ from orchestrator.storage.factory import build_media_storage
 from orchestrator.storage.r2 import R2MediaStorage
 from orchestrator.storage.resolve import resolve_signed_uris
 
-app = FastAPI(title="UGC Orchestrator")
+@asynccontextmanager
+async def _app_lifespan(app_: FastAPI):
+    database: Database | None = None
+    if os.environ.get("ORCH_AUTH_MODE", "disabled") == "cloudflare_access":
+        database = Database.from_env()
+        await database.open()
+        app_.state.auth_database = database
+    try:
+        yield
+    finally:
+        if database is not None:
+            await database.close()
+
+
+app = FastAPI(title="UGC Orchestrator", lifespan=_app_lifespan)
+app.add_middleware(CloudflareAccessMiddleware)
 
 
 def _cors_origins_from_env() -> list[str]:

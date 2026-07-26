@@ -1,0 +1,75 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "ugc-orchestrator-staging",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-07-24",
+  "workers_dev": false,
+  "route": {
+    "pattern": "staging.ugc-orchestrator.example/*",
+    "zone_name": "ugc-orchestrator.example"
+  },
+  "assets": {
+    "directory": "../../front/dist",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*"]
+  },
+  "containers": [
+    {
+      "name": "ugc-api-staging",
+      "class_name": "ApiContainer",
+      "image": "registry.cloudflare.com/ACCOUNT_ID/ugc-orchestrator:IMAGE_TAG",
+      "instance_type": "basic",
+      "max_instances": 2,
+      "rollout_active_grace_period": 300,
+      "rollout_step_percentage": [50, 100],
+      "constraints": {"regions": ["SAM"]}
+    },
+    {
+      "name": "ugc-runner-staging",
+      "class_name": "RunnerContainer",
+      "image": "registry.cloudflare.com/ACCOUNT_ID/ugc-orchestrator:IMAGE_TAG",
+      "instance_type": "standard-2",
+      "max_instances": 1,
+      "rollout_active_grace_period": 900,
+      "rollout_step_percentage": [100],
+      "constraints": {"regions": ["SAM"]}
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {"name": "API_CONTAINER", "class_name": "ApiContainer"},
+      {"name": "RUNNER_CONTAINER", "class_name": "RunnerContainer"}
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["ApiContainer", "RunnerContainer"]
+    }
+  ],
+  "queues": {
+    "producers": [
+      {"binding": "WAKE_QUEUE", "queue": "ugc-wake-staging"}
+    ],
+    "consumers": [
+      {
+        "queue": "ugc-wake-staging",
+        "max_batch_size": 1,
+        "max_batch_timeout": 1,
+        "max_retries": 5,
+        "dead_letter_queue": "ugc-wake-dlq-staging",
+        "max_concurrency": 1
+      }
+    ]
+  },
+  "triggers": {
+    "crons": ["*/1 * * * *"]
+  },
+  "vars": {
+    "ORCH_ORGANIZATION_SLUG": "staging",
+    "ORCH_ORGANIZATION_NAME": "UGC Orchestrator Staging",
+    "ORCH_RUNNER_SUBJECT": "service|cloudflare-runner",
+    "ORCH_APP_ORIGIN": "https://staging.ugc-orchestrator.example"
+  }
+}

@@ -50,6 +50,7 @@ RUN npm ci --omit=dev
 # Código de app: configs, scripts e a SPA já buildada.
 COPY config/ ./config/
 COPY config-mock/ ./config-mock/
+COPY config-staging/ ./config-staging/
 COPY scripts/ ./scripts/
 COPY --from=front-build /front/dist ./front/dist
 

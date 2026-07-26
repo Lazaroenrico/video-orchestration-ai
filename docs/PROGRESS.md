@@ -505,6 +505,58 @@ SQLite, `_runs`, `Future` e o SSE em memória permanecem somente no modo local o
 `0007 → 0008` preserva runs. Gate global: `1028 passed, 2 skipped`, 5552/5552
 statements (100%).
 
+## D36 — Fase 4: staging Cloudflare/Neon (2026-07-25)
+
+O staging foi especificado como código sem acionar provider pago nem publicar
+infraestrutura real:
+
+- `config-staging/` mantém todos os adapters de geração em `mock` e move somente bytes
+  para R2. A imagem OCI Linux/amd64 é a mesma para API e Runner, com comandos distintos.
+- O Worker TypeScript serve a SPA com fallback, encaminha `/api/*` e SSE sem guardar
+  estado, preserva o JWT do Cloudflare Access e injeta somente o contexto de organização.
+  O callback da Queue chama o Runner interno; cron de um minuto cobre a recuperação.
+- `CloudflareAccessMiddleware` valida RS256 contra o JWKS oficial, issuer e audience.
+  O sujeito validado entra em `TenantIdentity`, mas a autorização final exige membership
+  preexistente no PostgreSQL; não há bootstrap implícito em tráfego autenticado.
+- A administração explícita ganhou `db org-create`, `db membership-grant` e
+  `db membership-revoke`. O `runner-service` expõe somente health e uma chamada
+  autenticada que drena uma outbox e reivindica no máximo um job durável.
+- OpenTofu fixa Cloudflare `~> 5.22` e Neon `~> 0.1.15`: R2 privado/CORS restrito,
+  wake queue + DLQ, Access com MFA, WAF/rate limit, DNS e PostgreSQL 16 em
+  `aws-sa-east-1`, branch protegida e history retention de sete dias.
+- O workflow de deploy constrói uma única imagem por SHA, publica o mesmo artefato no
+  registry Cloudflare e ECR, migra/provisiona o papel runtime antes do rollout gradual e
+  nunca usa tag `latest`. `docs/STAGING.md` documenta bootstrap, rollback e o requisito
+  de conexão direta (sem pooler) para migrações e checkpoints.
+
+### Red → Green e falhas investigadas
+
+- RED inicial: `ModuleNotFoundError: jwt`. Causa: a validação Access não tinha biblioteca
+  JOSE. Correção: `PyJWT[crypto]` no runtime e lock atualizado.
+- RED seguinte: `orchestrator.auth` e `orchestrator.runner_service` inexistentes.
+  Correção: middleware ASGI e serviço interno implementados pelas interfaces públicas
+  exercitadas nos testes.
+- Sintoma: o parser estático de `wrangler.jsonc` corrompia `https://` ao remover `//` e
+  asserções dependiam de whitespace/forma textual. Causa: teste acoplado à representação.
+  Correção: JSON sem comentários foi lido semanticamente e HCL/workflow passaram a usar
+  regex/contratos observáveis.
+- Sintoma TypeScript: bindings de `cloudflare:workers` e secrets não eram conhecidos.
+  Correção: tipos gerados pelo Wrangler e declaração separada dos secrets, sem conflito
+  com a lib WebWorker.
+- Sintoma de segurança: `npm audit` encontrou três vulnerabilidades altas transitivas em
+  `sharp`/`miniflare` no Wrangler 4.112. Correção: Wrangler 4.114; audit voltou a zero.
+- Sintoma IaC: `tofu fmt -check` rejeitou o alinhamento do ruleset. Correção: formatação
+  canônica; `init` gerou lockfile e `validate` passou com a imagem oficial
+  `ghcr.io/opentofu/opentofu:1.12.1`.
+- Primeiro gate global: comportamento funcional verde (`1047 passed, 2 skipped`), mas
+  cobertura em 99,15%. Causa: ramos reais de falha/refresh do JWT, pool/lifespan e
+  administração ainda não tinham regressão. Correção: testes pelos endpoints e comandos
+  públicos; nenhum ramo foi excluído nem asserção afrouxada.
+
+**Verificação:** `npm run check`, `npm audit` (zero vulnerabilidades),
+`wrangler deploy --dry-run`, `tofu fmt -check` e `tofu validate` verdes. Gate global:
+`1058 passed, 2 skipped`, 5797/5797 statements (100%).
+
 ## D30 — R2 + DB relacional de mídia: implementação (2026-07-16)
 
 Execução da `docs/ADR-D30-media-storage-r2-db.md`, que estava aceita mas não implementada.

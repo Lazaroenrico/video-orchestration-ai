@@ -201,7 +201,7 @@ async def run_worker_once(
 ) -> bool:
     """Processa no máximo um job; devolve ``False`` quando a fila está vazia."""
     async with Database.from_env() as database:
-        tenant = await database.ensure_tenant(TenantIdentity.from_env())
+        tenant = await database.resolve_tenant(TenantIdentity.from_env())
         jobs = PostgresJobRepository(database, tenant)
         claimed = await jobs.claim(worker_id, limit=1, now=now)
         if not claimed:

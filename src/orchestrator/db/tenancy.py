@@ -2,7 +2,10 @@
 from __future__ import annotations
 
 import os
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
+from typing import Iterator
 from uuid import UUID, NAMESPACE_URL, uuid5
 
 
@@ -12,6 +15,7 @@ _ENVIRONMENT_FIELDS = {
     "ORCH_ORGANIZATION_NAME": "organization_name",
     "ORCH_USER_SUBJECT": "user_subject",
 }
+_REQUEST_IDENTITY: ContextVar[TenantIdentity | None]
 
 
 def _stable_id(kind: str, value: str) -> UUID:
@@ -26,6 +30,9 @@ class TenantIdentity:
 
     @classmethod
     def from_env(cls) -> "TenantIdentity":
+        request_identity = _REQUEST_IDENTITY.get()
+        if request_identity is not None:
+            return request_identity
         missing = [name for name in _ENVIRONMENT_FIELDS if not os.environ.get(name)]
         if missing:
             raise ValueError(
@@ -49,3 +56,16 @@ class TenantContext:
     user_id: UUID
     organization_slug: str
     user_subject: str
+
+
+_REQUEST_IDENTITY = ContextVar("orchestrator_request_tenant_identity", default=None)
+
+
+@contextmanager
+def tenant_identity_context(identity: TenantIdentity) -> Iterator[None]:
+    """Vincula identidade ao request/task atual sem contaminar outras coroutines."""
+    token = _REQUEST_IDENTITY.set(identity)
+    try:
+        yield
+    finally:
+        _REQUEST_IDENTITY.reset(token)

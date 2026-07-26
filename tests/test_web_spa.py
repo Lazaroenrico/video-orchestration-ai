@@ -132,6 +132,39 @@ async def test_healthz_is_ok_without_touching_config() -> None:
     assert await web_server.healthz() == {"status": "ok"}
 
 
+async def test_app_lifespan_opens_shared_auth_database_only_in_access_mode(
+    monkeypatch,
+) -> None:
+    calls: list[str] = []
+
+    class FakeDatabase:
+        async def open(self):
+            calls.append("open")
+
+        async def close(self):
+            calls.append("close")
+
+    database = FakeDatabase()
+    monkeypatch.setenv("ORCH_AUTH_MODE", "cloudflare_access")
+    monkeypatch.setattr(
+        web_server.Database,
+        "from_env",
+        classmethod(lambda cls: database),
+    )
+    lifecycle_app = FastAPI()
+
+    async with web_server._app_lifespan(lifecycle_app):
+        assert lifecycle_app.state.auth_database is database
+        assert calls == ["open"]
+
+    assert calls == ["open", "close"]
+
+    monkeypatch.setenv("ORCH_AUTH_MODE", "disabled")
+    async with web_server._app_lifespan(FastAPI()):
+        pass
+    assert calls == ["open", "close"]
+
+
 def _stub_config(monkeypatch, *, storage_backend=None) -> None:
     monkeypatch.setattr(web_server, "load_pipeline", lambda path=None: {})
     monkeypatch.setattr(web_server, "load_judge", lambda path=None: {})

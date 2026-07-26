@@ -204,5 +204,5 @@ async def open_repository(path: str | Path) -> AsyncIterator[CreatorRepository]:
     from orchestrator.db import Database, PostgresCreatorRepository, TenantIdentity
 
     async with Database.from_env() as database:
-        tenant = await database.ensure_tenant(TenantIdentity.from_env())
+        tenant = await database.resolve_tenant(TenantIdentity.from_env())
         yield PostgresCreatorRepository(database, tenant)
