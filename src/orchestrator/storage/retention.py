@@ -54,7 +54,13 @@ async def purge_expired(db: Any, storage: Any, *, now: datetime) -> list[str]:
     """
     purged: list[str] = []
     for artifact in await db.expired(now=now):
-        await storage.delete(artifact.storage_key)
+        if hasattr(storage, "delete_from"):
+            await storage.delete_from(
+                artifact.storage_backend,
+                artifact.storage_key,
+            )
+        else:
+            await storage.delete(artifact.storage_key)
         await db.delete(artifact.id)
         purged.append(artifact.storage_key)
     return purged

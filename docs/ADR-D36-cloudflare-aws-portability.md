@@ -2,7 +2,7 @@
 
 Data: 2026-07-16
 
-Status: proposto para implementacao incremental; nenhuma infraestrutura foi provisionada
+Status: implementado em codigo e IaC; nenhuma infraestrutura foi provisionada
 
 Relacionadas: D9 (checkpointer SQLite), D22 (dashboard e SSE), D30 (R2 e artifacts), D34 (streaming SSE) e D35 (gates LangGraph).
 

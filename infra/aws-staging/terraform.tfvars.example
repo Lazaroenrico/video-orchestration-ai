@@ -1,0 +1,24 @@
+image_tag         = "0123456789abcdef0123456789abcdef01234567"
+vpc_id            = "vpc-0123456789abcdef0"
+private_subnet_ids = [
+  "subnet-private-a",
+  "subnet-private-b",
+]
+public_subnet_ids = [
+  "subnet-public-a",
+  "subnet-public-b",
+]
+certificate_arn                 = "arn:aws:acm:sa-east-1:123456789012:certificate/example"
+media_bucket_name               = "ugc-orchestrator-staging-media-example"
+database_secret_arn             = "arn:aws:secretsmanager:sa-east-1:123456789012:secret:database"
+r2_access_key_secret_arn        = "arn:aws:secretsmanager:sa-east-1:123456789012:secret:r2-access"
+r2_secret_key_secret_arn        = "arn:aws:secretsmanager:sa-east-1:123456789012:secret:r2-secret"
+r2_account_id                   = "cloudflare-account-id"
+r2_bucket                       = "ugc-orchestrator-staging-media"
+cloudflare_access_team_domain   = "team.cloudflareaccess.com"
+cloudflare_access_audience      = "access-audience"
+app_origin                      = "https://staging.ugc-orchestrator.example"
+
+# O exercício provisiona infraestrutura sem tasks/tráfego.
+api_desired_count    = 0
+runner_desired_count = 0

@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useParams, Link, useNavigate } from "react-router-dom";
+import { useParams, Link, useNavigate } from "react-router";
 import { Card, SectionTitle } from "../components/Card";
 import { Icon } from "../components/Icon";
 import { Button } from "../components/Button";

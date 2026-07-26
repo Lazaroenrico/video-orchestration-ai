@@ -34,9 +34,18 @@ class R2MediaStorage:
 
     backend = "r2"
 
-    def __init__(self, *, bucket: str, client: Any) -> None:
+    def __init__(
+        self,
+        *,
+        bucket: str,
+        client: Any,
+        backend: str = "r2",
+        uri_scheme: str = "r2",
+    ) -> None:
+        self.backend = backend
         self.bucket = bucket
         self._client = client
+        self._uri_scheme = uri_scheme
 
     @classmethod
     def from_env(cls) -> "R2MediaStorage":
@@ -66,7 +75,7 @@ class R2MediaStorage:
         return StoredObject(
             backend=self.backend,
             key=key,
-            uri=f"r2://{self.bucket}/{key}",
+            uri=f"{self._uri_scheme}://{self.bucket}/{key}",
             content_type=content_type,
             size_bytes=len(data),
             sha256=hashlib.sha256(data).hexdigest(),

@@ -8,7 +8,11 @@ from __future__ import annotations
 
 import pytest
 
-from orchestrator.storage.resolve import r2_key_from_uri, resolve_signed_uris
+from orchestrator.storage.resolve import (
+    object_pointer_from_uri,
+    r2_key_from_uri,
+    resolve_signed_uris,
+)
 
 
 class _FakeStorage:
@@ -131,3 +135,59 @@ async def test_without_a_signing_storage_the_pointer_is_left_alone(storage):
     payload = {"uri": "r2://ugc/a.mp4"}
 
     assert await resolve_signed_uris(payload, storage=None) == payload
+
+
+async def test_dual_backend_signs_r2_and_s3_with_their_original_backend():
+    class _DualStorage:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, str, int]] = []
+
+        async def get_signed_url_for(
+            self,
+            backend: str,
+            key: str,
+            *,
+            ttl_seconds: int,
+        ) -> str:
+            self.calls.append((backend, key, ttl_seconds))
+            return f"https://{backend}.signed.example/{key}"
+
+    storage = _DualStorage()
+    payload = {
+        "before_cutover": "r2://old-media/run-1/final.mp4",
+        "after_cutover": "s3://new-media/run-2/final.mp4",
+    }
+
+    resolved = await resolve_signed_uris(payload, storage=storage, ttl_seconds=300)
+
+    assert object_pointer_from_uri(payload["before_cutover"]) == (
+        "r2",
+        "run-1/final.mp4",
+    )
+    assert object_pointer_from_uri(payload["after_cutover"]) == (
+        "s3",
+        "run-2/final.mp4",
+    )
+    assert resolved == {
+        "before_cutover": "https://r2.signed.example/run-1/final.mp4",
+        "after_cutover": "https://s3.signed.example/run-2/final.mp4",
+    }
+    assert storage.calls == [
+        ("r2", "run-1/final.mp4", 300),
+        ("s3", "run-2/final.mp4", 300),
+    ]
+
+
+async def test_single_backend_never_signs_a_pointer_from_another_backend(storage):
+    payload = {
+        "legacy": "r2://old-media/run-1/final.mp4",
+        "future": "s3://new-media/run-2/final.mp4",
+    }
+
+    resolved = await resolve_signed_uris(payload, storage=storage)
+
+    assert resolved == {
+        "legacy": "https://signed.example/run-1/final.mp4?ttl=900",
+        "future": "s3://new-media/run-2/final.mp4",
+    }
+    assert storage.calls == [("run-1/final.mp4", 900)]

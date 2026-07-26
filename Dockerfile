@@ -14,7 +14,7 @@
 # ============================================================================
 
 # --- Stage 1: build da SPA (Kinetic Command) --------------------------------
-FROM node:22-bookworm-slim AS front-build
+FROM node:22.22.3-bookworm-slim AS front-build
 WORKDIR /front
 COPY front/package.json front/package-lock.json ./
 RUN npm ci
@@ -26,8 +26,8 @@ FROM python:3.12-slim-bookworm AS runtime
 
 # Node LTS copiado da imagem oficial (mesma base bookworm → glibc compatível),
 # evitando um apt/nodesource extra. O bridge Seedance precisa dele em runtime.
-COPY --from=node:22-bookworm-slim /usr/local/bin/node /usr/local/bin/node
-COPY --from=node:22-bookworm-slim /usr/local/lib/node_modules /usr/local/lib/node_modules
+COPY --from=front-build /usr/local/bin/node /usr/local/bin/node
+COPY --from=front-build /usr/local/lib/node_modules /usr/local/lib/node_modules
 RUN ln -sf /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm
 
 ENV PYTHONUNBUFFERED=1 \

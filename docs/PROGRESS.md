@@ -597,6 +597,54 @@ infraestrutura real:
 o dump e leu `alembic_version=20260725_0008` antes de remover os bancos descartáveis.
 Gate global: `1066 passed, 2 skipped`, 5925/5925 statements (100%).
 
+## D36 — Fase 6: exercício AWS e cutover verificável (2026-07-26)
+
+- O contrato de mídia agora aceita `s3` e `dual`. Durante o cutover, novas escritas vão
+  ao backend configurado e assinatura, inventário, retenção e purge continuam roteados
+  pelo `storage_backend` original de cada artifact.
+- `storage migrate-run RUN_ID` copia a key canônica R2→S3, preserva content type e
+  metadata, verifica SHA-256/tamanho via `HeadObject` e só então troca o ponteiro no
+  PostgreSQL. Repetição é idempotente; divergência mantém o artifact no R2.
+- `sqs-runner` recebe o wake-up SQS, mas reivindica e executa o job canônico no
+  PostgreSQL. Falha de processamento não confirma a mensagem, preservando retry/DLQ.
+- `infra/aws-staging` declara ECR imutável, ECS/Fargate API+Runner, ALB, SQS+DLQ, S3
+  privado/versionado, IAM mínimo, logs e alarmes. API e Runner permanecem com
+  `desired_count=0`; o workflow exige decisão explícita e não foi aplicado.
+- `docs/AWS-CUTOVER.md` fixa drenagem, leitura dual, migração verificável, canário e gate
+  Go/No-Go sem mudar `run_id`, `storage_key`, checkpoints ou eventos.
+- O frontend migrou para React 19.2.8 e React Router 8.3.0, com Node 22.22.3 na imagem
+  OCI. O pacote legado `react-router-dom` foi removido e todos os imports usam
+  `react-router`.
+- Estado/segredos/planos OpenTofu locais (`*.tfstate*`, `*.auto.tfvars`, `*.tfplan`) são
+  ignorados; o workflow salva o plano com extensão coberta por essa política.
+
+### Red → Green e falhas investigadas
+
+- Sintoma no primeiro gate global: dois testes legados de signed URL deixaram ponteiros
+  R2 sem resolução. Causa: o roteamento dual passou a exigir que todo signer anunciasse
+  `.backend`, mas o contrato R2 legado expunha apenas `get_signed_url`. Correção: signer
+  simples sem marcador continua sendo tratado como R2, enquanto ponteiro S3 nunca é
+  assinado pelo backend errado; regressões cobrem ambos os casos.
+- Sintoma de segurança: `npm audit` reportou duas vulnerabilidades altas em
+  `react-router@7.18.1` (GHSA-qwww-vcr4-c8h2). Causa: a correção existe apenas em
+  `react-router@8.3.0`; o pacote `react-router-dom` foi removido na v8 e o novo baseline
+  exige React >=19.2.7 e Node >=22.22.0. Correção: migração direta para
+  `react-router@8.3.0`, React/ReactDOM 19.2.8 e imagem Node 22.22.3; audit voltou a zero,
+  sem `npm audit fix --force`.
+- RED de segurança IaC: o teste de contrato provou que `.terraform/` era ignorado, mas
+  state, `auto.tfvars` e plano salvo ainda podiam entrar no Git. Correção: padrões
+  explícitos no `.gitignore` e plano `aws-no-traffic.tfplan`; o mesmo teste ficou verde.
+
+**Verificação:** 72 testes focados verdes. Frontend com build Vite/TypeScript,
+boundaries e audit zero; Cloudflare com TypeScript, audit zero e
+`wrangler deploy --dry-run`; OpenTofu 1.12.1 com `fmt -check` e `validate`. A imagem
+`ugc-orchestrator:d36` Linux/amd64 expôs CLI, `storage migrate-run` e `sqs-runner`, com
+Python 3.12.13 e Node 22.22.3. Gate global PostgreSQL:
+`1092 passed, 2 skipped`, 6131/6131 statements (100%).
+
+**Estado externo:** nenhuma infraestrutura Cloudflare/AWS foi aplicada, nenhum DNS ou
+publisher foi trocado e nenhum provider pago foi chamado.
+
 ## D30 — R2 + DB relacional de mídia: implementação (2026-07-16)
 
 Execução da `docs/ADR-D30-media-storage-r2-db.md`, que estava aceita mas não implementada.

@@ -250,6 +250,52 @@ async def test_object_inventory_reports_missing_bytes_without_changing_metadata(
     assert [artifact.storage_backend for artifact in persisted] == ["r2", "r2"]
 
 
+async def test_object_inventory_checks_both_backends_during_cutover(postgresql):
+    upgrade_database(_database_url(postgresql))
+
+    class _DualStorage:
+        backend = "s3"
+        backends = {"r2": object(), "s3": object()}
+
+        async def exists_in(self, backend: str, key: str) -> bool:
+            return (backend, key) in {
+                ("r2", "acme/old.mp4"),
+                ("s3", "acme/new.mp4"),
+            }
+
+    async with Database(_runtime_database_url(postgresql)) as database:
+        tenant = await database.ensure_tenant(
+            TenantIdentity("acme", "Acme", "oidc|alice")
+        )
+        artifacts = PostgresArtifactRepository(database, tenant)
+        for backend, key in (("r2", "acme/old.mp4"), ("s3", "acme/new.mp4")):
+            await artifacts.record(
+                ArtifactRecord(
+                    run_id="run-dual",
+                    kind="clip",
+                    storage_backend=backend,
+                    storage_key=key,
+                    size_bytes=10,
+                )
+            )
+
+        inventory = await PostgresOperations(database, tenant).object_inventory(
+            _DualStorage()
+        )
+
+    assert inventory == {
+        "backend": "dual",
+        "object_count": 2,
+        "expected_bytes": 20,
+        "verified_count": 2,
+        "missing": [],
+        "by_backend": {
+            "r2": {"object_count": 1, "expected_bytes": 10, "verified_count": 1},
+            "s3": {"object_count": 1, "expected_bytes": 10, "verified_count": 1},
+        },
+    }
+
+
 async def test_run_inspection_is_isolated_between_organizations(postgresql):
     upgrade_database(_database_url(postgresql))
 

@@ -10,6 +10,7 @@ from orchestrator import wake_queue as wake_queue_module
 from orchestrator.wake_queue import (
     CloudflareWakeQueue,
     DatabaseWakeQueue,
+    SqsWakeConsumer,
     SqsWakeQueue,
     build_wake_queue,
 )
@@ -161,3 +162,76 @@ def test_wake_queue_factory_builds_cloudflare_and_sqs(monkeypatch):
 
     assert isinstance(queue, SqsWakeQueue)
     assert queue._client is fake_client
+
+
+async def test_sqs_consumer_long_polls_and_acknowledges_only_after_processing():
+    class FakeSqs:
+        def __init__(self):
+            self.responses = [
+                {"Messages": [{"ReceiptHandle": "receipt-1"}]},
+                {},
+            ]
+            self.calls = []
+
+        def receive_message(self, **kwargs):
+            self.calls.append(("receive", kwargs))
+            return self.responses.pop(0)
+
+        def delete_message(self, **kwargs):
+            self.calls.append(("delete", kwargs))
+
+    async def inline(function, **kwargs):
+        return function(**kwargs)
+
+    client = FakeSqs()
+    consumer = SqsWakeConsumer(
+        "https://sqs.test/queue",
+        client=client,
+        run_sync=inline,
+    )
+
+    receipt = await consumer.receive()
+    await consumer.ack(receipt)
+
+    assert receipt == "receipt-1"
+    assert await consumer.receive() is None
+    assert client.calls == [
+        (
+            "receive",
+            {
+                "QueueUrl": "https://sqs.test/queue",
+                "MaxNumberOfMessages": 1,
+                "WaitTimeSeconds": 20,
+                "VisibilityTimeout": 180,
+            },
+        ),
+        (
+            "delete",
+            {
+                "QueueUrl": "https://sqs.test/queue",
+                "ReceiptHandle": "receipt-1",
+            },
+        ),
+        (
+            "receive",
+            {
+                "QueueUrl": "https://sqs.test/queue",
+                "MaxNumberOfMessages": 1,
+                "WaitTimeSeconds": 20,
+                "VisibilityTimeout": 180,
+            },
+        ),
+    ]
+
+
+def test_sqs_consumer_builds_its_client_from_the_aws_role(monkeypatch):
+    client = object()
+    monkeypatch.setattr(
+        wake_queue_module.boto3,
+        "client",
+        lambda service: client if service == "sqs" else None,
+    )
+
+    consumer = SqsWakeConsumer("https://sqs.test/queue")
+
+    assert consumer._client is client

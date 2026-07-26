@@ -23,6 +23,7 @@ from orchestrator.config import (
 from orchestrator.graph.checkpoint import open_checkpointer
 from orchestrator.logging_config import configure_logging
 from orchestrator.operations import PostgresOperations
+from orchestrator.sqs_runner import run_sqs_runner
 from orchestrator.legacy_import import apply_legacy, scan_legacy
 from orchestrator.db import (
     MEMBERSHIP_ROLES,
@@ -37,6 +38,7 @@ from orchestrator.db import (
 from orchestrator.db.artifacts import PostgresArtifactRepository
 from orchestrator.storage.db import ArtifactDB
 from orchestrator.storage.factory import build_media_storage
+from orchestrator.storage.migration import BotoObjectStore, migrate_run_objects
 from orchestrator.storage.retention import purge_expired
 from orchestrator.worker import run_worker_once
 
@@ -56,6 +58,33 @@ def db_commands() -> None:
 @cli.group(name="ops")
 def operations_commands() -> None:
     """Diagnóstico operacional tenant-scoped."""
+
+
+@cli.group(name="storage")
+def storage_commands() -> None:
+    """Migração administrada de objetos."""
+
+
+@storage_commands.command(name="migrate-run")
+@click.argument("run_id")
+def storage_migrate_run(run_id: str) -> None:
+    """Copia um run de R2 para S3 e troca o backend após verificação."""
+    source = BotoObjectStore.from_r2_env()
+    destination = BotoObjectStore.from_s3_env()
+
+    async def _migrate() -> dict:
+        async with Database.from_env() as database:
+            tenant = await database.resolve_tenant(TenantIdentity.from_env())
+            artifacts = PostgresArtifactRepository(database, tenant)
+            return await migrate_run_objects(
+                artifacts,
+                run_id=run_id,
+                source=source,
+                destination=destination,
+            )
+
+    report = asyncio.run(_migrate())
+    click.echo(json.dumps(report, ensure_ascii=False, sort_keys=True))
 
 
 @operations_commands.command(name="inspect-run")
@@ -501,6 +530,28 @@ def runner_service(host: str, port: int) -> None:
         False,
         application="orchestrator.runner_service:app",
     )
+
+
+@cli.command(name="sqs-runner")
+@click.option("--worker-id", default="ecs-runner", show_default=True)
+@click.option(
+    "--cycles",
+    type=click.IntRange(min=0),
+    default=0,
+    show_default=True,
+    help="0 roda continuamente; valor positivo é smoke/teste.",
+)
+def sqs_runner(worker_id: str, cycles: int) -> None:
+    """Consome wake-ups SQS e reivindica o trabalho canônico no PostgreSQL."""
+    bounded_cycles = cycles or None
+    result = asyncio.run(
+        run_sqs_runner(
+            worker_id=worker_id,
+            cycles=bounded_cycles,
+        )
+    )
+    if bounded_cycles is not None:
+        click.echo(json.dumps(result, sort_keys=True))
 
 
 if __name__ == "__main__":  # pragma: no cover - entrypoint executado só via `python -m`

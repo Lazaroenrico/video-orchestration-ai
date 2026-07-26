@@ -117,6 +117,39 @@ class SqsWakeQueue:
         )
 
 
+class SqsWakeConsumer:
+    """Consome somente o sinal; o conteúdo canônico continua no PostgreSQL."""
+
+    def __init__(
+        self,
+        queue_url: str,
+        *,
+        client: Any = None,
+        run_sync: Callable[..., Awaitable[Any]] = _run_in_thread,
+    ) -> None:
+        self._queue_url = queue_url
+        self._client = client or boto3.client("sqs")
+        self._run_sync = run_sync
+
+    async def receive(self) -> str | None:
+        response = await self._run_sync(
+            self._client.receive_message,
+            QueueUrl=self._queue_url,
+            MaxNumberOfMessages=1,
+            WaitTimeSeconds=20,
+            VisibilityTimeout=180,
+        )
+        messages = response.get("Messages") or []
+        return messages[0]["ReceiptHandle"] if messages else None
+
+    async def ack(self, receipt_handle: str) -> None:
+        await self._run_sync(
+            self._client.delete_message,
+            QueueUrl=self._queue_url,
+            ReceiptHandle=receipt_handle,
+        )
+
+
 def build_wake_queue() -> WakeQueue:
     backend = os.environ.get("ORCH_QUEUE_BACKEND", "database").strip().lower()
     if backend == "database":

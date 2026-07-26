@@ -14,6 +14,7 @@ import pytest
 
 from orchestrator.storage.db import ArtifactDB, ArtifactRecord
 from orchestrator.storage.local import LocalMediaStorage
+from orchestrator.storage.multi import MultiBackendMediaStorage
 from orchestrator.storage.retention import (
     RETENTION_INTERMEDIATE,
     RETENTION_KEEP,
@@ -161,3 +162,32 @@ async def test_purge_is_driven_by_the_db_not_by_scanning_the_bucket(tmp_path, db
 
     assert await purge_expired(db, storage, now=_NOW) == []
     assert await storage.exists(orphan.key) is True
+
+
+async def test_purge_routes_an_old_r2_artifact_to_its_original_backend(db):
+    class _Storage:
+        def __init__(self, backend: str) -> None:
+            self.backend = backend
+            self.deleted: list[str] = []
+
+        async def delete(self, key: str) -> None:
+            self.deleted.append(key)
+
+    r2 = _Storage("r2")
+    s3 = _Storage("s3")
+    storage = MultiBackendMediaStorage({"r2": r2, "s3": s3}, write_backend="s3")
+    await db.record(
+        ArtifactRecord(
+            run_id="run-1",
+            kind="clip",
+            storage_backend="r2",
+            storage_key="run-1/old-r2.mp4",
+            retention_class=RETENTION_REJECTED,
+            expires_at=(_NOW - timedelta(days=1)).isoformat(),
+        )
+    )
+
+    await purge_expired(db, storage, now=_NOW)
+
+    assert r2.deleted == ["run-1/old-r2.mp4"]
+    assert s3.deleted == []

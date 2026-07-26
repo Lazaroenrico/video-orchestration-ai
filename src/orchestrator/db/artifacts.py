@@ -162,6 +162,27 @@ class PostgresArtifactRepository:
                 ),
             )
 
+    async def set_storage_backend(
+        self,
+        storage_key: str,
+        storage_backend: str,
+    ) -> None:
+        """Troca somente a localização após uma cópia já verificada."""
+        async with self._database.connection(self._tenant) as connection:
+            await connection.execute(
+                """
+                UPDATE artifacts
+                SET storage_backend = %s,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE organization_id = %s AND storage_key = %s
+                """,
+                (
+                    storage_backend,
+                    self._tenant.organization_id,
+                    storage_key,
+                ),
+            )
+
     async def expired(self, *, now: datetime) -> list[ArtifactRecord]:
         async with self._database.connection(self._tenant) as connection:
             cursor = await connection.execute(

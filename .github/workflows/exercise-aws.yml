@@ -1,0 +1,62 @@
+name: Exercise AWS portability
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: Immutable git SHA already present in ECR
+        required: true
+        type: string
+      apply_no_traffic:
+        description: Apply with API and Runner desired_count zero
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: aws-portability-staging
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: infra/aws-staging
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_STAGING_INFRA_ROLE_ARN }}
+          aws-region: sa-east-1
+      - uses: opentofu/setup-opentofu@v1
+        with:
+          tofu_version: 1.12.1
+      - name: Confirm the immutable image exists
+        run: >-
+          aws ecr describe-images
+          --repository-name ugc-orchestrator
+          --image-ids imageTag=${{ inputs.image_tag }}
+      - run: tofu fmt -check -recursive
+      - run: tofu init -input=false
+      - run: tofu validate
+      - name: Materialize protected staging variables
+        env:
+          STAGING_TFVARS: ${{ secrets.AWS_STAGING_TFVARS }}
+        run: |
+          umask 077
+          printf '%s' "$STAGING_TFVARS" > staging.auto.tfvars
+      - name: Plan zero-traffic exercise
+        env:
+          TF_VAR_image_tag: ${{ inputs.image_tag }}
+        run: >-
+          tofu plan -input=false -out=aws-no-traffic.tfplan
+          -var="api_desired_count=0"
+          -var="runner_desired_count=0"
+      - name: Apply only after the explicit workflow decision
+        if: ${{ inputs.apply_no_traffic }}
+        run: tofu apply -input=false -auto-approve aws-no-traffic.tfplan

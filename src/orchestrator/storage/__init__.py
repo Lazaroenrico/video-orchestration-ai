@@ -16,7 +16,9 @@ from orchestrator.storage.db import (
 )
 from orchestrator.storage.factory import build_media_storage
 from orchestrator.storage.local import LocalMediaStorage
+from orchestrator.storage.multi import MultiBackendMediaStorage
 from orchestrator.storage.r2 import R2MediaStorage
+from orchestrator.storage.s3 import S3MediaStorage
 
 __all__ = [
     "ArtifactDB",
@@ -24,7 +26,9 @@ __all__ = [
     "ArtifactRepository",
     "LocalMediaStorage",
     "MediaStorage",
+    "MultiBackendMediaStorage",
     "R2MediaStorage",
+    "S3MediaStorage",
     "StoredObject",
     "build_media_storage",
     "open_artifact_repository",

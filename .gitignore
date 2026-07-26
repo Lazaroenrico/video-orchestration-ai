@@ -21,3 +21,7 @@ coverage.xml
 
 # IaC / deploy local state
 .terraform/
+*.tfstate
+*.tfstate.*
+*.auto.tfvars
+*.tfplan

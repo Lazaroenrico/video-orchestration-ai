@@ -12,8 +12,21 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-_R2_SCHEME = "r2://"
+_OBJECT_SCHEMES = ("r2", "s3")
 _DEFAULT_TTL_SECONDS = 900
+
+
+def object_pointer_from_uri(uri: Any) -> Optional[tuple[str, str]]:
+    """Extrai ``(backend, key)`` de ponteiros canônicos R2/S3."""
+    if not isinstance(uri, str):
+        return None
+    for backend in _OBJECT_SCHEMES:
+        prefix = f"{backend}://"
+        if uri.startswith(prefix):
+            _, _, rest = uri.partition(prefix)
+            _, sep, key = rest.partition("/")
+            return (backend, key) if sep and key else None
+    return None
 
 
 def r2_key_from_uri(uri: Any) -> Optional[str]:
@@ -22,11 +35,8 @@ def r2_key_from_uri(uri: Any) -> Optional[str]:
     Paths locais (``/videos/...``), http(s), ``data:`` e referências opacas
     (``mock://``, ``voice-0``) não são ponteiros de objeto: passam intactos.
     """
-    if not isinstance(uri, str) or not uri.startswith(_R2_SCHEME):
-        return None
-    _, _, rest = uri.partition(_R2_SCHEME)
-    _, sep, key = rest.partition("/")
-    return key if sep and key else None
+    pointer = object_pointer_from_uri(uri)
+    return pointer[1] if pointer is not None and pointer[0] == "r2" else None
 
 
 async def resolve_signed_uris(
@@ -43,21 +53,37 @@ async def resolve_signed_uris(
     Cada key é assinada **uma vez** por chamada: o mesmo clip aparece em ``results`` e em
     ``artifacts``, e assinar de novo é HMAC jogado fora.
     """
-    if storage is None or not hasattr(storage, "get_signed_url"):
+    if storage is None or not (
+        hasattr(storage, "get_signed_url")
+        or hasattr(storage, "get_signed_url_for")
+    ):
         return payload
 
-    cache: dict[str, str] = {}
+    cache: dict[tuple[str, str], str] = {}
 
     async def _walk(node: Any) -> Any:
         if isinstance(node, dict):
             return {k: await _walk(v) for k, v in node.items()}
         if isinstance(node, list):
             return [await _walk(v) for v in node]
-        key = r2_key_from_uri(node)
-        if key is None:
+        pointer = object_pointer_from_uri(node)
+        if pointer is None:
             return node
-        if key not in cache:
-            cache[key] = await storage.get_signed_url(key, ttl_seconds=ttl_seconds)
-        return cache[key]
+        backend, key = pointer
+        if pointer not in cache:
+            if hasattr(storage, "get_signed_url_for"):
+                cache[pointer] = await storage.get_signed_url_for(
+                    backend,
+                    key,
+                    ttl_seconds=ttl_seconds,
+                )
+            elif getattr(storage, "backend", "r2") == backend:
+                cache[pointer] = await storage.get_signed_url(
+                    key,
+                    ttl_seconds=ttl_seconds,
+                )
+            else:
+                return node
+        return cache[pointer]
 
     return await _walk(payload)

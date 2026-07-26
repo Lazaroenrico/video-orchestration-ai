@@ -31,32 +31,60 @@ class PostgresOperations:
 
     async def object_inventory(self, storage: Any) -> dict[str, Any]:
         """Confere os ponteiros do backend ativo sem listar ou mutar o bucket."""
+        dual = hasattr(storage, "exists_in")
         async with self._database.connection(self._tenant) as connection:
-            cursor = await connection.execute(
-                """
-                SELECT storage_key, size_bytes
-                FROM artifacts
-                WHERE organization_id = %s AND storage_backend = %s
-                ORDER BY storage_key
-                """,
-                (self._tenant.organization_id, storage.backend),
-            )
+            if dual:
+                cursor = await connection.execute(
+                    """
+                    SELECT storage_backend, storage_key, size_bytes
+                    FROM artifacts
+                    WHERE organization_id = %s
+                    ORDER BY storage_backend, storage_key
+                    """,
+                    (self._tenant.organization_id,),
+                )
+            else:
+                cursor = await connection.execute(
+                    """
+                    SELECT storage_backend, storage_key, size_bytes
+                    FROM artifacts
+                    WHERE organization_id = %s AND storage_backend = %s
+                    ORDER BY storage_key
+                    """,
+                    (self._tenant.organization_id, storage.backend),
+                )
             rows = await cursor.fetchall()
 
         missing: list[str] = []
         verified_count = 0
-        for key, _size_bytes in rows:
-            if await storage.exists(key):
+        by_backend: dict[str, dict[str, int]] = {}
+        for backend, key, size_bytes in rows:
+            stats = by_backend.setdefault(
+                backend,
+                {"object_count": 0, "expected_bytes": 0, "verified_count": 0},
+            )
+            stats["object_count"] += 1
+            stats["expected_bytes"] += size_bytes or 0
+            exists = (
+                await storage.exists_in(backend, key)
+                if dual
+                else await storage.exists(key)
+            )
+            if exists:
                 verified_count += 1
+                stats["verified_count"] += 1
             else:
-                missing.append(key)
-        return {
-            "backend": storage.backend,
+                missing.append(f"{backend}://{key}" if dual else key)
+        result = {
+            "backend": "dual" if dual else storage.backend,
             "object_count": len(rows),
-            "expected_bytes": sum(size_bytes or 0 for _, size_bytes in rows),
+            "expected_bytes": sum(size_bytes or 0 for _, _, size_bytes in rows),
             "verified_count": verified_count,
             "missing": missing,
         }
+        if dual:
+            result["by_backend"] = by_backend
+        return result
 
     async def health_snapshot(
         self,
