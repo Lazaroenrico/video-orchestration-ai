@@ -178,6 +178,53 @@ async def test_generate_clip_tool_delegates_and_returns_artifact():
     ]
 
 
+async def _clip_prompt_for(revision: Any, *, system_prompt: Any = "video prompt") -> Any:
+    """Roda a generate_clip_tool e devolve o system_prompt que chegou no adapter."""
+    from orchestrator.tools.base import tool_context_from_config
+    from orchestrator.tools.video import generate_clip_tool
+
+    adapter = _SpyAdapter(Artifact(kind="clip", uri="mock://clip", meta={"cost_usd": 0.08}))
+    ctx = tool_context_from_config(_config(adapter))
+    await generate_clip_tool(
+        ctx,
+        item_id="item-1",
+        tier="ltx",
+        seconds=8,
+        attempt=1,
+        system_prompt=system_prompt,
+        revision=revision,
+    )
+    return adapter.calls[0][1]["system_prompt"]
+
+
+async def test_generate_clip_tool_appends_revision_after_the_server_brief():
+    """D33: a revision do agent é APENDADA ao brief server-authored, que segue intacto.
+
+    O brief carrega os guardrails de ``_video_prompt`` ("No mock footage..."); o modelo
+    refina a take dentro dele, nunca o revoga.
+    """
+    brief = "Server brief.\n\nNo mock footage. No placeholder frames."
+    prompt = await _clip_prompt_for("tighter framing", system_prompt=brief)
+
+    assert prompt.startswith(brief)  # o brief inteiro sobrevive, no início
+    assert "tighter framing" in prompt
+    assert prompt.index("tighter framing") > prompt.index("No mock footage")
+
+
+@pytest.mark.parametrize("revision", [None, "", "   "])
+async def test_generate_clip_tool_without_revision_keeps_the_prompt_untouched(revision):
+    """Caminho não-agentic (e revision vazia) não pode alterar o prompt — regressão."""
+    assert await _clip_prompt_for(revision) == "video prompt"
+
+
+async def test_generate_clip_tool_revision_without_a_server_prompt():
+    """Sem system_prompt, a diretiva vira o prompt inteiro (sem 'None' concatenado)."""
+    prompt = await _clip_prompt_for("be punchier", system_prompt=None)
+
+    assert "be punchier" in prompt
+    assert "None" not in prompt
+
+
 async def test_qc_check_tool_delegates_and_returns_qc_result():
     from orchestrator.tools.base import tool_context_from_config
     from orchestrator.tools.qc import qc_check_tool
@@ -328,6 +375,7 @@ def test_tool_registry_lists_static_tool_specs():
     specs = {spec.name: spec for spec in TOOL_REGISTRY}
 
     assert set(specs) == {
+        "write_persona",
         "generate_concepts",
         "write_script",
         "build_creator",
@@ -336,6 +384,7 @@ def test_tool_registry_lists_static_tool_specs():
         "assemble_video",
         "upscale_video",
     }
+    assert specs["write_persona"].role == "llm"
     assert specs["generate_concepts"].role == "llm"
     assert specs["generate_clip"].role == "video"
     assert specs["upscale_video"].stage == "upscale"
@@ -395,6 +444,61 @@ def test_tool_registry_lookup_by_name_and_stage():
 
     with pytest.raises(KeyError, match="unknown_tool"):
         get_tool_spec("unknown_tool")
+
+
+def test_tool_registry_exposes_agent_parameter_schemas():
+    """Cada ToolSpec declara um JSON schema dos params controláveis pelo agent.
+
+    Os stages agentic (concepts/scripts na Fase 1; video no D33) expõem ``revision`` — a
+    única alavanca do modelo. offer/n/seed (texto) e item_id/tier/seconds/attempt (vídeo)
+    ficam server-authoritative, injetados pelo run_tool. As tools ainda não agentic
+    declaram schema vazio.
+    """
+    from orchestrator.tools.registry import TOOL_REGISTRY, get_tool_spec
+
+    for spec in TOOL_REGISTRY:
+        assert isinstance(spec.parameters, dict)
+        assert spec.parameters.get("type", "object") == "object"
+
+    for name in ("write_persona", "generate_concepts", "write_script", "generate_clip"):
+        params = get_tool_spec(name).parameters
+        assert "revision" in params["properties"]
+        assert params["properties"]["revision"]["type"] == "string"
+        # nada de params obrigatórios: o modelo pode chamar sem revisão (draft inicial).
+        assert params.get("required", []) == []
+        # o modelo não pode inventar params fora do schema (ex.: tier).
+        assert params["additionalProperties"] is False
+
+    # Stages ainda não agentic seguem sem alavanca para o modelo.
+    for name in ("build_creator", "qc_check", "assemble_video", "upscale_video"):
+        assert get_tool_spec(name).parameters["properties"] == {}
+
+
+def test_generate_clip_schema_keeps_tier_server_authoritative():
+    """``tier`` nunca entra no schema: vem do tier routing e define o custo (D33)."""
+    from orchestrator.tools.registry import get_tool_spec
+
+    props = get_tool_spec("generate_clip").parameters["properties"]
+    for server_owned in ("tier", "item_id", "seconds", "attempt", "system_prompt",
+                         "reference_image_uri"):
+        assert server_owned not in props
+
+
+def test_tool_call_schemas_builds_neutral_schema_for_allowed_tools():
+    """``tool_call_schemas`` monta o contrato neutro (name/description/parameters) que os
+    adapters formatam para o provider (OpenAI function-calling ou Anthropic input_schema)."""
+    from orchestrator.tools.registry import tool_call_schemas
+
+    schemas = tool_call_schemas(("generate_concepts",))
+    assert len(schemas) == 1
+    schema = schemas[0]
+    assert schema["name"] == "generate_concepts"
+    assert schema["description"].strip()
+    assert schema["parameters"]["properties"]["revision"]["type"] == "string"
+
+    # nomes desconhecidos estouram (contrato: só tools registradas viram schema).
+    with pytest.raises(KeyError, match="nope"):
+        tool_call_schemas(("nope",))
 
 
 def test_tool_registry_covers_tool_functions_imported_by_stage_nodes():

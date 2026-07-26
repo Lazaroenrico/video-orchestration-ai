@@ -92,6 +92,35 @@ def _concepts_json(n: int, offer: str = "serum X") -> str:
 
 
 # --------------------------------------------------------------------------- #
+# Teste 0 — write_persona                                                     #
+# --------------------------------------------------------------------------- #
+
+
+async def test_write_persona_returns_expected_text() -> None:
+    persona = "PERSONA: Ana, especialista direta."
+    fake_client = _make_fake_client(_make_response([_make_text_block(persona)]))
+    adapter = AnthropicLLMAdapter(client=fake_client)
+
+    result = await adapter.write_persona(offer="serum X", brief="tom leve")
+
+    assert result == persona
+    prompt = _sent_prompt(fake_client)
+    assert "OFFER: serum X" in prompt
+    assert "BRIEF: tom leve" in prompt
+
+
+async def test_write_persona_revision_appended_to_prompt() -> None:
+    fake_client = _make_fake_client(_make_response([_make_text_block("PERSONA")]))
+    adapter = AnthropicLLMAdapter(client=fake_client)
+
+    await adapter.write_persona(offer="o", revision="mais jovem")
+
+    prompt = _sent_prompt(fake_client)
+    assert "REVISION DIRECTIVE" in prompt
+    assert "mais jovem" in prompt
+
+
+# --------------------------------------------------------------------------- #
 # Teste 1 — generate_concepts: estrutura e chaves obrigatórias               #
 # --------------------------------------------------------------------------- #
 
@@ -665,6 +694,41 @@ async def test_write_script_streams_tokens_when_streaming() -> None:
     assert kinds.count("llm_token") == 2
 
 
+async def test_write_persona_streams_tokens_when_streaming() -> None:
+    import orchestrator.stream_bus as stream_bus
+
+    events: list[dict[str, Any]] = []
+    stream_bus.set_token_callback(events.append)
+    try:
+        final = _make_response([_make_text_block("PERSONA: Ana")])
+        client = _make_streaming_client(["PERSONA", ": Ana"], final)
+        adapter = AnthropicLLMAdapter(client=client)
+        persona = await adapter.write_persona(offer="serum X")
+    finally:
+        stream_bus.clear_token_callback()
+
+    assert persona == "PERSONA: Ana"
+    assert [e["type"] for e in events] == [
+        "llm_start",
+        "llm_token",
+        "llm_token",
+        "llm_end",
+    ]
+    assert {e["stage"] for e in events} == {"persona"}
+    client.messages.stream.assert_called_once()
+
+
+async def test_write_persona_raises_on_refusal() -> None:
+    fake_response = _make_response(
+        content=[_make_text_block("I cannot help with that.")],
+        stop_reason="refusal",
+    )
+    adapter = AnthropicLLMAdapter(client=_make_fake_client(fake_response))
+
+    with pytest.raises(RuntimeError, match="refused"):
+        await adapter.write_persona(offer="bad offer")
+
+
 async def test_generate_concepts_raises_when_no_text_block() -> None:
     fake_response = _make_response([_make_thinking_block()])
     adapter = AnthropicLLMAdapter(client=_make_fake_client(fake_response))
@@ -703,6 +767,24 @@ async def test_generate_concepts_revision_appended_to_prompt() -> None:
     assert "punch up the hook" in prompt
 
 
+async def test_generate_concepts_persona_context_precedes_revision() -> None:
+    client = _make_fake_client(_make_response([_make_text_block(_concepts_json(1))]))
+    adapter = AnthropicLLMAdapter(client=client)
+
+    await adapter.generate_concepts(
+        offer="o",
+        n=1,
+        seed="s",
+        persona="PERSONA: Ana.",
+        revision="punch up the hook",
+    )
+
+    prompt = _sent_prompt(client)
+    assert "PERSONA: Ana." in prompt
+    assert "REVISION DIRECTIVE" in prompt
+    assert prompt.index("PERSONA: Ana.") < prompt.index("REVISION DIRECTIVE")
+
+
 async def test_write_script_revision_appended_to_prompt() -> None:
     client = _make_fake_client(_make_response([_make_text_block("HOOK\nBODY\nCTA")]))
     adapter = AnthropicLLMAdapter(client=client)
@@ -718,39 +800,87 @@ async def test_write_script_revision_appended_to_prompt() -> None:
     assert "tighten CTA" in prompt
 
 
-async def test_run_stage_agent_approves_does_single_tool_call() -> None:
-    client = _make_fake_client(_make_response([_make_text_block("APPROVE")]))
+async def test_write_script_persona_context_precedes_revision() -> None:
+    client = _make_fake_client(_make_response([_make_text_block("HOOK\nBODY\nCTA")]))
     adapter = AnthropicLLMAdapter(client=client)
 
-    calls: list[dict[str, Any]] = []
+    concept = {"id": "c", "offer": "o", "hook": "h", "angle": "problem",
+               "hook_style": "problem", "format": "talking_head"}
+    await adapter.write_script(
+        concept=concept,
+        creator_ref="cr",
+        platform="tiktok",
+        persona="PERSONA: Ana.",
+        revision="tighten CTA",
+    )
 
-    async def run_tool(**inputs: Any) -> Any:
-        calls.append(inputs)
+    prompt = _sent_prompt(client)
+    assert "PERSONA: Ana." in prompt
+    assert "REVISION DIRECTIVE" in prompt
+    assert prompt.index("PERSONA: Ana.") < prompt.index("REVISION DIRECTIVE")
+
+
+def _make_tool_use_block(name: str, input_dict: dict[str, Any] | None = None,
+                         block_id: str = "tu-1") -> types.SimpleNamespace:
+    """Bloco tool_use como o SDK retorna (o modelo decide chamar a tool)."""
+    return types.SimpleNamespace(
+        type="tool_use", id=block_id, name=name, input=input_dict or {}
+    )
+
+
+def _make_fake_client_seq(responses: list[types.SimpleNamespace]) -> MagicMock:
+    """Fake client cujo messages.create devolve uma sequência de respostas."""
+    client = MagicMock()
+    client.messages.create = AsyncMock(side_effect=responses)
+    return client
+
+
+async def test_run_stage_agent_single_tool_call_then_stop() -> None:
+    client = _make_fake_client_seq([
+        _make_response([_make_tool_use_block("generate_concepts")], stop_reason="tool_use"),
+        _make_response([_make_text_block("Looks great, done.")]),  # sem tool_use → para
+    ])
+    adapter = AnthropicLLMAdapter(client=client)
+
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    async def run_tool(tool_name: str, **inputs: Any) -> Any:
+        calls.append((tool_name, inputs))
         return ["draft"]
 
-    result = await adapter.run_stage_agent(
+    run = await adapter.run_stage_agent(
         stage="concepts",
         allowed_tools=("generate_concepts",),
         run_tool=run_tool,
         inputs={"offer": "o", "n": 1, "seed": "s"},
+        system_prompt="Concept agent guardrails.",
     )
 
-    assert result == ["draft"]
-    assert len(calls) == 1
-    assert "revision" not in calls[0]
+    assert run.result == ["draft"]
+    assert calls == [("generate_concepts", {})]
+    assert client.messages.create.call_args_list[0].kwargs["system"] == (
+        "Concept agent guardrails."
+    )
 
 
-async def test_run_stage_agent_refines_does_two_tool_calls() -> None:
-    client = _make_fake_client(_make_response([_make_text_block("Strengthen the hook.")]))
+async def test_run_stage_agent_iterates_with_revision() -> None:
+    client = _make_fake_client_seq([
+        _make_response([_make_tool_use_block("write_script")], stop_reason="tool_use"),
+        _make_response(
+            [_make_tool_use_block("write_script", {"revision": "Strengthen the hook."}, "tu-2")],
+            stop_reason="tool_use",
+        ),
+        _make_response([_make_text_block("Done.")]),
+    ])
     adapter = AnthropicLLMAdapter(client=client, model="claude-opus-4-8")
 
-    calls: list[dict[str, Any]] = []
+    calls: list[tuple[str, dict[str, Any]]] = []
 
-    async def run_tool(**inputs: Any) -> Any:
-        calls.append(inputs)
+    async def run_tool(tool_name: str, **inputs: Any) -> Any:
+        calls.append((tool_name, inputs))
         return f"draft/{inputs.get('revision', '')}"
 
-    result = await adapter.run_stage_agent(
+    run = await adapter.run_stage_agent(
         stage="scripts",
         allowed_tools=("write_script",),
         run_tool=run_tool,
@@ -759,25 +889,62 @@ async def test_run_stage_agent_refines_does_two_tool_calls() -> None:
     )
 
     assert len(calls) == 2
-    assert calls[1]["revision"] == "Strengthen the hook."
-    assert result == "draft/Strengthen the hook."
+    assert calls[1] == ("write_script", {"revision": "Strengthen the hook."})
+    assert run.result == "draft/Strengthen the hook."
 
 
-async def test_agent_critique_refusal_returns_none() -> None:
-    response = _make_response([_make_text_block("whatever")], stop_reason="refusal")
-    adapter = AnthropicLLMAdapter(client=_make_fake_client(response))
+async def test_run_stage_agent_refusal_stops_and_safety_net_runs_tool() -> None:
+    """stop_reason=refusal → sem tool calls; a safety-net garante um output de domínio."""
+    client = _make_fake_client_seq([
+        _make_response([_make_text_block("whatever")], stop_reason="refusal"),
+    ])
+    adapter = AnthropicLLMAdapter(client=client)
 
-    assert await adapter._agent_critique("concepts", ["d"], model="m") is None
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    async def run_tool(tool_name: str, **inputs: Any) -> Any:
+        calls.append((tool_name, inputs))
+        return ["fallback"]
+
+    run = await adapter.run_stage_agent(
+        stage="concepts",
+        allowed_tools=("generate_concepts",),
+        run_tool=run_tool,
+        inputs={"offer": "o"},
+    )
+
+    assert run.result == ["fallback"]
+    assert calls == [("generate_concepts", {})]
 
 
-async def test_agent_critique_no_text_block_returns_none() -> None:
-    response = _make_response([_make_thinking_block()])
-    adapter = AnthropicLLMAdapter(client=_make_fake_client(response))
+async def test_run_stage_agent_respects_step_budget() -> None:
+    # cada step devolve um tool_use — sem budget seria infinito.
+    tool_use = _make_response([_make_tool_use_block("generate_concepts")], stop_reason="tool_use")
+    client = MagicMock()
+    client.messages.create = AsyncMock(return_value=tool_use)
+    adapter = AnthropicLLMAdapter(client=client)
 
-    assert await adapter._agent_critique("concepts", ["d"], model="m") is None
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    async def run_tool(tool_name: str, **inputs: Any) -> Any:
+        calls.append((tool_name, inputs))
+        return "draft"
+
+    await adapter.run_stage_agent(
+        stage="concepts",
+        allowed_tools=("generate_concepts",),
+        run_tool=run_tool,
+        inputs={"offer": "o"},
+        max_steps=2,
+    )
+
+    assert len(calls) == 2  # cortado no budget
 
 
-async def test_agent_critique_empty_directive_returns_none() -> None:
-    adapter = AnthropicLLMAdapter(client=_make_fake_client(_make_response([_make_text_block("  ")])))
+def test_anthropic_summarize_result_falls_back_on_unserializable() -> None:
+    from orchestrator.adapters.anthropic_llm import _summarize_result
 
-    assert await adapter._agent_critique("concepts", ["d"], model="m") is None
+    circular: dict[str, Any] = {}
+    circular["self"] = circular  # referência circular → json.dumps levanta
+    out = _summarize_result(circular)
+    assert isinstance(out, str) and out

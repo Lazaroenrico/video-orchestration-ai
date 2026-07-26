@@ -2,8 +2,14 @@
 import os
 
 import pytest
+from pytest_postgresql import factories
 
 from orchestrator.adapters.mock import MockAdapter
+
+# O projeto valida PostgreSQL em uma instância real e externa ao processo de pytest
+# (Docker no desenvolvimento/CI). Isso evita instalar/binários `pg_ctl` no host e faz
+# cada teste receber um database limpo pelo janitor do próprio pytest-postgresql.
+postgresql = factories.postgresql("postgresql_noproc")
 
 # providers.yaml pode ter adapters reais (MVP). Garantir que todos os testes
 # usem mock — testes que precisam de adapters reais optam via --live.
@@ -26,6 +32,15 @@ def _force_mock_providers(monkeypatch):
     # *defaults* (campo `text`/`voice_id`) não dependam do `.env` local. Testes que
     # precisam dessas vars as setam explicitamente via monkeypatch.
     for key in [k for k in os.environ if k.startswith("REPLICATE_ELEVENLABS_")]:
+        monkeypatch.delenv(key, raising=False)
+    # O ambiente do desenvolvedor pode apontar para PostgreSQL real. Testes continuam
+    # JSON/SQLite por default; casos de integração optam explicitamente via monkeypatch.
+    for key in (
+        "DATABASE_URL",
+        "ORCH_ORGANIZATION_SLUG",
+        "ORCH_ORGANIZATION_NAME",
+        "ORCH_USER_SUBJECT",
+    ):
         monkeypatch.delenv(key, raising=False)
 
 

@@ -144,3 +144,37 @@ async def test_integrity_qc_accepts_data_video_uri():
     qc = await adapter.qc_check(item=item, fail_rate=0.0)
 
     assert qc.passed is True
+
+
+async def test_integrity_qc_ignores_superseded_take_metadata():
+    """A proveniência das takes descartadas (D33) é metadado, não um clip.
+
+    ``meta["superseded_takes"]`` cita uris mock de takes rejeitadas; isso não pode
+    reprovar o item — só os clips de fato anexados contam.
+    """
+    adapter = IntegrityQCAdapter(required_clip_count=2)
+    item = _item_with_clips(
+        Artifact(
+            kind="clip",
+            uri="/media/run/items/item-1/clip-0.mp4",
+            meta={"provider": "replicate", "model": "lightricks/ltx-2.3-fast"},
+        ),
+        Artifact(
+            kind="clip",
+            uri="https://cdn.example.com/product-demo.webm",
+            meta={
+                "provider": "replicate",
+                "model": "lightricks/ltx-2.3-fast",
+                # Proveniência do agent: uma take paga e descartada, com provider mock.
+                "agent_takes": 2,
+                "superseded_takes": [
+                    {"uri": "mock://clip-rejected", "cost_usd": 0.08, "revision": None}
+                ],
+            },
+        ),
+    )
+
+    qc = await adapter.qc_check(item=item, fail_rate=0.34)
+
+    assert qc.passed is True, qc.reasons
+    assert qc.reasons == []

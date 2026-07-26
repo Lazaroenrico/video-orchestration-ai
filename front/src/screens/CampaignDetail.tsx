@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useParams, Link, useNavigate } from "react-router-dom";
+import { useParams, Link, useNavigate } from "react-router";
 import { Card, SectionTitle } from "../components/Card";
 import { Icon } from "../components/Icon";
 import { Button } from "../components/Button";
@@ -13,9 +13,10 @@ import { shortRun, usd, pct } from "../lib/format";
 
 // Canonical pipeline stages (grouped from the backend node vocabulary).
 const STAGES: { key: string; label: string; nodes: string[] }[] = [
-  { key: "roster", label: "Creators", nodes: ["roster", "approval"] },
+  { key: "persona", label: "Persona", nodes: ["persona"] },
   { key: "concepts", label: "Concepts", nodes: ["concepts"] },
   { key: "scripts", label: "Scripts", nodes: ["scripts"] },
+  { key: "roster", label: "Creators", nodes: ["roster", "approval"] },
   { key: "video", label: "Video", nodes: ["ltx", "kling", "seedance", "product_demo"] },
   { key: "qc", label: "QC", nodes: ["qc"] },
   { key: "assembly", label: "Assembly", nodes: ["assembly", "upscale"] },

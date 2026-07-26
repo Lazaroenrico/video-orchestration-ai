@@ -1,0 +1,35 @@
+"""Abstração de storage de mídia (D30).
+
+``LocalMediaStorage`` (mock/dry-run/dev/testes, sem rede) e — a partir da Fase 3 —
+``R2MediaStorage`` (live) implementam o mesmo contrato. LangGraph, nodes, tools e
+adapters continuam operando com ``Artifact`` e metadados normalizados, sem conhecer
+detalhes do backend.
+"""
+from __future__ import annotations
+
+from orchestrator.storage.base import MediaStorage, StoredObject
+from orchestrator.storage.db import (
+    ArtifactDB,
+    ArtifactRecord,
+    ArtifactRepository,
+    open_artifact_repository,
+)
+from orchestrator.storage.factory import build_media_storage
+from orchestrator.storage.local import LocalMediaStorage
+from orchestrator.storage.multi import MultiBackendMediaStorage
+from orchestrator.storage.r2 import R2MediaStorage
+from orchestrator.storage.s3 import S3MediaStorage
+
+__all__ = [
+    "ArtifactDB",
+    "ArtifactRecord",
+    "ArtifactRepository",
+    "LocalMediaStorage",
+    "MediaStorage",
+    "MultiBackendMediaStorage",
+    "R2MediaStorage",
+    "S3MediaStorage",
+    "StoredObject",
+    "build_media_storage",
+    "open_artifact_repository",
+]

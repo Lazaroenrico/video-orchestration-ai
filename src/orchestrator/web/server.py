@@ -13,21 +13,25 @@ import asyncio
 import json
 import os
 import uuid
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import urlparse
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException
+from fastapi import BackgroundTasks, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from langgraph.types import Command
 
 from orchestrator import runner, stream_bus
+from orchestrator.auth import CloudflareAccessMiddleware
 import orchestrator.creator_store as creator_store
+import orchestrator.job_store as job_store
 import orchestrator.prompt_store as prompt_store
+import orchestrator.run_store as run_store
 from orchestrator.config import (
     default_creator_store_path,
     default_db_path,
@@ -35,16 +39,36 @@ from orchestrator.config import (
     default_prompt_store_path,
     default_videos_path,
     load_agent_catalog,
+    load_judge,
     load_pipeline,
     load_providers,
 )
+from orchestrator.db import Database
 from orchestrator.tracing import run_trace_config
 from orchestrator.graph.builder import build_graph
 from orchestrator.graph.checkpoint import open_checkpointer
 from orchestrator.nodes.stages import reroll_creator_voice as reroll_creator_voice_in_stage
 from orchestrator.registry import build_adapter_from_providers
+from orchestrator.storage.factory import build_media_storage
+from orchestrator.storage.r2 import R2MediaStorage
+from orchestrator.storage.resolve import resolve_signed_uris
 
-app = FastAPI(title="UGC Orchestrator")
+@asynccontextmanager
+async def _app_lifespan(app_: FastAPI):
+    database: Database | None = None
+    if os.environ.get("ORCH_AUTH_MODE", "disabled") == "cloudflare_access":
+        database = Database.from_env()
+        await database.open()
+        app_.state.auth_database = database
+    try:
+        yield
+    finally:
+        if database is not None:
+            await database.close()
+
+
+app = FastAPI(title="UGC Orchestrator", lifespan=_app_lifespan)
+app.add_middleware(CloudflareAccessMiddleware)
 
 
 def _cors_origins_from_env() -> list[str]:
@@ -67,6 +91,34 @@ def _install_cors(app_: FastAPI, origins: list[str]) -> None:
 
 
 _install_cors(app, _cors_origins)
+
+
+@app.get("/healthz")
+async def healthz() -> dict[str, str]:
+    """Liveness: o processo respondeu. Não toca config nem IO externo."""
+    return {"status": "ok"}
+
+
+@app.get("/readyz")
+async def readyz() -> JSONResponse:
+    """Readiness: a config carrega e o backend de storage é resolvível.
+
+    Não chama provider pago nem faz request S3 — só valida config e credenciais.
+    """
+    try:
+        load_pipeline()
+        providers = load_providers()
+        load_judge()
+        backend = ((providers or {}).get("storage") or {}).get("backend", "local")
+        if backend == "local":
+            pass
+        elif backend == "r2":
+            R2MediaStorage.from_env()  # valida credenciais R2; não faz request de rede
+        else:
+            raise ValueError(f"unknown storage backend {backend!r}")
+    except Exception as exc:  # readiness: qualquer erro de config = not ready
+        return JSONResponse(status_code=503, content={"status": "not-ready", "reason": str(exc)})
+    return JSONResponse(status_code=200, content={"status": "ready", "storage": backend})
 
 # Front-end SPA ("Kinetic Command", Vite+React) built into front/dist. Repo layout:
 #   <repo>/front/dist/            ← this file is <repo>/src/orchestrator/web/server.py
@@ -94,11 +146,28 @@ _UNBUILT_FALLBACK = (
 # /media/{run_id}/{creator_id}/...; _is_renderable_uri já trata esses paths.
 _media_root = default_media_path()
 _media_root.mkdir(parents=True, exist_ok=True)
-app.mount("/media", StaticFiles(directory=str(_media_root)), name="media")
-
 _videos_root = default_videos_path()
 _videos_root.mkdir(parents=True, exist_ok=True)
-app.mount("/videos", StaticFiles(directory=str(_videos_root)), name="videos")
+
+
+def _serve_local_media_enabled() -> bool:
+    """Se o FastAPI deve servir /media e /videos do disco local.
+
+    Em produção com storage R2 o browser recebe URLs assinadas (D30), então o disco
+    local não precisa ser montado — ADR-D36 exige disco só como temporário. Default
+    ligado para preservar o comportamento local/dev.
+    """
+    return os.environ.get("ORCH_SERVE_LOCAL_MEDIA", "1").strip().lower() not in ("0", "false", "no", "")
+
+
+def _install_media_mounts(app_: FastAPI) -> None:
+    if not _serve_local_media_enabled():
+        return
+    app_.mount("/media", StaticFiles(directory=str(_media_root)), name="media")
+    app_.mount("/videos", StaticFiles(directory=str(_videos_root)), name="videos")
+
+
+_install_media_mounts(app)
 
 # Hashed JS/CSS emitted by Vite (front/dist/assets). Mounted unconditionally with
 # check_dir=False so import works in a Node-less CI/test env (unbuilt front); requests
@@ -111,9 +180,10 @@ app.mount(
 
 # run_id → {queues: list[Queue], buffer: list[dict], done: bool}
 _runs: dict[str, dict[str, Any]] = {}
+_RUN_REPOSITORY_UNSET = object()
 
 PIPELINE_NODES = {
-    "roster", "approval", "concepts", "scripts", "concept_review",
+    "persona", "roster", "approval", "concepts", "scripts", "concept_review",
     "process_item", "feedback",
     "script", "ltx", "kling", "seedance",
     "product_demo", "qc", "assembly", "upscale", "drop",
@@ -126,6 +196,7 @@ ITEM_UPDATE_NODES = {
 }
 
 NODE_LABELS: dict[str, str] = {
+    "persona": "Persona",
     "roster": "Creator Roster",
     "approval": "Aceite Human",
     "concepts": "Conceitos",
@@ -177,6 +248,31 @@ def _to_plain(obj: Any) -> Any:
     return obj
 
 
+def _signing_storage(config_dir: Optional[str]) -> Optional[Any]:
+    """Backend de storage quando ele assina URLs; ``None`` quando não precisa.
+
+    O backend local serve ``/media`` e ``/videos`` direto do disco — não há o que
+    assinar. Config de storage quebrada devolve ``None`` em vez de propagar: um
+    ``providers.yaml`` inválido já derruba o *run* no boot (falha alto, D30), mas não
+    pode cegar o dashboard inteiro, que é justamente onde o operador vai ler o erro.
+    """
+    try:
+        storage = build_media_storage(
+            load_providers(config_dir), root=_media_root, web_prefix="/media",
+        )
+    except Exception:  # noqa: BLE001 — dashboard nunca cai por config de storage
+        return None
+    return storage if getattr(storage, "backend", "local") != "local" else None
+
+
+async def _sign_payload(payload: Any, config_dir: Optional[str]) -> Any:
+    """Troca ponteiros ``r2://`` por signed URLs de TTL curto, só na saída (D30).
+
+    Nunca persiste o resultado: a verdade a montante segue sendo o ``storage_key``.
+    """
+    return await resolve_signed_uris(payload, storage=_signing_storage(config_dir))
+
+
 def _media_type_for_uri(uri: str) -> str:
     lower = uri.lower()
     if lower.startswith("data:image/"):
@@ -201,6 +297,10 @@ def _is_renderable_uri(uri: str) -> bool:
         return _media_type_for_uri(uri) != "reference"
     if uri.startswith("data:"):
         return _media_type_for_uri(uri) in {"image", "video", "audio"}
+    # Ponteiro canônico do R2 (D30): vira signed URL https na saída (``_sign_payload``),
+    # então a UI consegue tocá-lo. Outros schemes seguem sendo referência opaca.
+    if parsed.scheme == "r2":
+        return _media_type_for_uri(uri) != "reference"
     if parsed.scheme:
         return False
     # Path local já servido pelo web app, absoluto ou relativo.
@@ -352,20 +452,22 @@ def _recover_creators_from_media(media_root: Path) -> list[dict[str, Any]]:
     return recovered
 
 
-def _find_creator_for_draft(
-    creator_id: str, creator_run_id: Optional[str] = None,
+async def _find_creator_for_draft_repository(
+    creator_id: str,
+    creator_run_id: Optional[str] = None,
 ) -> dict[str, Any]:
-    """Resolve um creator salvo/reconstruído para reutilizar em um novo run."""
-    for candidates in (
-        creator_store.load_creators(default_creator_store_path()),
-        _recover_creators_from_media(default_media_path()),
-    ):
-        for creator in candidates:
-            if _creator_id(creator) != creator_id:
-                continue
-            if creator_run_id is not None and str(creator.get("run_id") or "") != creator_run_id:
-                continue
-            return _normalize_creator(creator)
+    """Resolve no backend ativo e só cai para varredura local quando necessário."""
+    async with creator_store.open_repository(default_creator_store_path()) as repository:
+        creator = await repository.find_creator(creator_id, creator_run_id)
+    if creator is not None:
+        return _normalize_creator(creator)
+
+    for recovered in _recover_creators_from_media(default_media_path()):
+        if _creator_id(recovered) != creator_id:
+            continue
+        if creator_run_id is not None and str(recovered.get("run_id") or "") != creator_run_id:
+            continue
+        return _normalize_creator(recovered)
 
     detail = f"creator {creator_id!r} not found"
     if creator_run_id is not None:
@@ -581,6 +683,7 @@ async def _execute_run(
     approve_creators: bool = True,
     edit_concepts: bool = True,
     seed_creator: Optional[dict[str, Any]] = None,
+    _run_repository: Any = _RUN_REPOSITORY_UNSET,
 ) -> None:
     """Roda a pipeline completa, emitindo eventos para os subscribers SSE.
 
@@ -588,6 +691,23 @@ async def _execute_run(
     ``awaiting_approval`` e aguarda a resolução do Future criado por
     ``POST /api/approve/{run_id}``, depois retoma com ``Command(resume=...)``.
     """
+    if _run_repository is _RUN_REPOSITORY_UNSET:
+        async with run_store.open_repository() as repository:
+            await _execute_run(
+                run_id,
+                offer,
+                batch,
+                platform,
+                config_dir,
+                db_path,
+                creator_prompt,
+                video_prompt,
+                approve_creators,
+                edit_concepts,
+                seed_creator,
+                repository,
+            )
+        return
 
     def token_cb(event: dict[str, Any]) -> None:
         if event.get("type") == "creator_ready" and isinstance(event.get("creator"), dict):
@@ -693,6 +813,26 @@ async def _execute_run(
                                 run_state.setdefault("item_snapshots", {}),
                             )
                             if item_update:
+                                persisted_items = [
+                                    _safe_serialize(_complete_item_payload(snapshot))
+                                    for snapshot in run_state["item_snapshots"].values()
+                                    if isinstance(snapshot, dict)
+                                ]
+                                if _run_repository is not None:
+                                    await _run_repository.save(
+                                        run_id,
+                                        phase="running",
+                                        state={
+                                            "run_id": run_id,
+                                            "offer": offer,
+                                            "platform": platform,
+                                        },
+                                        summary=runner.summarize({
+                                            "run_id": run_id,
+                                            "results": persisted_items,
+                                        }),
+                                        items=persisted_items,
+                                    )
                                 await _emit(run_id, item_update)
 
                     # Captura o estado final do grafo raiz
@@ -721,38 +861,67 @@ async def _execute_run(
                         if run_state_ref is not None:
                             run_state_ref["concept_edit"] = cfut
                             run_state_ref["pending_concepts"] = concepts
+                        persisted_state = _to_plain(dict(snap.values or {}))
+                        persisted_state["pending_concepts"] = concepts
+                        if _run_repository is not None:
+                            await _run_repository.save(
+                                run_id,
+                                phase="editing",
+                                state=persisted_state,
+                                summary=runner.summarize({
+                                    **dict(snap.values or {}),
+                                    "run_id": run_id,
+                                }),
+                                items=[],
+                            )
                         cdecision = await cfut
                         resume_input = Command(resume=cdecision)
                         continue
                     # NÃO usar **intr_payload aqui: ele carrega seu próprio "type"
                     # ("approve_creators") que sobrescreveria o "awaiting_approval".
+                    pending_creators = [
+                        _normalize_creator(c)
+                        for c in intr_payload.get("creators", [])
+                    ]
                     await _emit(run_id, {
                         "type": "awaiting_approval",
-                        "creators": [
-                            _normalize_creator(c)
-                            for c in intr_payload.get("creators", [])
-                        ],
+                        "creators": pending_creators,
                     })
                     # Cria Future e aguarda decisão via POST /api/approve
                     fut: asyncio.Future = asyncio.get_event_loop().create_future()
                     run_state_ref = _runs.get(run_id)
                     if run_state_ref is not None:
                         run_state_ref["approval"] = fut
-                        run_state_ref["pending_creators"] = [
-                            _normalize_creator(c)
-                            for c in intr_payload.get("creators", [])
-                        ]
+                        run_state_ref["pending_creators"] = pending_creators
+                    persisted_state = _to_plain(dict(snap.values or {}))
+                    persisted_state["pending_creators"] = pending_creators
+                    if _run_repository is not None:
+                        await _run_repository.save(
+                            run_id,
+                            phase="awaiting",
+                            state=persisted_state,
+                            summary=runner.summarize({
+                                **dict(snap.values or {}),
+                                "run_id": run_id,
+                            }),
+                            items=[],
+                        )
                     decision = await fut
-                    # Persiste creators no store
-                    creator_store.record_creators(
-                        store_path, run_id,
-                        decision.get("creators")
-                        or [_normalize_creator(c) for c in intr_payload.get("creators", [])],
-                        approved_ids=decision.get("approved", []),
-                        creator_prompt=creator_prompt,
-                        video_prompt=video_prompt,
-                        offer=offer,
-                    )
+                    # Persiste metadata e ponteiros canônicos; signed URLs nunca entram
+                    # no repositório (D30).
+                    async with creator_store.open_repository(store_path) as creators:
+                        await creators.record_creators(
+                            run_id,
+                            decision.get("creators")
+                            or [
+                                _normalize_creator(c)
+                                for c in intr_payload.get("creators", [])
+                            ],
+                            approved_ids=decision.get("approved", []),
+                            creator_prompt=creator_prompt,
+                            video_prompt=video_prompt,
+                            offer=offer,
+                        )
                     resume_input = Command(resume=decision)
                     continue
                 # Em fluxos com subgrafo + interrupts, o último evento "LangGraph"
@@ -763,6 +932,17 @@ async def _execute_run(
                 break
 
         summary = runner.summarize({**final_output, "run_id": run_id}) if final_output else {}
+        if _run_repository is not None:
+            await _run_repository.save(
+                run_id,
+                phase="done",
+                state=_to_plain(final_output),
+                summary=_safe_serialize(summary),
+                items=[
+                    _item_payload_from_result(item)
+                    for item in (final_output.get("results") or [])
+                ],
+            )
         await _emit(run_id, {"type": "run_end", "run_id": run_id, "summary": summary})
 
     except Exception as exc:  # noqa: BLE001
@@ -772,6 +952,25 @@ async def _execute_run(
         state = _runs.get(run_id)
         if state is not None:
             state["error"] = str(exc)
+        snapshots = (state or {}).get("item_snapshots") or {}
+        items = [
+            _safe_serialize(_complete_item_payload(snapshot))
+            for snapshot in snapshots.values()
+            if isinstance(snapshot, dict)
+        ] if isinstance(snapshots, dict) else []
+        if _run_repository is not None:
+            await _run_repository.save(
+                run_id,
+                phase="error",
+                state={
+                    "run_id": run_id,
+                    "offer": offer,
+                    "platform": platform,
+                },
+                summary={},
+                items=items,
+                error=str(exc),
+            )
         await _emit(run_id, {"type": "error", "message": str(exc)})
 
     finally:
@@ -812,20 +1011,56 @@ async def dashboard() -> HTMLResponse:
 
 @app.post("/api/run")
 async def start_run(req: RunRequest, background_tasks: BackgroundTasks) -> dict[str, str]:
-    seed_creator = (
-        _find_creator_for_draft(req.creator_id, req.creator_run_id)
-        if req.creator_id else None
-    )
+    seed_creator = None
+    if req.creator_id:
+        seed_creator = await _find_creator_for_draft_repository(
+            req.creator_id,
+            req.creator_run_id,
+        )
     run_id = f"web-{uuid.uuid4().hex[:8]}"
-    _runs[run_id] = {"queues": [], "buffer": [], "done": False}
     db_path = req.db or str(default_db_path())
     # Todo run registra o "último prompt usado" por tipo — independente do gate de
     # aprovação (creators.json só persiste prompts quando o gate roda).
-    prompt_store.record_last_used(
-        default_prompt_store_path(),
-        creator_prompt=req.creator_prompt,
-        video_prompt=req.video_prompt,
-    )
+    async with prompt_store.open_repository(default_prompt_store_path()) as prompts:
+        await prompts.record_last_used(
+            creator_prompt=req.creator_prompt,
+            video_prompt=req.video_prompt,
+        )
+    async with job_store.open_repository() as jobs:
+        if jobs is not None:
+            queued = await jobs.enqueue_run(
+                run_id,
+                offer=req.offer,
+                platform=req.platform,
+                batch_size=req.batch,
+                payload={
+                    "offer": req.offer,
+                    "batch": req.batch,
+                    "platform": req.platform,
+                    "config_dir": req.config_dir,
+                    "db_path": db_path,
+                    "creator_prompt": req.creator_prompt,
+                    "video_prompt": req.video_prompt,
+                    "approve_creators": req.approve_creators,
+                    "edit_concepts": req.edit_concepts,
+                    "seed_creator": seed_creator,
+                },
+            )
+            return {"run_id": run_id, "job_id": str(queued.job_id)}
+
+    # No caminho local, API e executor vivem no mesmo processo. No caminho durável,
+    # o job acima guarda só o ponteiro canônico e o Runner assina no consumo.
+    if seed_creator is not None:
+        seed_creator = await _sign_payload(seed_creator, req.config_dir)
+    _runs[run_id] = {"queues": [], "buffer": [], "done": False}
+    async with run_store.open_repository() as runs:
+        if runs is not None:
+            await runs.start(
+                run_id,
+                offer=req.offer,
+                platform=req.platform,
+                batch_size=req.batch,
+            )
     background_tasks.add_task(
         _execute_run,
         run_id, req.offer, req.batch, req.platform, req.config_dir, db_path,
@@ -837,6 +1072,8 @@ async def start_run(req: RunRequest, background_tasks: BackgroundTasks) -> dict[
 
 class ApproveRequest(BaseModel):
     approved: list[str] = []
+    gate_id: Optional[str] = None
+    version: Optional[int] = None
 
 
 @app.post("/api/approve/{run_id}/creators/{creator_id}/reroll-voice")
@@ -867,6 +1104,22 @@ async def reroll_creator_voice(run_id: str, creator_id: str) -> dict[str, Any]:
 
 @app.post("/api/approve/{run_id}")
 async def approve(run_id: str, req: ApproveRequest) -> dict[str, Any]:
+    if os.environ.get("DATABASE_URL"):
+        if req.gate_id is None or req.version is None:
+            raise HTTPException(409, "gate_id e version são obrigatórios")
+        from orchestrator.db import StaleGateError
+
+        async with job_store.open_repository() as jobs:
+            assert jobs is not None
+            try:
+                resume = await jobs.resolve_gate(
+                    uuid.UUID(req.gate_id),
+                    version=req.version,
+                    resolution={"approved": req.approved},
+                )
+            except (ValueError, StaleGateError) as exc:
+                raise HTTPException(409, str(exc)) from exc
+        return {"ok": True, "job_id": str(resume.job_id)}
     st = _runs.get(run_id)
     fut = (st or {}).get("approval")
     if not fut or fut.done():
@@ -882,10 +1135,32 @@ class ConceptEditRequest(BaseModel):
     # Conceitos editados e INCLUÍDOS (os excluídos simplesmente não vêm na lista).
     # Cada item é o dict do conceito com o campo "script" já editado.
     concepts: list[dict[str, Any]] = []
+    gate_id: Optional[str] = None
+    version: Optional[int] = None
 
 
 @app.post("/api/approve/{run_id}/concepts")
 async def submit_concepts(run_id: str, req: ConceptEditRequest) -> dict[str, Any]:
+    if os.environ.get("DATABASE_URL"):
+        if req.gate_id is None or req.version is None:
+            raise HTTPException(409, "gate_id e version são obrigatórios")
+        from orchestrator.db import StaleGateError
+
+        async with job_store.open_repository() as jobs:
+            assert jobs is not None
+            try:
+                resume = await jobs.resolve_gate(
+                    uuid.UUID(req.gate_id),
+                    version=req.version,
+                    resolution={"concepts": req.concepts},
+                )
+            except (ValueError, StaleGateError) as exc:
+                raise HTTPException(409, str(exc)) from exc
+        return {
+            "ok": True,
+            "count": len(req.concepts),
+            "job_id": str(resume.job_id),
+        }
     st = _runs.get(run_id)
     fut = (st or {}).get("concept_edit")
     if not fut or fut.done():
@@ -903,23 +1178,24 @@ class PromptTemplateRequest(BaseModel):
 
 @app.get("/api/prompts")
 async def prompts_index() -> dict[str, Any]:
-    """Templates salvos + último prompt usado por tipo (fonte: prompts.json)."""
+    """Templates salvos + último prompt usado, em PostgreSQL ou JSON local."""
     store_path = default_prompt_store_path()
-    return {
-        "templates": prompt_store.list_templates(store_path),
-        "last_used": prompt_store.get_last_used(store_path),
-        "store_path": str(store_path),
-        "exists": store_path.exists(),
-    }
+    async with prompt_store.open_repository(store_path) as prompts:
+        return {
+            "templates": await prompts.list_templates(),
+            "last_used": await prompts.get_last_used(),
+            "store_path": prompts.location,
+            "exists": prompts.exists,
+        }
 
 
 @app.post("/api/prompts")
 async def save_prompt_template(req: PromptTemplateRequest) -> dict[str, Any]:
     try:
-        saved = prompt_store.save_template(
-            default_prompt_store_path(),
-            kind=req.kind, title=req.title, text=req.text, desc=req.desc,
-        )
+        async with prompt_store.open_repository(default_prompt_store_path()) as prompts:
+            saved = await prompts.save_template(
+                kind=req.kind, title=req.title, text=req.text, desc=req.desc,
+            )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
     return {"ok": True, "template": saved}
@@ -927,29 +1203,36 @@ async def save_prompt_template(req: PromptTemplateRequest) -> dict[str, Any]:
 
 @app.delete("/api/prompts/{template_id}")
 async def delete_prompt_template(template_id: str) -> dict[str, Any]:
-    if not prompt_store.delete_template(default_prompt_store_path(), template_id):
-        raise HTTPException(status_code=404, detail=f"template {template_id!r} not found")
+    async with prompt_store.open_repository(default_prompt_store_path()) as prompts:
+        if not await prompts.delete_template(template_id):
+            raise HTTPException(status_code=404, detail=f"template {template_id!r} not found")
     return {"ok": True}
 
 
 @app.get("/api/creators")
 async def creators_history() -> dict[str, Any]:
     store_path = default_creator_store_path()
-    creators = [
-        _normalize_creator_history(c)
-        for c in creator_store.load_creators(str(store_path))
-        if _has_complete_media(c)
-    ]
+    async with creator_store.open_repository(store_path) as repository:
+        creators = [
+            _normalize_creator_history(c)
+            for c in await repository.load_creators()
+            if _has_complete_media(c)
+        ]
+        location = repository.location
+        exists = repository.exists
     if not creators:
         creators = [
             _normalize_creator_history(c)
             for c in _recover_creators_from_media(default_media_path())
         ]
-    return {
-        "creators": creators,
-        "store_path": str(store_path),
-        "exists": store_path.exists(),
-    }
+    return await _sign_payload(
+        {
+            "creators": creators,
+            "store_path": location,
+            "exists": exists,
+        },
+        None,
+    )
 
 
 @app.get("/api/integrations")
@@ -963,7 +1246,60 @@ async def integrations_index(config_dir: Optional[str] = None) -> dict[str, Any]
 
 
 @app.get("/api/stream/{run_id}")
-async def stream_events(run_id: str) -> StreamingResponse:
+async def stream_events(
+    run_id: str,
+    config_dir: Optional[str] = None,
+    last_event_id: Optional[str] = Header(
+        default=None,
+        alias="Last-Event-ID",
+    ),
+) -> StreamingResponse:
+    if os.environ.get("DATABASE_URL"):
+        after_seq = 0
+        if isinstance(last_event_id, str) and last_event_id:
+            try:
+                after_seq = int(last_event_id)
+            except ValueError as exc:
+                raise HTTPException(400, "Last-Event-ID inválido") from exc
+        async with run_store.open_repository() as runs:
+            persisted = await runs.get(run_id) if runs is not None else None
+        if persisted is None:
+            raise HTTPException(status_code=404, detail=f"run {run_id!r} not found")
+        storage = _signing_storage(config_dir)
+
+        async def generate_persisted():
+            cursor = after_seq
+            while True:
+                async with job_store.open_repository() as jobs:
+                    assert jobs is not None
+                    events = await jobs.list_events(run_id, after_seq=cursor)
+                for event in events:
+                    cursor = event.seq
+                    payload = await resolve_signed_uris(
+                        {**event.data, "type": event.event_type},
+                        storage=storage,
+                    )
+                    yield (
+                        f"id: {event.seq}\n"
+                        f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                    )
+                async with run_store.open_repository() as runs:
+                    snapshot = await runs.get(run_id) if runs is not None else None
+                if snapshot is not None and snapshot.phase in {"done", "error"}:
+                    yield 'data: {"type": "stream_end"}\n\n'
+                    return
+                await asyncio.sleep(1)
+
+        return StreamingResponse(
+            generate_persisted(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+                "Connection": "keep-alive",
+            },
+        )
+
     state = _runs.get(run_id)
     if state is None:
         raise HTTPException(status_code=404, detail=f"run {run_id!r} not found")
@@ -979,6 +1315,12 @@ async def stream_events(run_id: str) -> StreamingResponse:
     else:
         state["queues"].append(q)
 
+    # Uma vez por stream, não por evento: cada chamada reconstrói o client boto3, e um
+    # stream longo emite centenas de eventos. O TTL da URL só começa a correr no yield,
+    # então assinar aqui (e não no _emit) é o que mantém o buffer de replay com o
+    # ponteiro canônico — URL assinada vence, ponteiro não.
+    storage = _signing_storage(config_dir)
+
     async def generate():
         try:
             while True:
@@ -990,6 +1332,7 @@ async def stream_events(run_id: str) -> StreamingResponse:
                 if event is None:
                     yield "data: {\"type\": \"stream_end\"}\n\n"
                     return
+                event = await resolve_signed_uris(event, storage=storage)
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
         finally:
             qs = _runs.get(run_id, {}).get("queues", [])
@@ -1013,11 +1356,39 @@ async def list_runs_endpoint(db: Optional[str] = None) -> dict[str, Any]:
     # `active` = só o que está realmente rodando; runs concluídos ou quebrados saem
     # daqui (senão a lista os rotularia "Generating" para sempre). `errored` deixa a
     # UI marcar os que falharam como "Failed".
-    errored = [rid for rid, s in _runs.items() if s.get("error")]
-    active = [
-        rid for rid, s in _runs.items() if not s.get("error") and not s.get("done")
-    ]
-    return {"runs": runner.list_runs(db_path), "active": active, "errored": errored}
+    persisted_ids: list[str] = []
+    persisted_errors: list[str] = []
+    persisted_active: list[str] = []
+    postgres_enabled = False
+    async with run_store.open_repository() as runs:
+        if runs is not None:
+            postgres_enabled = True
+            index = await runs.list_index()
+            persisted_ids = [entry.run_id for entry in index]
+            persisted_errors = [
+                entry.run_id
+                for entry in index
+                if entry.phase == "error" or entry.error
+            ]
+            persisted_active = [
+                entry.run_id
+                for entry in index
+                if entry.phase in {"running", "editing", "awaiting"}
+                and not entry.error
+            ]
+    if postgres_enabled:
+        errored = persisted_errors
+        active = persisted_active
+        known = persisted_ids
+    else:
+        errored = [rid for rid, state in _runs.items() if state.get("error")]
+        active = [
+            rid
+            for rid, state in _runs.items()
+            if not state.get("error") and not state.get("done")
+        ]
+        known = runner.list_runs(db_path)
+    return {"runs": known, "active": active, "errored": errored}
 
 
 @app.get("/api/status/{run_id}")
@@ -1026,7 +1397,11 @@ async def run_status(run_id: str, config_dir: Optional[str] = None, db: Optional
     db_path = db or str(default_db_path())
     state = await runner.get_status(pipeline, db_path=db_path, run_id=run_id)
     if state is None:
-        raise HTTPException(status_code=404, detail=f"run {run_id!r} not found")
+        async with run_store.open_repository() as runs:
+            persisted = await runs.get(run_id) if runs is not None else None
+        if persisted is None:
+            raise HTTPException(status_code=404, detail=f"run {run_id!r} not found")
+        return persisted.summary
     return runner.summarize({**state, "run_id": run_id})
 
 
@@ -1036,12 +1411,16 @@ async def run_state(run_id: str, config_dir: Optional[str] = None, db: Optional[
     db_path = db or str(default_db_path())
     checkpoint_state = await runner.get_status(pipeline, db_path=db_path, run_id=run_id)
     runtime_state = _runs.get(run_id)
-    if checkpoint_state is None and runtime_state is None:
+    async with run_store.open_repository() as runs:
+        persisted = await runs.get(run_id) if runs is not None else None
+    if checkpoint_state is None and runtime_state is None and persisted is None:
         raise HTTPException(status_code=404, detail=f"run {run_id!r} not found")
 
     summary: dict[str, Any] | None = None
     if checkpoint_state is not None:
         summary = runner.summarize({**checkpoint_state, "run_id": run_id})
+    elif persisted is not None:
+        summary = persisted.summary
     if summary is None and runtime_state is not None:
         for event in reversed(runtime_state.get("buffer") or []):
             if event.get("type") == "run_end" and isinstance(event.get("summary"), dict):
@@ -1069,7 +1448,9 @@ async def run_state(run_id: str, config_dir: Optional[str] = None, db: Optional[
         (runtime_state or {}).get("item_snapshots")
         if runtime_state is not None else None
     )
-    if isinstance(runtime_snapshots, dict) and runtime_snapshots:
+    if checkpoint_state is None and persisted is not None and not runtime_snapshots:
+        items = [_safe_serialize(item) for item in persisted.items]
+    elif isinstance(runtime_snapshots, dict) and runtime_snapshots:
         snapshots: dict[str, dict[str, Any]] = {}
         order: list[str] = []
         for result in checkpoint_results:
@@ -1097,7 +1478,11 @@ async def run_state(run_id: str, config_dir: Optional[str] = None, db: Optional[
     else:
         items = [_item_payload_from_result(item) for item in checkpoint_results]
 
-    phase = _runtime_phase(runtime_state, summary)
+    phase = (
+        _runtime_phase(runtime_state, summary)
+        if runtime_state is not None
+        else persisted.phase if persisted is not None else _runtime_phase(None, summary)
+    )
     edit_concepts: list[dict[str, Any]] = []
     awaiting: list[dict[str, Any]] = []
     if runtime_state is not None and phase == "editing":
@@ -1106,22 +1491,41 @@ async def run_state(run_id: str, config_dir: Optional[str] = None, db: Optional[
             for c in runtime_state.get("pending_concepts") or []
             if isinstance(c, dict)
         ]
+    elif persisted is not None and phase == "editing":
+        edit_concepts = [
+            _safe_serialize(c)
+            for c in persisted.state.get("pending_concepts") or []
+            if isinstance(c, dict)
+        ]
     if runtime_state is not None and phase == "awaiting":
         awaiting = [
             _normalize_creator(c)
             for c in runtime_state.get("pending_creators") or []
             if isinstance(c, dict)
         ]
+    elif persisted is not None and phase == "awaiting":
+        awaiting = [
+            _normalize_creator(c)
+            for c in persisted.state.get("pending_creators") or []
+            if isinstance(c, dict)
+        ]
 
-    return {
-        "run_id": run_id,
-        "phase": phase,
-        "items": items,
-        "edit_concepts": edit_concepts,
-        "awaiting": awaiting,
-        "summary": summary,
-        "error": runtime_state.get("error") if runtime_state is not None else None,
-    }
+    return await _sign_payload(
+        {
+            "run_id": run_id,
+            "phase": phase,
+            "items": items,
+            "edit_concepts": edit_concepts,
+            "awaiting": awaiting,
+            "summary": summary,
+            "error": (
+                runtime_state.get("error")
+                if runtime_state is not None
+                else persisted.error if persisted is not None else None
+            ),
+        },
+        config_dir,
+    )
 
 
 # --------------------------------------------------------------------------- #

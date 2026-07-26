@@ -7,12 +7,25 @@ import uuid
 from pathlib import Path
 from typing import Any, Optional
 
+from langgraph.types import Command
+
 from orchestrator.agent_catalog import AgentCatalog, default_agent_catalog
-from orchestrator.feedback_store import load_latest_feedback
+from orchestrator.config import (
+    default_artifacts_db_path,
+    default_media_path,
+    default_videos_path,
+)
+import orchestrator.feedback_store as _feedback_store
 from orchestrator.graph.builder import build_graph
 from orchestrator.graph.checkpoint import open_checkpointer
 from orchestrator.graph.state import Item
 from orchestrator.registry import build_adapter_from_providers
+from orchestrator.storage.db import (
+    ArtifactDB,
+    ArtifactRepository,
+    open_artifact_repository,
+)
+from orchestrator.storage.factory import build_media_storage
 from orchestrator.tracing import run_trace_config
 
 
@@ -23,16 +36,33 @@ def _build_config(
     platform: str,
     feedback_store: Optional[str | Path] = None,
     agent_catalog: Optional[AgentCatalog] = None,
+    artifact_repository: Optional[ArtifactRepository] = None,
+    run_options: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     adapter = build_adapter_from_providers(providers, pipeline)
     catalog = agent_catalog or default_agent_catalog()
+
+    # Storage e DB de artifacts (D30) são resolvidos uma vez por run, como o adapter:
+    # construí-los por chamada recriaria o client S3 a cada clip.
+    if artifact_repository is None:
+        artifact_repository = ArtifactDB(default_artifacts_db_path())
+        artifact_repository.setup()
+
     configurable: dict[str, Any] = {
         "adapter": adapter,
         "pipeline": pipeline,
         "agent_catalog": catalog,
         "run": {"platform": platform},
         "thread_id": run_id,
+        "media_storage": build_media_storage(
+            providers, root=default_media_path(), web_prefix="/media",
+        ),
+        "videos_storage": build_media_storage(
+            providers, root=default_videos_path(), web_prefix="/videos",
+        ),
+        "artifact_db": artifact_repository,
     }
+    configurable["run"].update(run_options or {})
     if feedback_store is not None:
         configurable["feedback_store"] = str(feedback_store)
     return {
@@ -53,22 +83,40 @@ async def run_pipeline(
     platform: str = "tiktok",
     feedback_store: Optional[str | Path] = None,
     agent_catalog: Optional[AgentCatalog] = None,
+    run_options: Optional[dict[str, Any]] = None,
 ) -> tuple[str, dict[str, Any]]:
     run_id = run_id or f"run-{uuid.uuid4().hex[:8]}"
-    cfg = _build_config(pipeline, providers, run_id, platform, feedback_store, agent_catalog)
-    cfg.update(run_trace_config(run_id, offer=offer, platform=platform, batch=batch))
-    # Step 10 -> Step 1: lê o feedback do ciclo anterior (se houver) e o injeta no
-    # estado inicial, fechando o loop (concepts pode usar isso como viés no futuro).
-    prior = load_latest_feedback(feedback_store) if feedback_store is not None else None
-    prior_styles = (prior or {}).get("winning_styles", [])
-    init = {
-        "run_id": run_id,
-        "config": {"offer": offer, "batch_size": batch, "prior_winning_styles": prior_styles},
-    }
-    async with open_checkpointer(db_path) as cp:
-        app = build_graph(pipeline, checkpointer=cp)
-        out = await app.ainvoke(init, cfg)
-    return run_id, out
+    async with open_artifact_repository(default_artifacts_db_path()) as artifact_repository:
+        cfg = _build_config(
+            pipeline,
+            providers,
+            run_id,
+            platform,
+            feedback_store,
+            agent_catalog,
+            artifact_repository,
+            run_options,
+        )
+        cfg.update(run_trace_config(run_id, offer=offer, platform=platform, batch=batch))
+        # Step 10 -> Step 1: lê o feedback do ciclo anterior (se houver) e o injeta no
+        # estado inicial, fechando o loop (concepts pode usar isso como viés no futuro).
+        prior = None
+        if feedback_store is not None:
+            async with _feedback_store.open_repository(feedback_store) as repository:
+                prior = await repository.load_latest_feedback()
+        prior_styles = (prior or {}).get("winning_styles", [])
+        init = {
+            "run_id": run_id,
+            "config": {
+                "offer": offer,
+                "batch_size": batch,
+                "prior_winning_styles": prior_styles,
+            },
+        }
+        async with open_checkpointer(db_path) as cp:
+            app = build_graph(pipeline, checkpointer=cp)
+            out = await app.ainvoke(init, cfg)
+        return run_id, out
 
 
 async def run_cycles(
@@ -116,13 +164,52 @@ async def resume_pipeline(
     platform: str = "tiktok",
     feedback_store: Optional[str | Path] = None,
     agent_catalog: Optional[AgentCatalog] = None,
+    resume_value: Any = None,
+    run_options: Optional[dict[str, Any]] = None,
 ) -> tuple[str, dict[str, Any]]:
-    cfg = _build_config(pipeline, providers, run_id, platform, feedback_store, agent_catalog)
-    cfg.update(run_trace_config(run_id, platform=platform))
+    async with open_artifact_repository(default_artifacts_db_path()) as artifact_repository:
+        cfg = _build_config(
+            pipeline,
+            providers,
+            run_id,
+            platform,
+            feedback_store,
+            agent_catalog,
+            artifact_repository,
+            run_options,
+        )
+        cfg.update(run_trace_config(run_id, platform=platform))
+        async with open_checkpointer(db_path) as cp:
+            app = build_graph(pipeline, checkpointer=cp)
+            resume_input = (
+                Command(resume=resume_value)
+                if resume_value is not None
+                else None
+            )
+            out = await app.ainvoke(resume_input, cfg)
+        return run_id, out
+
+
+async def get_interrupt(
+    pipeline: dict[str, Any],
+    *,
+    db_path: str | Path,
+    run_id: str,
+) -> Optional[dict[str, Any]]:
+    """Devolve o primeiro gate pendente do checkpoint, se existir."""
     async with open_checkpointer(db_path) as cp:
         app = build_graph(pipeline, checkpointer=cp)
-        out = await app.ainvoke(None, cfg)  # None => retoma do checkpoint
-    return run_id, out
+        snapshot = await app.aget_state(
+            {"configurable": {"thread_id": run_id}}
+        )
+    if snapshot is None:
+        return None
+    for task in snapshot.tasks or []:
+        interrupts = getattr(task, "interrupts", ())
+        if interrupts:
+            value = interrupts[0].value
+            return value if isinstance(value, dict) else {"type": "unknown"}
+    return None
 
 
 async def get_status(

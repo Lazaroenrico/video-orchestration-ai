@@ -18,3 +18,10 @@ node_modules/
 htmlcov/
 coverage.xml
 .env
+
+# IaC / deploy local state
+.terraform/
+*.tfstate
+*.tfstate.*
+*.auto.tfvars
+*.tfplan

@@ -54,6 +54,40 @@ def _concepts_payload(n: int, *, with_ids: bool = True) -> str:
 
 
 # --------------------------------------------------------------------------- #
+# write_persona                                                               #
+# --------------------------------------------------------------------------- #
+
+
+async def test_write_persona_returns_text_and_includes_brief():
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["prompt"] = json.loads(request.content)["messages"][0]["content"]
+        return _chat_response("PERSONA: Ana, especialista direta.")
+
+    adapter = _adapter_with(handler)
+    out = await adapter.write_persona(offer="serum X", brief="tom leve")
+
+    assert out == "PERSONA: Ana, especialista direta."
+    assert "OFFER: serum X" in captured["prompt"]
+    assert "BRIEF: tom leve" in captured["prompt"]
+
+
+async def test_write_persona_revision_appended_to_prompt():
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["prompt"] = json.loads(request.content)["messages"][0]["content"]
+        return _chat_response("PERSONA")
+
+    adapter = _adapter_with(handler)
+    await adapter.write_persona(offer="o", revision="mais jovem")
+
+    assert "REVISION DIRECTIVE" in captured["prompt"]
+    assert "mais jovem" in captured["prompt"]
+
+
+# --------------------------------------------------------------------------- #
 # generate_concepts                                                           #
 # --------------------------------------------------------------------------- #
 
@@ -130,6 +164,29 @@ async def test_generate_concepts_revision_appended_to_prompt():
     await adapter.generate_concepts(offer="o", n=1, seed="s", revision="punch up the hook")
     assert "REVISION DIRECTIVE" in captured["prompt"]
     assert "punch up the hook" in captured["prompt"]
+
+
+async def test_generate_concepts_persona_context_precedes_revision():
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["prompt"] = json.loads(request.content)["messages"][0]["content"]
+        return _chat_response(_concepts_payload(1))
+
+    adapter = _adapter_with(handler)
+    await adapter.generate_concepts(
+        offer="o",
+        n=1,
+        seed="s",
+        persona="PERSONA: Ana.",
+        revision="punch up the hook",
+    )
+
+    assert "PERSONA: Ana." in captured["prompt"]
+    assert "REVISION DIRECTIVE" in captured["prompt"]
+    assert captured["prompt"].index("PERSONA: Ana.") < captured["prompt"].index(
+        "REVISION DIRECTIVE"
+    )
 
 
 async def test_generate_concepts_raises_on_missing_choices():
@@ -215,71 +272,234 @@ async def test_write_script_revision_appended():
     assert "tighten CTA" in captured["prompt"]
 
 
+async def test_write_script_persona_context_precedes_revision():
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["prompt"] = json.loads(request.content)["messages"][0]["content"]
+        return _chat_response("script")
+
+    adapter = _adapter_with(handler)
+    await adapter.write_script(
+        concept={"id": "c"},
+        creator_ref="cr",
+        platform="tiktok",
+        persona="PERSONA: Ana.",
+        revision="tighten CTA",
+    )
+
+    assert "PERSONA: Ana." in captured["prompt"]
+    assert "REVISION DIRECTIVE" in captured["prompt"]
+    assert captured["prompt"].index("PERSONA: Ana.") < captured["prompt"].index(
+        "REVISION DIRECTIVE"
+    )
+
+
 # --------------------------------------------------------------------------- #
-# run_stage_agent / _agent_critique                                           #
+# run_stage_agent — loop de tool-calling (Fase 1)                             #
 # --------------------------------------------------------------------------- #
 
 
-async def test_run_stage_agent_approves_does_single_tool_call():
-    tool_calls: list[dict[str, Any]] = []
+def _tool_call_response(name: str, arguments: str = "{}") -> httpx.Response:
+    """Resposta OpenAI-compatible com um tool_call (o modelo decide chamar a tool)."""
+    return httpx.Response(
+        200,
+        json={
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": f"call-{name}",
+                                "type": "function",
+                                "function": {"name": name, "arguments": arguments},
+                            }
+                        ],
+                    }
+                }
+            ],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+        },
+    )
 
-    async def run_tool(**inputs: Any) -> Any:
-        tool_calls.append(inputs)
+
+def _queued_handler(responses: list[httpx.Response]):
+    """Handler que consome respostas em fila; a última repete (ex.: 'stop')."""
+    state = {"i": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        i = min(state["i"], len(responses) - 1)
+        state["i"] += 1
+        return responses[i]
+
+    return handler
+
+
+async def test_run_stage_agent_single_tool_call_then_stop():
+    calls: list[tuple[str, dict[str, Any]]] = []
+    captured: list[dict[str, Any]] = []
+
+    async def run_tool(tool_name: str, **inputs: Any) -> Any:
+        calls.append((tool_name, inputs))
         return ["draft-concept"]
 
-    adapter = _adapter_with(lambda req: _chat_response("APPROVE"))
-    result = await adapter.run_stage_agent(
+    queued = _queued_handler([
+        _tool_call_response("generate_concepts"),
+        _chat_response("Looks great, done."),  # sem tool_calls → para
+    ])
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(request.content))
+        return queued(request)
+
+    adapter = _adapter_with(handler)
+    run = await adapter.run_stage_agent(
         stage="concepts",
         allowed_tools=("generate_concepts",),
         run_tool=run_tool,
         inputs={"offer": "o", "n": 1, "seed": "s"},
         target_model="anthropic/claude-opus-4.8",
+        system_prompt="Concept agent guardrails.",
     )
 
-    assert result == ["draft-concept"]
-    assert len(tool_calls) == 1  # sem refino
-    assert "revision" not in tool_calls[0]
+    assert run.result == ["draft-concept"]
+    assert calls == [("generate_concepts", {})]
+    assert captured[0]["messages"][0] == {
+        "role": "system",
+        "content": "Concept agent guardrails.",
+    }
 
 
-async def test_run_stage_agent_refines_does_two_tool_calls():
-    tool_calls: list[dict[str, Any]] = []
+async def test_run_stage_agent_iterates_with_revision():
+    calls: list[tuple[str, dict[str, Any]]] = []
 
-    async def run_tool(**inputs: Any) -> Any:
-        tool_calls.append(inputs)
+    async def run_tool(tool_name: str, **inputs: Any) -> Any:
+        calls.append((tool_name, inputs))
         return f"draft/{inputs.get('revision', '')}"
 
-    adapter = _adapter_with(lambda req: _chat_response("Strengthen the hook."))
-    result = await adapter.run_stage_agent(
+    handler = _queued_handler([
+        _tool_call_response("write_script"),  # draft inicial
+        _tool_call_response("write_script", '{"revision": "Strengthen the hook."}'),
+        _chat_response("Done."),  # para
+    ])
+    adapter = _adapter_with(handler)
+    run = await adapter.run_stage_agent(
         stage="scripts",
         allowed_tools=("write_script",),
         run_tool=run_tool,
         inputs={"concept": {"id": "c"}, "creator_ref": "cr", "platform": "tiktok"},
     )
 
-    assert len(tool_calls) == 2
-    assert tool_calls[1]["revision"] == "Strengthen the hook."
-    assert result == "draft/Strengthen the hook."
+    assert len(calls) == 2
+    assert calls[1] == ("write_script", {"revision": "Strengthen the hook."})
+    assert run.result == "draft/Strengthen the hook."
 
 
-async def test_agent_critique_approve_returns_none():
-    adapter = _adapter_with(lambda req: _chat_response("APPROVE"))
-    assert await adapter._agent_critique("concepts", ["d"], model="m") is None
+async def test_run_stage_agent_respects_step_budget():
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    async def run_tool(tool_name: str, **inputs: Any) -> Any:
+        calls.append((tool_name, inputs))
+        return "draft"
+
+    # O modelo sempre pede outra tool call; sem budget seria infinito.
+    handler = _queued_handler([_tool_call_response("generate_concepts")])
+    adapter = _adapter_with(handler)
+    await adapter.run_stage_agent(
+        stage="concepts",
+        allowed_tools=("generate_concepts",),
+        run_tool=run_tool,
+        inputs={"offer": "o"},
+        max_steps=2,
+    )
+
+    assert len(calls) == 2  # cortado no budget
 
 
-async def test_agent_critique_empty_returns_none():
-    adapter = _adapter_with(lambda req: _chat_response("   "))
-    # conteúdo em branco levanta em _message_text → capturado → aprova (None)
-    assert await adapter._agent_critique("concepts", ["d"], model="m") is None
+async def test_run_stage_agent_safety_net_when_model_never_calls_tool():
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    async def run_tool(tool_name: str, **inputs: Any) -> Any:
+        calls.append((tool_name, inputs))
+        return ["fallback-draft"]
+
+    # O modelo responde sem nenhum tool_call de cara; a safety-net roda a tool primária.
+    adapter = _adapter_with(lambda req: _chat_response("I think we're done."))
+    run = await adapter.run_stage_agent(
+        stage="concepts",
+        allowed_tools=("generate_concepts",),
+        run_tool=run_tool,
+        inputs={"offer": "o"},
+    )
+
+    assert run.result == ["fallback-draft"]
+    assert calls == [("generate_concepts", {})]
 
 
-async def test_agent_critique_http_failure_returns_none():
-    adapter = _adapter_with(lambda req: httpx.Response(500, json={"error": "boom"}))
-    assert await adapter._agent_critique("concepts", ["d"], model="m") is None
+async def test_run_stage_agent_ignores_tool_outside_allowlist():
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    async def run_tool(tool_name: str, **inputs: Any) -> Any:
+        calls.append((tool_name, inputs))
+        return "draft"
+
+    handler = _queued_handler([
+        _tool_call_response("delete_everything"),  # fora da allowlist → não roda
+        _tool_call_response("generate_concepts"),
+        _chat_response("Done."),
+    ])
+    adapter = _adapter_with(handler)
+    await adapter.run_stage_agent(
+        stage="concepts",
+        allowed_tools=("generate_concepts",),
+        run_tool=run_tool,
+        inputs={"offer": "o"},
+    )
+
+    assert ("delete_everything", {}) not in calls
+    assert calls == [("generate_concepts", {})]
 
 
-async def test_agent_critique_returns_directive():
-    adapter = _adapter_with(lambda req: _chat_response("Tighten the CTA line."))
-    assert await adapter._agent_critique("scripts", "s", model="m") == "Tighten the CTA line."
+async def test_run_stage_agent_safety_net_on_malformed_response():
+    """Resposta sem ``choices`` → brain trata como 'sem tool call'; safety-net roda a tool."""
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    async def run_tool(tool_name: str, **inputs: Any) -> Any:
+        calls.append((tool_name, inputs))
+        return ["draft"]
+
+    adapter = _adapter_with(lambda req: httpx.Response(200, json={}))  # sem choices
+    run = await adapter.run_stage_agent(
+        stage="concepts",
+        allowed_tools=("generate_concepts",),
+        run_tool=run_tool,
+        inputs={"offer": "o"},
+    )
+
+    assert run.result == ["draft"]
+    assert calls == [("generate_concepts", {})]
+
+
+def test_gateway_parse_tool_calls_tolerates_bad_arguments():
+    from orchestrator.adapters.gateway_llm import _GatewayAgentBrain
+
+    calls = _GatewayAgentBrain._parse_tool_calls(
+        {"tool_calls": [{"id": "x", "function": {"name": "generate_concepts", "arguments": "{bad"}}]}
+    )
+    assert len(calls) == 1
+    assert calls[0].name == "generate_concepts"
+    assert calls[0].arguments == {}  # JSON inválido → dict vazio
+
+
+def test_gateway_summarize_result_falls_back_on_unserializable():
+    from orchestrator.adapters.gateway_llm import _summarize_result
+
+    circular: dict[str, Any] = {}
+    circular["self"] = circular  # referência circular → json.dumps levanta
+    out = _summarize_result(circular)
+    assert isinstance(out, str) and out
 
 
 # --------------------------------------------------------------------------- #
@@ -300,6 +520,24 @@ async def test_uses_own_client_when_not_injected(monkeypatch):
 
     out = await adapter.generate_concepts(offer="o", n=1, seed="s")
     assert len(out) == 1
+
+
+async def test_uses_own_client_when_not_injected_while_streaming(monkeypatch, stream_events):
+    """Espelho do teste acima no ramo de streaming: produção não injeta client."""
+    import orchestrator.adapters.gateway_llm as gateway_llm
+
+    real_async_client = httpx.AsyncClient
+    transport = httpx.MockTransport(lambda req: _sse([_delta(_concepts_payload(1))]))
+    monkeypatch.setattr(
+        gateway_llm.httpx, "AsyncClient",
+        lambda *a, **k: real_async_client(transport=transport, base_url=BASE),
+    )
+    adapter = GatewayLLMAdapter(base_url=BASE, token=TOKEN)  # sem client
+
+    out = await adapter.generate_concepts(offer="o", n=1, seed="s")
+
+    assert len(out) == 1
+    assert [e["type"] for e in stream_events] == ["llm_start", "llm_token", "llm_end"]
 
 
 # --------------------------------------------------------------------------- #
@@ -350,3 +588,186 @@ def test_build_gateway_llm_adapter_base_url_override(monkeypatch):
     monkeypatch.setenv("AI_GATEWAY_BASE_URL", "https://custom.gw/v1")
     adapter = build_gateway_llm_adapter({})
     assert adapter.base_url == "https://custom.gw/v1"
+
+
+# --------------------------------------------------------------------------- #
+# Streaming SSE (Fase 3) — paridade com o AnthropicLLMAdapter                  #
+# --------------------------------------------------------------------------- #
+
+
+def _sse(chunks: list[dict[str, Any]], *, done: bool = True) -> httpx.Response:
+    """Resposta SSE OpenAI-compatible (``data: {...}`` por linha)."""
+    body = "".join(f"data: {json.dumps(c)}\n\n" for c in chunks)
+    if done:
+        body += "data: [DONE]\n\n"
+    return httpx.Response(200, content=body.encode(), headers={"content-type": "text/event-stream"})
+
+
+def _delta(text: str) -> dict[str, Any]:
+    return {"choices": [{"delta": {"content": text}}]}
+
+
+@pytest.fixture
+def stream_events():
+    """Ativa o stream_bus e coleta os eventos emitidos."""
+    import orchestrator.stream_bus as stream_bus
+
+    events: list[dict[str, Any]] = []
+    stream_bus.set_token_callback(events.append)
+    try:
+        yield events
+    finally:
+        stream_bus.clear_token_callback()
+
+
+async def test_generate_concepts_streams_tokens_when_streaming(stream_events):
+    """Com o bus ativo, os deltas SSE viram llm_token e o resultado final é idêntico."""
+    payload = _concepts_payload(1)
+    seen: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(json.loads(request.content))
+        # quebra o JSON em 3 pedaços, como o modelo faria
+        thirds = [payload[:5], payload[5:20], payload[20:]]
+        return _sse(
+            [_delta(t) for t in thirds]
+            + [{"choices": [], "usage": {"prompt_tokens": 9, "completion_tokens": 4}}]
+        )
+
+    adapter = _adapter_with(handler)
+    concepts = await adapter.generate_concepts(offer="serum", n=1, seed="s")
+
+    # O output de domínio não muda por causa do streaming.
+    assert len(concepts) == 1
+    assert concepts[0]["offer"] == "serum"
+    # O pedido saiu como stream, pedindo usage no chunk final.
+    assert seen[0]["stream"] is True
+    assert seen[0]["stream_options"] == {"include_usage": True}
+    # Eventos: start, N tokens, end — todos com o stage.
+    assert stream_events[0] == {"type": "llm_start", "stage": "concepts"}
+    assert stream_events[-1] == {"type": "llm_end", "stage": "concepts"}
+    tokens = [e["token"] for e in stream_events if e["type"] == "llm_token"]
+    assert "".join(tokens) == payload
+    assert all(e["stage"] == "concepts" for e in stream_events)
+
+
+async def test_write_script_streams_tokens_with_the_concept_stage_label(stream_events):
+    """O label do stage carrega o id do conceito — a UI separa um script por card."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _sse([_delta("HOOK: "), _delta("buy now")])
+
+    adapter = _adapter_with(handler)
+    out = await adapter.write_script(
+        concept={"id": "concept-0007", "offer": "o"}, creator_ref="c", platform="tiktok"
+    )
+
+    assert out == "HOOK: buy now"
+    assert {e["stage"] for e in stream_events} == {"script:concept-0007"}
+
+
+async def test_write_persona_streams_tokens_with_persona_stage(stream_events):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _sse([_delta("PERSONA: "), _delta("Ana")])
+
+    adapter = _adapter_with(handler)
+    out = await adapter.write_persona(offer="serum")
+
+    assert out == "PERSONA: Ana"
+    assert {e["stage"] for e in stream_events} == {"persona"}
+
+
+async def test_streaming_records_usage_from_the_final_chunk(stream_events, monkeypatch):
+    """O usage vem no último chunk SSE; sem isso o custo do run seria subnotificado."""
+    from orchestrator.adapters import gateway_llm
+
+    recorded: list[Any] = []
+    monkeypatch.setattr(gateway_llm, "record_llm_usage", lambda u, m: recorded.append((u, m)))
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _sse(
+            [_delta(_concepts_payload(1))]
+            + [{"choices": [], "usage": {"prompt_tokens": 31, "completion_tokens": 12}}]
+        )
+
+    await _adapter_with(handler).generate_concepts(offer="serum", n=1, seed="s")
+
+    assert recorded == [({"input_tokens": 31, "output_tokens": 12}, DEFAULT_GATEWAY_LLM_MODEL)]
+
+
+async def test_no_streaming_keeps_the_plain_post():
+    """Sem bus ativo (CLI/testes), o corpo não pede stream — comportamento intacto."""
+    seen: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(json.loads(request.content))
+        return _chat_response(_concepts_payload(1))
+
+    await _adapter_with(handler).generate_concepts(offer="serum", n=1, seed="s")
+
+    assert "stream" not in seen[0]
+    assert "stream_options" not in seen[0]
+
+
+async def test_agent_brain_never_streams(stream_events):
+    """O loop agentic não streama: quem streama é a chamada de domínio (paridade D31).
+
+    Evita ter de remontar ``tool_calls`` fragmentados do SSE, e é o que a UI espera —
+    o usuário vê o conceito sendo escrito, não a deliberação do agent.
+    """
+    seen: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"role": "assistant", "content": "done"}}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+            },
+        )
+
+    async def run_tool(tool_name: str, **kwargs: Any) -> Any:
+        return ["draft"]
+
+    adapter = _adapter_with(handler)
+    run = await adapter.run_stage_agent(
+        stage="concepts",
+        allowed_tools=("generate_concepts",),
+        run_tool=run_tool,
+        inputs={"offer": "o"},
+    )
+
+    assert run.result == ["draft"]
+    assert all("stream" not in body for body in seen)
+    assert stream_events == []
+
+
+async def test_streaming_http_error_still_raises_with_the_gateway_body(stream_events):
+    """Erro no stream preserva o corpo do gateway (diagnóstico) e não emite tokens."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, content=b"model not allowed")
+
+    adapter = _adapter_with(handler, max_retries=0, backoff_base=0)
+    with pytest.raises(httpx.HTTPStatusError, match="model not allowed"):
+        await adapter.generate_concepts(offer="serum", n=1, seed="s")
+
+    assert not [e for e in stream_events if e["type"] == "llm_token"]
+
+
+async def test_streaming_ignores_malformed_sse_lines(stream_events):
+    """Keep-alives, comentários e JSON quebrado não derrubam o stream."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = (
+            ": keep-alive\n\n"
+            "data: not-json\n\n"
+            f"data: {json.dumps(_delta(_concepts_payload(1)))}\n\n"
+            "data: [DONE]\n\n"
+        )
+        return httpx.Response(200, content=body.encode())
+
+    concepts = await _adapter_with(handler).generate_concepts(offer="serum", n=1, seed="s")
+
+    assert len(concepts) == 1

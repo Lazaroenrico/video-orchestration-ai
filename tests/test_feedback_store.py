@@ -9,7 +9,12 @@ Cobre:
 import json
 import pytest
 
-from orchestrator.feedback_store import save_feedback, load_feedback, load_latest_feedback
+from orchestrator.feedback_store import (
+    JsonFeedbackRepository,
+    load_feedback,
+    load_latest_feedback,
+    save_feedback,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -134,6 +139,19 @@ def test_output_is_deterministic_json(tmp_path):
     # Re-serialise with same settings; must match (sort_keys=True, indent=2)
     expected = json.dumps(parsed, indent=2, sort_keys=True)
     assert content == expected
+
+
+async def test_json_repository_exposes_location_existence_and_run_lookup(tmp_path):
+    store = tmp_path / "feedback.json"
+    repository = JsonFeedbackRepository(store)
+
+    assert repository.location == str(store)
+    assert repository.exists is False
+
+    await repository.save_feedback("run-001", SAMPLE_SUMMARY)
+
+    assert repository.exists is True
+    assert await repository.load_feedback("run-001") == SAMPLE_SUMMARY
 
 
 # ---------------------------------------------------------------------------

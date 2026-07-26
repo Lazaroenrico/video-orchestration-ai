@@ -438,3 +438,176 @@ Datas absolutas. Apendar novas decisões ao final.
   Anthropic, cobreto offline via `httpx.MockTransport` (cliente injetável). Streaming de
   token do LLM fica fora desta fase (não-streaming). `config/providers.yaml` não muda —
   `llm: vercel_gateway_llm` passa a resolver o adapter gateway-nativo.
+
+### D32 — Loop de tool-calling real (substitui o wrapper critique→refine bounded)
+- **Contexto:** o D31 entregou um wrapper agentic *fixo* de 2 passos (draft → critique →
+  refine ×1): o modelo só devolvia uma diretiva de texto ou `APPROVE`, sem receber schemas
+  de tools nem escolher tools. O D29 marcou "tool-calling real / live-by-default agents"
+  como fora de escopo, exigindo ADR próprio — este.
+- **Decisão:** `AgentPort.run_stage_agent` passa a rodar um **loop de tool-calling real**
+  (ReAct bounded). O modelo recebe os schemas das tools permitidas (`tool_call_schemas`
+  no `tools/registry.py`), decide **quais** chamar e **com que args**, e itera multi-pass
+  até parar (sem tool call) ou estourar `agent.max_steps` (novo knob em `pipeline.yaml`,
+  default `_agent_loop.DEFAULT_MAX_STEPS=4`). O loop compartilhado vive em
+  `adapters/_agent_loop.py` (budget, allowlist, fronteira D29 e safety-net num só lugar);
+  os brains provider-específicos (`_GatewayAgentBrain` OpenAI function-calling,
+  `_AnthropicAgentBrain` `tool_use` do SDK, `_MockAgentBrain` determinístico) fazem a
+  ponte com o modelo.
+- **Fronteiras / segurança:** o `StageToolRunner` vira `run_tool(tool_name, **inputs)` — o
+  agent **nomeia** a tool; o stage executor valida o nome contra `allowed_tools` (D29) e
+  mantém offer/n/seed/etc. **server-authoritative**, filtrando os args do modelo apenas
+  para os params declarados no schema da tool (hoje só `revision`). Safety-net: se o modelo
+  nunca chamar uma tool válida, a tool primária roda uma vez — o stage sempre produz output
+  de domínio válido. Agent execution segue restrito a `concepts`/`scripts` (`_AGENT_STAGES`).
+- **Consequência:** o motor deixa de ser um wrapper fixo e passa a ter um agente que
+  escolhe/itera tools de verdade, coberto offline (MockTransport / fake SDK client /
+  brain determinístico), sem custo. Multi-tool por stage e agentificar mídia continuam
+  fora de escopo (Fase 2); streaming e judge proxy, fora (Fase 3).
+
+### D33 — Stage `video` agentic: revision apendada, contabilidade de takes e budget por stage
+- **Contexto:** o D32 entregou o loop de tool-calling real, mas restrito a `concepts`/
+  `scripts` — `_AGENT_STAGES` bloqueava mídia e o D29 exigia ADR próprio para liberá-la.
+  Mídia é onde o agente pode agregar mais (reagir a uma take ruim ou a uma falha do
+  provider) e também onde errar custa dinheiro de verdade: cada take é uma cobrança.
+- **Decisão:** `video` entra em `_AGENT_STAGES`. O agent controla **um** parâmetro,
+  `revision` — uma diretiva de uma linha **apendada** ao brief construído pelo server
+  (`_video_prompt`), que sempre vence. Reusa o nome `revision` dos stages de texto: os
+  brains já ensinam esse vocabulário no system prompt, então nenhum prompt muda.
+- **Fronteiras:** `tier` **nunca** entra no schema — vem do tier routing (conditional edge)
+  e define o custo (`seedance` ≈ 17x `ltx`); o `product_demo` fixa `ltx` de propósito.
+  Idem `item_id`, `seconds`, `attempt` (vem do loop de QC), `system_prompt` e
+  `reference_image_uri`. O filtro `safe_inputs` do stage executor (D32) já garante isso:
+  o que não está em `properties` o modelo não alcança.
+- **Erros viram feedback:** uma exceção da tool dentro do loop vira tool_result de erro e
+  volta ao modelo, que pode ajustar a `revision` e tentar de novo dentro do budget. Se o
+  budget acabar **sem nenhum sucesso**, o último erro **propaga** — o stage nunca retorna
+  sucesso falso, e a safety-net não roda (seria outra chamada paga fadada ao mesmo erro).
+- **Contabilidade de takes:** `run_agent_loop` passa a devolver `AgentRunResult` (output
+  final + todas as `ToolAttempt`). O node de vídeo cobra **todas** as takes bem-sucedidas,
+  não só a vencedora — antes o custo do run mentiria. As descartadas **não** vão para
+  `item.clips`: o `IntegrityQCAdapter` valida cada clip do item, então uma take rejeitada
+  reprovaria o item inteiro e furaria `qc.required_clip_count`. Elas ficam como
+  proveniência no meta do clip final (`agent_takes`, `superseded_takes` com
+  uri/cost_usd/revision). Os bytes não são persistidos: ninguém os consome, e o custo já
+  está contabilizado. **Limitação conhecida:** uma take que falhe *depois* de o provider
+  cobrar não é contabilizada (exigiria custo no path de exceção do adapter).
+- **Budget por stage:** `agent.max_steps_by_stage.video: 2` (uma take base + uma revisão),
+  porque uma rodada de texto custa centavos e uma de vídeo, dólares. E `max_tool_calls`
+  (novo): `max_steps` conta **rodadas do modelo**, não chamadas de tool — um único step
+  pode pedir N takes, então só o cap de chamadas segura o custo de fato.
+- **Assimetria deliberada:** nos stages de texto o `revision` é repassado ao adapter, que o
+  apenda ao prompt lá dentro; em vídeo o append acontece **na tool**, para o `VideoPort` e
+  os adapters (`mock`, `replicate_video`) não mudarem.
+- **Consequência:** o agent passa a dirigir geração de mídia, coberto offline (adapter
+  agentic fake + brain determinístico) e sem custo. `config-mock` mantém `video` em modo
+  tool (dry-run barato); o caminho agentic é provado por testes de node e por um e2e do
+  grafo inteiro. `roster`/`assembly`/`upscale` seguem fora até terem contrato de artefato
+  próprio; multi-tool por stage segue YAGNI (nenhum stage tem 2 tools legítimas).
+
+### D34 — Streaming de tokens no GatewayLLMAdapter (SSE)
+- **Contexto:** o D31 deixou streaming de fora e só o `AnthropicLLMAdapter` emitia tokens
+  (via `messages.stream` do SDK). Mas o adapter LLM **default do perfil live** é o
+  `GatewayLLMAdapter` — ou seja, na prática o dashboard nunca via token nenhum.
+- **Decisão:** `_chat` ganha um parâmetro `stage`. Quando `stage` é informado **e** há um
+  subscriber no `stream_bus`, o POST vai com `"stream": true` e a resposta é consumida como
+  SSE, emitindo `llm_start`/`llm_token`/`llm_end` — os mesmos eventos que o front já
+  consome (`useRunStream.ts`), sem mudança de contrato.
+- **`stage` como gate:** só chamadas que **nomeiam um stage** podem streamar. As rodadas de
+  decisão do agent (`_GatewayAgentBrain.complete`) não passam `stage` e portanto nunca
+  streamam — paridade com o Anthropic, e evita ter de remontar `tool_calls` fragmentados
+  do SSE (deltas indexados com `arguments` em pedaços). O usuário vê o conceito sendo
+  escrito, não a deliberação do agent.
+- **Shape único:** `_consume_sse` remonta `{"choices":[{"message":{"content": ...}}],
+  "usage": ...}` — o equivalente ao `get_final_message()` do SDK Anthropic. Streaming muda
+  **como** o texto chega, não **o que** o modelo produz, então `_message_text` e
+  `record_llm_usage` seguem inalterados e quem chama não sabe qual ramo rodou.
+- **Custo:** o SSE OpenAI-compatible omite `usage` por padrão — sem
+  `stream_options: {"include_usage": true}` o custo do run seria zero. Pedimos o usage e o
+  lemos do chunk final. Se ainda assim vier ausente, `_openai_usage_to_metric(None)` devolve
+  zeros — exatamente o que o caminho não-streaming já faz; sem novo modo de falha.
+- **Retry:** seguro streamando **por construção**: `_is_retryable` (`_retry.py`) só cobre
+  erros pré-envio (`ConnectError`/`ConnectTimeout`/`PoolTimeout`) e `429`, todos anteriores
+  ao 1º token; falha no meio do stream é `ReadTimeout`, explicitamente não retentável. Logo
+  um retry nunca reemite tokens. O `llm_start` só sai **depois** do status OK, para um
+  retry pré-envio não piscar a UI.
+- **Bug de UI corrigido junto (front):** em modo agent o mesmo stage gera mais de uma vez
+  (draft -> revisão), e o reducer acumulava `text` entre gerações — a 2ª grudava na 1ª e o
+  painel mostrava dois JSONs concatenados. `llm_start` passa a zerar o buffer do stage
+  ("nova geração começando"). Era pré-existente (valia para o Anthropic), mas só ficou
+  visível ao ligar streaming no adapter default.
+- **Consequência:** o dashboard mostra tokens ao vivo no perfil live. Coberto offline com
+  `httpx.MockTransport` servindo SSE. Judge proxy e R2 (D30) seguem fora.
+
+## 2026-07-16
+
+### D35 — Persona batch-level e system prompts por stage agentic
+- **Contexto:** `concepts`, `scripts` e `creator` não compartilhavam um retrato de **quem
+  fala** — cada stage inferia o tom do próprio `offer`, e nada garantia que o creator do
+  roster fosse a mesma pessoa que o script imaginava. Em paralelo, os stages agentic
+  (D31–D33) rodavam **sem system prompt próprio**: o único guardrail era a tool tipada, que
+  restringe o *formato* da saída, não o comportamento do agent.
+- **Persona é um stage do top graph, não um campo de config:** `graph/builder.py` passa a
+  rodar `persona -> concepts -> scripts -> concept_review -> roster`, com `node_persona`
+  como step 0. Ser um node (e não uma string no `pipeline.yaml`) é o que dá as três
+  propriedades que interessam: `BatchState.persona` é **checkpointado** (logo o run é
+  resumível com a mesma persona), a persona aparece na timeline como qualquer outro stage,
+  e ela pode ser **gerada por um agent** com a mesma máquina dos demais — `write_persona`
+  é uma typed tool como as outras, e `persona` entrou em `_AGENT_STAGES`.
+- **Persona é reusada, não recopiada:** vai como parâmetro para `generate_concepts` e
+  `write_script`, e prefixa o `creator_prompt` no `node_roster` via `_prompt_with_persona`.
+  O prompt seguro de imagem **não** é tocado — a persona descreve quem fala, não o que a
+  imagem mostra, e misturar os dois reabriria o risco de conteúdo que o provider recusa.
+  Nos tools a persona só é repassada `if persona is not None`, então adapter que não a
+  aceite segue funcionando.
+- **Determinismo preservado, ao custo de um ajuste no mock:** a persona entra no hash do
+  mock, o que mudou a distribuição do viés de feedback e quebrou
+  `test_feedback_loop_biases_next_cycle`. A correção foi no **mock** (slots enviesados
+  privilegiam `bias[0]`), não no teste: o comportamento desejado — o vencedor do ciclo
+  anterior domina o próximo — era o que o teste afirmava, e o mock é que o violava.
+- **System prompt por stage = `_shared.md` + prompt do stage:** cada stage agentic declara
+  `system_prompt_path` no `agents.yaml`; `_load_system_prompt` (`agent_catalog.py`)
+  concatena as regras comuns de `prompts/agents/_shared.md` com o prompt do stage. Prompt
+  como **arquivo versionado**, não string em Python: revisável em diff, editável sem
+  redeploy de código. O `_shared.md` é opcional por construção (se não existir, vale só o
+  prompt do stage), então um `config-dir` mínimo continua válido.
+- **Path é validado no load, não no uso:** `system_prompt_path` absoluto ou com `..` é
+  `ValueError`, assim como arquivo ausente ou vazio. O caminho vem de YAML que o operador
+  edita, então o loader trata como entrada não confiável e falha cedo — um prompt vazio que
+  passasse silenciosamente viraria um agent sem guardrail nenhum.
+- **O texto do prompt não vaza para a API:** `AgentCatalog.as_dict()` expõe
+  `system_prompt_path` e `has_system_prompt` (booleano), nunca o `system_prompt` resolvido.
+  O texto só trafega internamente, do catálogo para `run_stage_agent`.
+- **Perfis divergem por executor, não por prompt:** `config/agents.yaml` usa
+  `executor: agent`; `config-mock/agents.yaml` usa `executor: tool`, com os mesmos prompts
+  no disco. Dry-run segue offline, determinístico e de custo zero.
+- **Consequência:** todo stage downstream tem acesso à persona, e cada stage agentic tem
+  guardrail próprio versionado. Segue fora: `roster`/`assembly`/`upscale` agentic, judge
+  proxy ao vivo, R2 (D30).
+
+### D36 — Cloudflare na borda, containers para Python e contratos portáveis para AWS
+- **Contexto:** R2 já está em produção via API S3 (D30), mas o estado de run ainda é
+  SQLite/JSON local e o servidor mantém jobs, aprovações e buffer SSE em memória. Isso
+  impede recuperação correta após restart e não suporta múltiplas instâncias. Um run pode
+  conter montagem com timeout de 900 segundos; consumidor de Cloudflare Queues limita wall
+  time a 15 minutos. O produto também precisa poder migrar para AWS sem reescrever o motor.
+- **Decisão:** publicar SPA, WAF e autenticação de borda na Cloudflare Worker; manter
+  FastAPI e LangGraph em Containers Linux/amd64, separados em API e Runner. PostgreSQL
+  torna-se a fonte canônica de negócio e do checkpointer (`AsyncPostgresSaver`); uma fila
+  abstrata apenas acorda o Runner. R2/S3 ficam atrás do contrato atual de storage. A borda
+  não guarda estado de negócio, e Durable Objects não serão fonte canônica.
+- **Durabilidade:** criar `runs`, `jobs`, `outbox`, `run_gates` e `run_events`. Jobs usam
+  lease e idempotency key; interrupt encerra o job, aprovação cria resume job; SSE faz
+  replay por sequência e `Last-Event-ID`. Assim, reinício, reentrega de fila e reconexão
+  não duplicam chamada paga nem perdem aprovação/evento.
+- **Identidade:** Cloudflare Access/OIDC pode proteger a borda inicialmente, mas a API
+  valida JWT e resolve `users`/`organizations`/memberships no PostgreSQL. `organization_id`
+  entra em todo dado de cliente, com RLS como defesa adicional. Na AWS, Cognito ou outro
+  IdP troca apenas a emissão do JWT, não o modelo de autorização.
+- **Portabilidade:** mesma imagem OCI roda em Cloudflare Containers e ECS Fargate; Cloudflare
+  Queues mapeia para SQS; R2 para S3; PostgreSQL externo para RDS/Aurora; Worker/Access/WAF
+  pode ser mantido na frente ou mapeado para CloudFront/WAF/OIDC. Nenhum node LangGraph,
+  tool ou adapter de domínio conhece SDK/binding de plataforma.
+- **Consequência:** hospedar exige as fases de PostgreSQL e execução durável antes do primeiro
+  tráfego de produção. A ADR detalhada `docs/ADR-D36-cloudflare-aws-portability.md` é o
+  plano, com critérios de aceite e exercício de migração AWS. Nenhuma infraestrutura foi
+  provisionada por esta decisão.

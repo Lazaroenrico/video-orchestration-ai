@@ -13,3 +13,7 @@ adapters:
   assembly: mock
   upscale: mock
   judge: gateway   # informativo: 'judge' não está em ROLES, não é instanciado no run
+
+# Onde os bytes de mídia pousam (D30). Local = disco, sem rede e sem credencial.
+storage:
+  backend: local

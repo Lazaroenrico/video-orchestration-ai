@@ -1,18 +1,30 @@
-# Catalogo declarativo para D29/Fase 3.
-# Nesta fase o runtime continua direto: LangGraph node -> typed tool -> adapter.
+# Catalogo declarativo para D29.
+# concepts/scripts (Fase 0) e video (D33) rodam o loop de tool-calling real pelo adapter
+# llm (run_stage_agent). No video o agent so controla `revision` (diretiva de refino da
+# take): tier vem do tier routing e define o custo; attempt vem do loop de QC.
+# roster/qc/assembly/upscale seguem em modo tool direto (node -> typed tool -> adapter).
 stages:
+  persona:
+    executor: agent
+    tools: [write_persona]
+    target_model: null
+    target_agent: persona-agent
+    system_prompt_path: prompts/agents/persona.md
+    agent_enabled: true
   concepts:
-    executor: tool
+    executor: agent
     tools: [generate_concepts]
     target_model: null
-    target_agent: null
-    agent_enabled: false
+    target_agent: concept-agent
+    system_prompt_path: prompts/agents/concepts.md
+    agent_enabled: true
   scripts:
-    executor: tool
+    executor: agent
     tools: [write_script]
     target_model: null
-    target_agent: null
-    agent_enabled: false
+    target_agent: script-agent
+    system_prompt_path: prompts/agents/scripts.md
+    agent_enabled: true
   roster:
     executor: tool
     tools: [build_creator]
@@ -20,11 +32,12 @@ stages:
     target_agent: null
     agent_enabled: false
   video:
-    executor: tool
+    executor: agent
     tools: [generate_clip]
-    target_model: null
-    target_agent: null
-    agent_enabled: false
+    target_model: null # null = modelo default do adapter llm (o brain vem do papel llm)
+    target_agent: video-agent
+    system_prompt_path: prompts/agents/video.md
+    agent_enabled: true
   qc:
     executor: tool
     tools: [qc_check]

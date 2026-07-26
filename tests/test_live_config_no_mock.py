@@ -1,7 +1,7 @@
 """Live config must not route production roles to mock adapters."""
 from __future__ import annotations
 
-from orchestrator.config import load_pipeline, load_providers
+from orchestrator.config import load_agent_catalog, load_pipeline, load_providers
 
 
 def test_live_config_routes_all_runtime_roles_to_non_mock_adapters():
@@ -23,3 +23,34 @@ def test_live_config_disables_replicate_mock_fallback():
     pipeline = load_pipeline("config")
 
     assert pipeline["video"]["allow_mock_fallback"] is False
+
+
+def test_live_config_activates_agent_mode_on_llm_and_video_stages():
+    """O perfil live roda agentic em concepts/scripts (Fase 0) e video (D33).
+
+    roster/qc/assembly/upscale seguem em modo tool: agentificá-los exige contrato de
+    artefato próprio, testado, e um ADR próprio.
+    """
+    catalog = load_agent_catalog("config")
+
+    for stage in ("concepts", "scripts", "video"):
+        spec = catalog.stage(stage)
+        assert spec.executor == "agent", f"{stage} deveria rodar em modo agent"
+        assert spec.agent_enabled is True, f"{stage} precisa de agent_enabled: true"
+
+    for stage in ("roster", "qc", "assembly", "upscale"):
+        spec = catalog.stage(stage)
+        assert spec.executor == "tool", f"{stage} deve permanecer em modo tool"
+        assert spec.agent_enabled is False
+
+
+def test_live_config_caps_the_video_agent_budget():
+    """Vídeo custa por take: budget e cap de calls menores que o global (D33).
+
+    Sem o cap de *calls*, ``max_steps`` não segura o custo — um step pode pedir N takes.
+    """
+    pipeline = load_pipeline("config")
+    agent = pipeline["agent"]
+
+    assert agent["max_steps_by_stage"]["video"] < agent["max_steps"]
+    assert agent["max_tool_calls_by_stage"]["video"] == 2

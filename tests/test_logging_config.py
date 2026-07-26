@@ -6,6 +6,7 @@ timestamp, nível e contexto, em vez de sumirem no 'last resort' do Python.
 """
 from __future__ import annotations
 
+import json
 import logging
 
 
@@ -42,3 +43,30 @@ def test_configure_logging_invalid_level_falls_back_to_info(monkeypatch):
     monkeypatch.setenv("ORCHESTRATOR_LOG_LEVEL", "NOPE")
     configure_logging()
     assert logging.getLogger().level == logging.INFO
+
+
+def test_json_logging_emits_operational_correlation_fields(monkeypatch, capsys):
+    from orchestrator.logging_config import configure_logging
+
+    monkeypatch.setenv("ORCHESTRATOR_LOG_FORMAT", "json")
+    configure_logging()
+
+    logging.getLogger("orchestrator.worker").warning(
+        "lease expired",
+        extra={
+            "event": "job.lease_expired",
+            "run_id": "run-42",
+            "job_id": "job-7",
+            "organization_id": "org-3",
+        },
+    )
+
+    payload = json.loads(capsys.readouterr().err)
+    assert payload["level"] == "WARNING"
+    assert payload["logger"] == "orchestrator.worker"
+    assert payload["message"] == "lease expired"
+    assert payload["event"] == "job.lease_expired"
+    assert payload["run_id"] == "run-42"
+    assert payload["job_id"] == "job-7"
+    assert payload["organization_id"] == "org-3"
+    assert payload["timestamp"].endswith("Z")

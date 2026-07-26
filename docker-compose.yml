@@ -1,0 +1,70 @@
+services:
+  app:
+    build:
+      context: .
+    image: orchestrator:dev
+    command: ["api", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "8000:8000"
+    environment:
+      # Servir mídia do disco local no dev (em prod fica 0 → URL assinada R2).
+      ORCH_SERVE_LOCAL_MEDIA: "1"
+      # Storage via MinIO (backend r2 do providers.yaml apontando p/ o endpoint local).
+      R2_ENDPOINT_URL: "http://minio:9000"
+      R2_ACCOUNT_ID: "local"
+      R2_ACCESS_KEY_ID: "minioadmin"
+      R2_SECRET_ACCESS_KEY: "minioadmin"
+      R2_BUCKET: "ugc-dev"
+      # Fundação PostgreSQL/RLS da Fase 2.
+      DATABASE_URL: "postgresql://orchestrator:orchestrator@postgres:5432/orchestrator"
+      ORCH_ORGANIZATION_SLUG: "local"
+      ORCH_ORGANIZATION_NAME: "Local Development"
+      ORCH_USER_SUBJECT: "local|developer"
+    volumes:
+      - orchestrator-state:/app/.orchestrator
+    depends_on:
+      - minio
+      - postgres
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: "minioadmin"
+      MINIO_ROOT_PASSWORD: "minioadmin"
+    ports:
+      - "9000:9000"   # API S3
+      - "9001:9001"   # console web
+    volumes:
+      - minio-data:/data
+
+  # PostgreSQL 16 usado pelas migrações e repositórios da Fase 2.
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: "postgres"
+      POSTGRES_PASSWORD: "postgres"
+      POSTGRES_DB: "orchestrator"
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./infra/postgres/10-app-role.sql:/docker-entrypoint-initdb.d/10-app-role.sql:ro
+
+volumes:
+  orchestrator-state:
+  minio-data:
+  postgres-data:
+
+
+
+# ============================================================================
+# Ambiente de desenvolvimento local (ADR-D36, Fases 1-2).
+# Sobe a mesma imagem OCI de produção + um S3-compatible (MinIO) + PostgreSQL.
+#
+#   docker compose up --build
+#   → dashboard/API em http://localhost:8000/  (health: /healthz e /readyz)
+#
+# O modo mock sem DATABASE_URL continua em SQLite. Com DATABASE_URL, `migrate`
+# aplica Alembic; os repositórios de negócio são ligados incrementalmente na Fase 2.
+# ============================================================================

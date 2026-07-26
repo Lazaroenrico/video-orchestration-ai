@@ -1,5 +1,814 @@
 # PROGRESS — handoff
 
+## D36 — Plano Cloudflare com portabilidade AWS (2026-07-16)
+
+Foi documentado o plano em `docs/ADR-D36-cloudflare-aws-portability.md`; **nenhuma
+infraestrutura ou codigo de producao foi alterado**. A ordem obrigatoria antes de qualquer
+deploy e: imagem OCI API/Runner -> PostgreSQL e `AsyncPostgresSaver` -> jobs/gates/eventos
+duraveis -> Worker/Containers/Queues Cloudflare -> operacao -> exercicio ECS/SQS/S3.
+
+O ponto que nao pode ser pulado e substituir `_runs`, `BackgroundTasks`, `Future` e o buffer
+SSE em memoria por fonte de verdade PostgreSQL. R2 ja esta portavel por S3; o compute so fica
+portavel de verdade depois que essa persistencia existir. A D30 continua correta ao dizer que
+hospedagem nao fazia parte do seu escopo; D36 abre esse escopo como uma decisao nova.
+
+## D36 — Fase 1: empacotar como imagem OCI portável (2026-07-17)
+
+Empacotamento **sem mudar comportamento** (o app continua em SQLite/JSON; PostgreSQL é Fase
+2). Entregue:
+
+- **Comandos do container** em `cli.py`: `api` (= `serve`, que virou alias), `runner`
+  (reusa o caminho de `run` via novo helper `_do_run`; one-shot, sem fila ainda) e `migrate`
+  (idempotente: materializa o schema do checkpointer + `ArtifactDB` e os dirs de mídia).
+- **Health** em `web/server.py`: `GET /healthz` (liveness, sem IO) e `GET /readyz`
+  (readiness: valida `load_pipeline/providers/judge` e resolve o backend de storage —
+  `R2MediaStorage.from_env()` valida credencial sem request de rede; 503 com motivo se
+  quebrar). Rotas explícitas vencem o catch-all SPA por ordem de registro.
+- **Mounts condicionais**: `/media` e `/videos` extraídos para `_install_media_mounts`,
+  guardados por `ORCH_SERVE_LOCAL_MEDIA` (default ligado; em prod R2 serve por URL assinada).
+- **`R2_ENDPOINT_URL`** opcional em `r2.py:from_env` — mesmo código serve R2, MinIO (dev) e
+  S3 (AWS), só trocando endpoint/credencial.
+- **Infra**: `Dockerfile` multi-stage (build da SPA em Node → runtime Python 3.12 + Node LTS
+  copiado da imagem oficial, para o bridge Seedance), `.dockerignore`, `docker-compose.yml`
+  (app + MinIO + PostgreSQL-scaffolding), e envs novas no `.env.example`.
+
+**Verificação:** `rtk proxy .venv/bin/python -m pytest` → **900 passed, 2 skipped**,
+cobertura 100%. Build da imagem e `docker compose up` não rodados neste ambiente (sem Docker);
+a verificação de container fica para quem tiver o daemon (ver plano em
+`~/.claude/plans/tender-imagining-peacock.md`).
+
+## D36 — Fase 2/T1: fundação PostgreSQL, Alembic e tenancy (2026-07-18)
+
+Primeira fatia da Fase 2 entregue sem ligar ainda os repositórios de negócio:
+
+- `orchestrator.db.Database` encapsula `AsyncConnectionPool`, abertura/fechamento
+  explícitos e transações que aplicam `app.organization_id`/`app.user_id` com
+  `set_config(..., true)`. O escopo é `SET LOCAL`, portanto não vaza quando a conexão
+  volta ao pool. O boot rejeita papéis `SUPERUSER`/`BYPASSRLS` para impedir configuração
+  que torne as policies inócuas.
+- `TenantIdentity.from_env()` exige `ORCH_ORGANIZATION_SLUG`,
+  `ORCH_ORGANIZATION_NAME` e `ORCH_USER_SUBJECT`; o bootstrap gera ids estáveis e cria
+  organization, user e membership de forma idempotente.
+- Alembic passou a versionar o schema PostgreSQL. A revisão `20260718_0001` cria
+  `organizations`, `users` e `organization_members`, habilita e força RLS e restringe
+  organizações/memberships ao tenant atual e identidades aos memberships visíveis.
+- `orchestrator migrate --database-url ...` (ou `DATABASE_URL`) aplica `head`
+  idempotentemente. Sem URL, o caminho SQLite da Fase 1 permanece inalterado para o modo
+  mock/local.
+- Dependências runtime: `alembic` e `psycopg[binary,pool]`; integração usa
+  `pytest-postgresql` contra PostgreSQL 16 real, sem mock de banco.
+- O Compose cria `orchestrator` como papel `NOSUPERUSER NOBYPASSRLS`; o `POSTGRES_USER`
+  administrativo fica limitado ao bootstrap do volume.
+
+### Red → Green e falhas investigadas
+
+- RED inicial: `tests/test_postgres_foundation.py` falhou com `ModuleNotFoundError` para
+  `orchestrator.db`. GREEN: migração, pool e bootstrap idempotente implementados pela
+  nova interface pública.
+- Sintoma: o teste RLS mostrou Alice/Acme lendo `oidc|bob` de Globex. Causa: `users` era
+  global e não tinha policy. Correção: `FORCE ROW LEVEL SECURITY` em `users`, leitura por
+  membership ou pela própria identidade da sessão e policies separadas de insert/update/
+  delete.
+- Sintoma: após a primeira policy de `users`, o bootstrap falhou com
+  `InsufficientPrivilege` antes de criar o membership. Causa: `INSERT ... ON CONFLICT DO
+  NOTHING` precisa avaliar a visibilidade do próprio usuário, mas a policy inicial só
+  reconhecia memberships já existentes. Correção: permitir `id = app.user_id` na leitura
+  e manter conflito como `DO NOTHING`, sem update cross-tenant.
+- Sintoma: o Compose entregava ao app o próprio `POSTGRES_USER`, que é superuser e ignora
+  RLS. Causa: o scaffolding da Fase 1 não separava bootstrap e runtime. Correção: init SQL
+  cria o papel `orchestrator` sem bypass, transfere database/schema e o pool falha cedo se
+  receber credenciais privilegiadas.
+- Sintoma: cobertura focada ficou em 97,62% apesar dos 9 testes funcionais verdes. Causa:
+  os ramos de DSN `postgresql+psycopg://` e rejeição de backend não PostgreSQL não tinham
+  regressão. Correção: testes públicos para ambos; pacote `orchestrator.db` voltou a 100%.
+- Sintoma: o primeiro gate global teve 3 falhas em `test_replicate_throttle` porque warnings
+  não chegavam ao `caplog` depois dos testes PostgreSQL. Causa: o `fileConfig()` padrão do
+  Alembic reconfigurava o root logger e desabilitava loggers existentes no processo da API.
+  Correção: migração programática marca `configure_logger=False`; a CLI mantém a configuração
+  da aplicação, e uma regressão prova que loggers continuam ativos após `upgrade_database()`.
+- Sintoma ambiental: PostgreSQL e testes com `asyncio.to_thread` não conseguem abrir
+  sockets/encerrar executor dentro do sandbox. Causa confirmada pelos logs (`Operation not
+  permitted`) e stack em `asyncio.Runner.close`. Correção operacional: executar somente os
+  testes de integração fora dessa restrição; código e asserções permaneceram intactos.
+
+**Verificação:** 13 testes PostgreSQL passaram; `orchestrator.db` com 94/94 statements
+cobertos. Gate global: `913 passed, 2 skipped`, 4209/4209 statements (100%).
+
+## D36 — Fase 2/T2: prompts em PostgreSQL (2026-07-18)
+
+Segunda fatia da Fase 2 entregue sem alterar contratos HTTP nem frontend:
+
+- A revisão Alembic `20260718_0002` cria `prompt_templates` e `prompt_last_used`, ambas
+  com `organization_id`, FK para `organizations`, `FORCE ROW LEVEL SECURITY` e policy
+  por `app.organization_id`. Templates usam identity transacional e índice
+  `(organization_id, kind, id)` para listagem mais recente/filtro.
+- `PostgresPromptRepository` implementa o mesmo contrato observável do JSON:
+  save/list/delete de templates, validação de `creator`/`video` e upsert de `last_used`
+  que preserva valores anteriores quando a entrada nova é vazia.
+- `prompt_store.open_repository()` escolhe PostgreSQL quando `DATABASE_URL` existe e
+  mantém `JsonPromptRepository` no modo mock/local. O vocabulário/validação comum ficou
+  em `orchestrator.prompts`, sem acoplar o repositório SQL ao arquivo JSON.
+- `GET/POST/DELETE /api/prompts` e `POST /api/run` passaram a usar o contrato assíncrono.
+  O payload continua com `templates`, `last_used`, `store_path` e `exists`; no PostgreSQL,
+  `store_path` vale `postgresql`. Nenhum arquivo em `front/**` mudou.
+- A suíte limpa `DATABASE_URL` e as envs de tenant por default; somente testes de
+  integração optam pelo PostgreSQL real, preservando hermeticidade offline.
+
+### Red → Green e falhas investigadas
+
+- RED inicial: `ModuleNotFoundError: orchestrator.db.prompts`. GREEN: migração 0002 e
+  tracer end-to-end salvar → fechar pool → reabrir → listar template persistido.
+- RED de exclusão: `PostgresPromptRepository` não possuía `delete_template`. GREEN:
+  `DELETE ... RETURNING`, id inválido/inexistente retorna `False` e repetição é idempotente.
+- RED de contexto recente: ausência de `get_last_used`/`record_last_used`. GREEN: tabela
+  tenant-scoped com upsert por `(organization_id, kind)` e no-op para valores vazios.
+- RED HTTP: com `DATABASE_URL` definido, `/api/prompts` ainda devolvia o caminho JSON e
+  criava o arquivo-trap. Causa: rotas chamavam funções síncronas diretamente. Correção:
+  seletor assíncrono único; o teste prova `store_path=postgresql` e nenhum JSON criado.
+- Sintoma: cobertura focada inicial ficou em 97,89% com os 21 testes de prompts verdes.
+  Causa: o comando focado não incluiu regressões legadas de JSON corrompido e atualização
+  vazia em `tests/test_small_gaps.py`. Correção: incluir esses contratos no gate focado;
+  stores JSON/PostgreSQL/domínio atingiram 147/147 statements (100%).
+
+**Verificação focada:** 45 testes verdes, incluindo upgrade real `0001 → 0002`, restart,
+fallback JSON, HTTP, ordenação/filtro, validação e RLS que bloqueia leitura/update entre
+Acme e Globex. Gate global: `922 passed, 2 skipped`, 4300/4300 statements (100%).
+
+## D36 — Fase 2/T3: creators em PostgreSQL + fronteira R2 (2026-07-19)
+
+Terceira fatia da Fase 2 entregue sem alterar contratos HTTP nem frontend:
+
+- A revisão Alembic `20260719_0003` cria `creators`, chaveada por
+  `(organization_id, run_id, creator_id)`, com posição identity para ordenação
+  determinística, metadata normalizada, `FORCE ROW LEVEL SECURITY` e policy por
+  `app.organization_id`.
+- `PostgresCreatorRepository` preserva record/list/find e o upsert do JSON: regravar o
+  mesmo creator no mesmo run atualiza voz/status/metadata sem duplicar e o promove a
+  mais recente. `JsonCreatorRepository` continua sendo o backend mock/offline.
+- O PostgreSQL guarda somente metadata e ponteiros canônicos (`r2://bucket/key`).
+  `/api/creators` deriva signed URLs de TTL curto na saída; ao reutilizar um creator,
+  `/api/run` também assina o ponteiro para o handoff ao provider. Os testes reabrem o
+  repositório depois dessas duas fronteiras e provam que nenhuma URL temporária voltou
+  para o banco.
+- O gate humano de creators passou a gravar pelo contrato assíncrono selecionado por
+  `DATABASE_URL`. Sem essa env, o JSON, a recuperação de `/media` e o modo dry-run
+  continuam inalterados. Nenhum arquivo em `front/**` mudou.
+
+### Red → Green e falhas investigadas
+
+- RED inicial: `ImportError` para `PostgresCreatorRepository`. GREEN: migração 0003,
+  vocabulário normalizado e tracer persistir → fechar pool → reabrir → listar.
+- Sintoma do primeiro GREEN focado: o comportamento passou, mas o comando saiu 1 com
+  cobertura global em 28%. Causa: `pytest` aplica `--cov=orchestrator`/100% mesmo ao
+  executar um único teste. Correção: ciclos unitários usam `--no-cov`; o gate global de
+  cobertura continua obrigatório e foi executado ao final.
+- RED de atualização: regravar `(run_id, creator_id)` levantava `UniqueViolation`.
+  GREEN: `ON CONFLICT` atualiza campos, status e posição sem criar duplicata.
+- RED HTTP/R2: `/api/creators` ainda devolvia o path JSON com `DATABASE_URL`. GREEN:
+  selector assíncrono; a resposta recebe HTTPS assinado e a releitura mantém `r2://`.
+- RED de reuso: `/api/run` buscava somente o JSON e respondia 404 para creator existente
+  no PostgreSQL. GREEN: lookup no backend ativo e assinatura somente no handoff.
+- RED de tenancy: sem a policy, a conexão Globex lia e atualizava a linha Acme. GREEN:
+  `ENABLE/FORCE RLS`; a leitura expõe apenas Globex e o update cruzado afeta zero linhas.
+- Sintoma do primeiro gate global: `929 passed, 2 skipped`, mas cobertura 99,61%
+  (17 statements). Causa: faltavam os comportamentos de lookup do fallback JSON e
+  recuperação/404 do finder assíncrono. Correção: testes públicos desses fluxos, sem
+  excluir linhas ou afrouxar asserções.
+
+**Verificação:** upgrade real `0002 → 0003` preservou tenant e prompts; persistência,
+restart, upsert, ordenação, lookup, fallback JSON, RLS, signed URL na API e handoff ao
+provider estão cobertos. Gate global: `931 passed, 2 skipped`, 4383/4383 statements
+(100%).
+
+## D36 — Fase 2/T4: feedback em PostgreSQL (2026-07-19)
+
+Quarta fatia da Fase 2 entregue sem alterar contratos de CLI/runner nem frontend:
+
+- A revisão Alembic `20260719_0004` cria `run_feedback`, chaveada por
+  `(organization_id, run_id)`, com summary JSONB, posição identity para ordem de
+  chegada determinística, `FORCE ROW LEVEL SECURITY` e policy por
+  `app.organization_id`.
+- `PostgresFeedbackRepository` preserva save/load/latest e o comportamento last-write-
+  wins do JSON: regravar o mesmo run atualiza o summary, não duplica a linha e o torna
+  o feedback mais recente.
+- `feedback_store.open_repository()` seleciona PostgreSQL por `DATABASE_URL` e mantém
+  `JsonFeedbackRepository` no modo mock/offline. O argumento `feedback_store` do runner
+  e o `--feedback-store` da CLI continuam iguais; no PostgreSQL, o path não é criado.
+- Tanto a leitura Step 10 → Step 1 em `runner.run_pipeline` quanto a gravação de
+  `node_feedback` usam o mesmo contrato assíncrono. O segundo ciclo recebe exatamente
+  os `winning_styles` persistidos pelo primeiro. Nenhum arquivo em `front/**` mudou.
+
+### Red → Green e falhas investigadas
+
+- RED inicial: `ImportError` para `PostgresFeedbackRepository`. GREEN: migração 0004
+  e tracer save → fechar pool → reabrir → load do summary completo.
+- RED de regravação: salvar novamente o mesmo run levantava `UniqueViolation`.
+  GREEN: `ON CONFLICT` atualiza summary, timestamp e posição; `latest` retorna a última
+  gravação.
+- RED de tenancy: sem a policy, uma conexão Globex lia e atualizava a linha Acme.
+  GREEN: `ENABLE/FORCE RLS`; a leitura raw expõe apenas Globex e o update cruzado afeta
+  zero linhas.
+- RED de wiring: `runner.run_pipeline` ainda criava o arquivo JSON mesmo com
+  `DATABASE_URL`. GREEN: selector assíncrono único no runner e no node Step 10; o teste
+  prova que o arquivo-trap não existe e o summary está no PostgreSQL.
+- RED do loop: sem leitura do repositório, o segundo run recebia
+  `prior_winning_styles=[]`. GREEN: `load_latest_feedback()` no backend ativo antes de
+  montar o estado inicial.
+- Sintoma do primeiro gate global: `937 passed, 2 skipped`, mas cobertura 99,93%
+  (3 statements). Causa: faltavam os comportamentos `location`, `exists` e lookup por
+  run da fachada JSON. Correção: teste de contrato do fallback, sem excluir linhas nem
+  afrouxar o gate.
+
+**Verificação:** 6 testes PostgreSQL cobrem restart, upsert/latest, RLS, pipeline, loop e
+upgrade real `0003 → 0004` preservando creators; 30 regressões de feedback/loop/bias/CLI
+passaram no JSON. Gate global: `938 passed, 2 skipped`, 4441/4441 statements (100%).
+
+## D36 — Fase 2/T5: artifacts em PostgreSQL, bytes no R2 (2026-07-19)
+
+Quinta fatia da Fase 2 entregue sem alterar nodes, contratos HTTP ou frontend:
+
+- A revisão Alembic `20260719_0005` cria `artifacts`, chaveada por tenant e id
+  determinístico, com unicidade de `(organization_id, storage_key)`, índices por run e
+  expiração, JSONB para metadata e `FORCE ROW LEVEL SECURITY` por
+  `app.organization_id`.
+- `PostgresArtifactRepository` preserva o contrato completo do `ArtifactDB`: record/get,
+  lookup por key/run, upsert idempotente, classificação de retenção, consulta de
+  expirados e delete. `purge_expired` continua apagando bytes primeiro e metadata depois.
+- O banco guarda somente metadata, proveniência e ponteiros canônicos
+  (`storage_backend` + `storage_key`). Os bytes continuam no R2/local; `r2://` e URLs
+  assinadas continuam derivados na fronteira de consumo e não viraram coluna canônica.
+- `open_artifact_repository()` seleciona PostgreSQL por `DATABASE_URL`; sem ela cria e
+  usa o mesmo SQLite offline. `run_pipeline` e `resume_pipeline` mantêm o pool aberto por
+  todo o `ainvoke`, sem criar o arquivo SQLite quando PostgreSQL está ativo.
+- `ArtifactRepository` formaliza o contrato comum e permite que `media_store`/nodes
+  permaneçam agnósticos ao backend. Nenhum arquivo em `front/**` mudou.
+
+### Red → Green e falhas investigadas
+
+- RED inicial: `ImportError` para `PostgresArtifactRepository`. GREEN: migration 0005 e
+  tracer record → fechar pool → reabrir → get de todos os campos canônicos.
+- RED de idempotência: o repositório ainda não expunha `by_run`. GREEN: consulta ordenada
+  e `ON CONFLICT` atualizam a mesma linha sem duplicar o ponteiro.
+- RED de retenção/purge: faltavam `set_retention`, `by_key`, `expired` e `delete`.
+  GREEN: o PostgreSQL implementa a mesma interface usada pelo QC e por `purge_expired`.
+- Sintoma no teste de retenção: esperado `2026-07-22T12:00:00+00:00`, recebido o mesmo
+  instante como `2026-07-22T09:00:00-03:00`. Causa: `timestamptz` foi renderizado no fuso
+  da sessão PostgreSQL, divergindo do contrato textual determinístico do SQLite.
+  Correção: normalização para UTC ao materializar `ArtifactRecord`; a asserção e o
+  instante esperado foram preservados.
+- RED de tenancy: antes da policy, uma conexão Globex lia as linhas Acme e atualizava o
+  ponteiro cruzado. GREEN: `ENABLE/FORCE RLS`; SQL raw vê só Globex e update cruzado afeta
+  zero linhas.
+- RED de seleção: faltava `open_artifact_repository`, portanto não havia factory comum.
+  GREEN: selector por `DATABASE_URL`, com restart real e prova de que o SQLite-trap não é
+  criado.
+- RED de wiring: o runner ainda instanciava `ArtifactDB` diretamente mesmo com
+  PostgreSQL. GREEN: repositório injetado com lifetime envolvendo o grafo; uma escrita
+  feita dentro de `ainvoke` sobrevive ao fechamento do pool.
+
+**Verificação:** 8 testes PostgreSQL cobrem restart, upsert, retenção/purge, RLS,
+seleção, lifetime no grafo e upgrade real `0004 → 0005` preservando feedback; 47
+regressões locais de artifacts/retenção/grafo passaram. Gate global:
+`946 passed, 2 skipped`, 4503/4503 statements (100%).
+
+## D36 — Fase 2/T6: runs e read model durável (2026-07-22)
+
+Sexta fatia da Fase 2 entregue sem trocar ainda o checkpointer LangGraph:
+
+- A revisão Alembic `20260720_0006` cria `runs` e `run_items`, ambas tenant-scoped,
+  com chaves/FKs compostas por organização, fases limitadas a `running`, `editing`,
+  `awaiting`, `done` e `error`, índices de leitura e `FORCE ROW LEVEL SECURITY` por
+  `app.organization_id`.
+- `PostgresRunRepository` implementa start/save/get/list do read model. Cada `save` é
+  snapshot exato e atômico: faz upsert dos items atuais e remove os ausentes; fase e
+  shape mínimo são validados antes da transação. Recomeçar o mesmo id limpa summary,
+  erro e projeções antigas.
+- `run_store.open_repository()` liga PostgreSQL somente quando `DATABASE_URL` existe.
+  Sem ela, execução, checkpoint SQLite e APIs locais preservam o comportamento anterior.
+- `POST /api/run` registra o run antes de agendar a task. `_execute_run` mantém um único
+  pool durante o ciclo e persiste progresso antes do SSE `item_update`, os gates de
+  conceitos/creators, resultado final e erro terminal.
+- `/api/runs`, `/api/status/{run_id}` e `/api/state/{run_id}` usam o read model como
+  fallback quando `_runs` e o checkpoint local desaparecem. Os payloads pendentes dos
+  gates também são reidratados depois de restart. Runtime/checkpoint continuam com
+  precedência enquanto existem.
+- Ponteiros canônicos `r2://` permanecem no PostgreSQL; signed URLs são produzidas apenas
+  na fronteira HTTP. Duas organizações podem usar o mesmo `run_id` sem ler ou sobrescrever
+  dados uma da outra.
+
+Neste slice T6 o checkpointer ainda não havia migrado para `AsyncPostgresSaver`; essa
+lacuna é fechada pelo T7 abaixo. A substituição de `BackgroundTasks`, `Future` dos gates
+e buffer SSE em memória por jobs/eventos duráveis continua reservada à Fase 3.
+
+### Red → Green e falhas investigadas
+
+- Sintoma: PostgreSQL 16/`pg_ctl` não existiam no host; depois da extração dos pacotes,
+  faltava `libpq`, e sockets foram bloqueados pelo sandbox. Causa: ambiente de validação
+  sem servidor instalado e restrição de socket. Correção operacional: DEBs PostgreSQL 16
+  e `libpq` extraídos em `/tmp`, `LD_LIBRARY_PATH` explícito e somente os testes de
+  integração executados fora do sandbox; código e asserções permaneceram intactos.
+- RED de snapshot: um item removido no estado mais novo continuava em `run_items`.
+  Causa: `save` fazia apenas upsert. Correção: delete tenant-scoped dos ids ausentes na
+  mesma transação.
+- REDs de contrato: fase desconhecida vazava `CheckViolation` e item sem id vazava
+  `KeyError`. Causa: validação dependia do SQL/dicionário. Correção: validar fase e shape
+  antes de abrir a transação, com `ValueError` explícito.
+- RED de restart: APIs devolviam 404 após limpar `_runs` e apagar o checkpoint; falhas
+  ainda apareciam como `running`. Causa: leitura e exceção só atualizavam memória/SQLite.
+  Correção: fallback PostgreSQL nas três rotas e persistência terminal `error` no handler.
+- REDs dos gates: conceitos/creators continuavam `running`; após o primeiro fix, a fase
+  voltava mas os payloads pendentes ficavam vazios. Causa: interrupções e `/api/state`
+  só conheciam `_runs`. Correção: persistir `pending_concepts`/`pending_creators` no JSONB
+  e reidratá-los normalizados no fallback.
+- Sintoma no tracer de creators: o teste comparava o shape bruto inventado com a resposta
+  pública normalizada. Causa: fixture não respeitava o contrato já coberto da API.
+  Correção: usar aliases reais (`creator_id`, `image`, `voice`) e manter comparação exata
+  com o payload normalizado; nenhuma asserção de produção foi afrouxada.
+- RED de progresso: ao pausar a emissão de `item_update`, o banco ainda não continha o
+  item. Causa: evento era emitido logo após atualizar memória. Correção: snapshot durável
+  concluído antes da entrega SSE.
+- RED de reuso: `start` do mesmo id preservava summary/items do run anterior. Causa:
+  `ON CONFLICT` só atualizava parâmetros de entrada. Correção: reset do cabeçalho e delete
+  atômico das projeções antigas.
+- Sintoma durante refactor: a primeira integração abria um pool a cada evento persistido.
+  Causa: selector aplicado ao redor de cada `save`. Correção: lifetime único envolvendo
+  `_execute_run`, reutilizado por progresso, gates e término.
+- Sintoma no build: `tsc` não existia na worktree; `npm ci --offline` foi bloqueado com
+  `EPERM` ao validar o binário `esbuild`. Causa: dependências não materializadas e execução
+  de binário restrita pelo sandbox. Correção operacional: instalação offline e build fora
+  dessa restrição; lockfile e código frontend não mudaram.
+
+**Verificação:** 18 testes PostgreSQL cobrem restart, snapshots, listagem/erro, validação,
+gates, progresso antes do SSE, RLS, reset, upgrade real `0005 → 0006` e fronteira R2;
+83 regressões web afetadas passaram. Gate global: `964 passed, 2 skipped`, 4626/4626
+statements (100%). `npm run build`: TypeScript e Vite verdes (66 módulos).
+
+## D36 — Fase 2/T7: checkpointer PostgreSQL tenant-scoped (2026-07-22)
+
+Fatia T7 de persistência entregue; PostgreSQL agora também é a fonte do checkpoint
+LangGraph quando `DATABASE_URL` está presente:
+
+- `langgraph-checkpoint-postgres` 3.x entrou nas dependências e no `uv.lock`.
+  `open_checkpointer()` seleciona `AsyncPostgresSaver`; sem URL mantém exatamente o
+  `AsyncSqliteCompatSaver` offline e o `db_path` local.
+- `orchestrator migrate`/`upgrade_database(..., revision="head")` executa o `setup()`
+  oficial do saver e aplica `ENABLE/FORCE ROW LEVEL SECURITY` às três tabelas de dados.
+  Requests e runners não executam DDL: apenas configuram o tenant da sessão e fazem DML.
+- `TenantScopedPostgresSaver` preserva `thread_id = run_id` na interface LangGraph e
+  adiciona o UUID da organização somente à chave física. `get`, `list`, `put`, writes,
+  delete e delta history convertem a chave na fronteira, sem expor o prefixo ao grafo.
+- As policies conferem esse prefixo físico contra `app.organization_id`. Portanto duas
+  organizações podem reutilizar o mesmo `run_id`, e uma query SQL com o papel runtime
+  continua vendo apenas o tenant configurado.
+- `run_pipeline`, `resume_pipeline`, `get_status`, gates e execução web foram validados
+  abrindo novas instâncias e até recebendo `db_path` diferentes: o estado é retomado do
+  PostgreSQL e nenhum arquivo SQLite é criado.
+- `/api/status/{run_id}` continua usando o read model de T6 quando existe projeção
+  durável, mas não existe checkpoint (por exemplo, erro antes do primeiro super-step).
+
+Com T7, runs, items, prompts, creators, feedback, artifacts e checkpoints sobrevivem a
+restart no PostgreSQL, com modo mock local separado. A Fase 2 permanece aberta até o
+importador legado idempotente copiar e conferir SQLite, JSON e mídia local no PostgreSQL/R2.
+Jobs, outbox, gates sem `Future` e SSE persistido começam somente na Fase 3.
+
+### Red → Green e falhas investigadas
+
+- RED de restart: a segunda instância, usando outro `db_path`, retornou snapshot sem
+  `run_id`. Causa: o selector ainda abria SQLite mesmo com `DATABASE_URL`. Correção:
+  `AsyncPostgresSaver` com o serializer atual; reabrir a conexão recupera o mesmo estado
+  sem criar os arquivos-trap.
+- RED de tenancy: Globex leu todo o checkpoint Acme ao consultar o mesmo `run_id`.
+  Causa: as tabelas oficiais usam apenas `thread_id`/namespace e não conhecem organização.
+  Correção: wrapper profundo que compõe a chave física com organization UUID e devolve o
+  `run_id` original em todos os configs públicos.
+- RED de RLS: uma conexão Globex contou 20 linhas Acme em `checkpoints`. Causa: o wrapper
+  isolava a API, mas faltava a segunda barreira SQL. Correção: `FORCE RLS` em checkpoints,
+  blobs e writes, policies pelo prefixo tenant e `app.organization_id` na sessão do saver.
+- Sintoma web: `permission denied for schema public` ao abrir `/api/state`. Causa:
+  `open_checkpointer()` chamava `setup()` em toda leitura, exigindo CREATE do papel runtime.
+  Correção: setup/policies movidos para `migrate`; runtime permaneceu somente DML.
+- Sintoma no primeiro setup migratório: `PostgresSaver.from_conn_string()` rejeitou
+  `serde=`. Causa: na versão instalada, o context manager síncrono não aceita esse kwarg;
+  serializer é necessário para leitura/escrita async, não para criar schema. Correção:
+  setup síncrono sem serializer e saver async com `_serde()` preservado.
+- Sintoma no primeiro gate global: 99% de cobertura, com lifecycle do wrapper e fallback
+  de status sem regressão. Causa: os fluxos principais usavam get/put, mas não list/delete/
+  delta nem read-model-only. Correção: testes públicos de lifecycle e status; nenhum ramo
+  foi excluído e a cobertura voltou a 100%.
+
+**Verificação:** matriz PostgreSQL com 67 testes; 114 regressões focadas de checkpoint,
+resume, CLI e web. Gate global: `970 passed, 2 skipped`, 4700/4700 statements (100%).
+`npm run build`: TypeScript e Vite verdes (66 módulos).
+
+## D36 — Fase 2/T8: import legado idempotente (2026-07-25)
+
+A Fase 2 foi fechada com um importador explícito e reiniciável:
+
+- `scan_legacy()` valida SQLite/JSON/mídia e produz manifesto e checksum determinísticos
+  sem escrever. `orchestrator import-legacy` é dry-run por padrão; `--apply` exige
+  `DATABASE_URL`, resolve o storage por `--config-dir` e usa o tenant de `ORCH_*`.
+- A revisão `20260722_0007` registra batches/entries tenant-scoped com RLS. O mesmo
+  checksum vira `noop`; drift da origem é recusado; erro persistido vira `failed` e pode
+  ser retomado. Um advisory lock PostgreSQL serializa `(organization, source_id)`.
+- Checkpoints/runs, prompts, creators, feedback e artifacts são copiados para os
+  repositórios PostgreSQL. Bytes vão ao backend de mídia sob keys tenant-scoped; imagem
+  e preview de voz do creator viram ponteiros canônicos, enquanto `voice_ref` opaco é
+  preservado.
+
+### Red → Green e falhas investigadas
+
+- Sintoma: o teste nem iniciou com `python: No such file or directory`. Causa: a worktree
+  não ativa o venv automaticamente. Correção operacional: usar `.venv/bin/python`.
+- Sintoma: a fixture tentou a porta 5432 e depois deixou `pytest_db_tmpl` ao ser
+  interrompida. Causa: faltavam os parâmetros do PostgreSQL externo e o janitor não
+  tolera template ausente/parcial. Correção operacional: host/porta/banco explícitos e
+  remoção somente de `pytest_db`/`pytest_db_tmpl` confirmados como descartáveis.
+- Sintoma: Alembic não autenticou como admin e o pool runtime rejeitou a senha. Causa:
+  a URL construída pela fixture omitia credenciais; no caso runtime o teste havia acabado
+  de provisionar uma senha diferente. Correção: senha runtime explícita na URL do teste e
+  contêiner descartável alinhado ao contrato `trust` dos papéis temporários da suíte.
+- RED de assets: só um objeto era enviado ao storage. Causa: creators eram gravados antes
+  de materializar `image`/`voice_preview`. Correção: upload determinístico e substituição
+  apenas de `image_uri`/`voice_preview_uri`; três objetos e `voice_ref` preservado.
+- RED de tenancy: o import sempre criava `legacy-local`. Correção:
+  `TenantIdentity.from_env()`, comprovado com outro tenant.
+- RED de recuperação: batch permanecia `pending` após falha de storage. Correção: coluna
+  `error`, transições `pending → failed → pending → applied` e retry do mesmo checksum.
+- RED concorrente: duas tasks retornaram `applied` e duplicaram uploads. Correção: lock
+  advisory de sessão mantido por toda a aplicação; a segunda execução observa `applied`
+  e retorna `noop`.
+- RED CLI: `--apply` ainda abortava como indisponível. Correção: wiring de Database,
+  storage e importador, saída JSON uniforme para `applied`/`noop`.
+
+**Verificação focada:** 14 testes do importador e 87 testes do gate PostgreSQL/CLI
+verdes. Gate global: `990 passed, 2 skipped`, 4998/4998 statements (100%).
+
+## D36 — Fase 3: jobs, gates, SSE e efeitos duráveis (2026-07-25)
+
+A API PostgreSQL deixou de executar o grafo em `BackgroundTasks`: `POST /api/run`
+confirma, numa transação, `run` + job determinístico + eventos + outbox. O Runner
+`--once` reivindica com `FOR UPDATE SKIP LOCKED`, lease de 120 s e heartbeat de 30 s;
+recupera lease vencida, aplica retry exponencial limitado e encerra em `failed`.
+SQLite, `_runs`, `Future` e o SSE em memória permanecem somente no modo local offline.
+
+- Interrupts agora viram `run_gates` versionados; a decisão atômica rejeita versão stale,
+  cria exatamente um job `resume_run` e o Runner retoma com `Command(resume=...)`.
+- `run_events` fornece sequência monotônica, frames SSE com `id:` e replay por
+  `Last-Event-ID`. Eventos públicos (`run_start`, gates, `run_end`, `error`) continuam
+  compatíveis com `EventSource.onmessage`; reinício de API não perde o stream.
+- A outbox trata Cloudflare Queues, SQS ou sweep PostgreSQL como wake-up, nunca como
+  verdade do job. Falha de publicação volta a `pending` com backoff e, após cinco
+  tentativas, entra em `failed` como DLQ operacional.
+- `provider_quotas` serializa consumo global e `external_effects` reserva custo por
+  chave de negócio antes da chamada. Duplicata devolve o resultado persistido;
+  resultado `uncertain` nunca é reemitido automaticamente. Adapters pagos permanecem
+  bloqueados no v1 salvo opt-in explícito.
+- Creators reutilizados permanecem canônicos (`r2://`) no job. A URL temporária nasce
+  somente no Runner, imediatamente antes do handoff ao provider. Decisões de creator
+  são persistidas no repositório durante o resume.
+
+### Red → Green e falhas investigadas
+
+- RED inicial: `PostgresEffectLedger` não existia. Correção: migration `0008`, ledger
+  transacional e testes de idempotência, quota concorrente, resultado e estado incerto.
+- RED SQL: o claim falhou com `column reference "id" is ambiguous`. Causa: `UPDATE ...
+  FROM candidates RETURNING id` não qualificava a tabela. Correção: colunas qualificadas
+  no retorno do claim.
+- Sintoma: o teste SQS ficou preso ao executar `asyncio.to_thread`. Causa: o scheduler
+  real não é apropriado ao stub síncrono do contrato. Correção: fronteira async
+  injetável, mantendo `to_thread` como default de produção.
+- RED de heartbeat: `run_worker_once` não aceitava intervalo e o lease não era renovado.
+  Correção: task de heartbeat cancelada de forma segura ao terminar o executor.
+- RED de perda de lease: o heartbeat falhava, mas o executor continuava até um timeout
+  externo, abrindo janela de execução concorrente. Correção: corrida explícita entre
+  heartbeat e executor; perder o lease cancela imediatamente o trabalho.
+- RED de restart/UI: `/api/runs` ficou sem `active` após limpar `_runs`, e o SSE usava
+  `event:` nomeado, invisível ao `onmessage` atual. Correção: fases vêm do read model e
+  os frames persistidos usam `id:` + `data:` com tipos públicos.
+- RED de mídia: a API assinava o creator antes de gravar o job; ao mover a assinatura,
+  o primeiro Runner falhou com `default_media_path` ausente. Correção: job canônico,
+  import explícito e resolução no consumo.
+- RED de outbox: a primeira falha deixava a entrada em `publishing` até expirar o lease.
+  Correção: transição explícita `publishing → pending/failed`, erro persistido e backoff.
+- Regressão nos testes da Fase 2: cenários ainda esperavam conclusão imediata por
+  `BackgroundTasks` e gates por `Future`. Causa: contrato antigo corretamente
+  substituído. Correção: os mesmos casos agora acionam Runner, gate/version e resume
+  duráveis; nenhuma asserção de integridade foi removida.
+- RED de segurança/custo: um job com `config/providers.yaml` ainda alcançava o executor
+  live. Correção: o Runner recusa papéis não-mock sem
+  `ORCH_ENABLE_PAID_ADAPTERS=true`.
+- Primeiro gate global: 41 linhas novas sem exercício deixaram cobertura em 99,26%.
+  Correção: casos públicos de erro/lease, transições ambíguas, factories de fila,
+  polling/replay SSE e compatibilidade local; nenhum ramo foi excluído.
+
+**Verificação focada:** 35 testes de jobs/efeitos/filas verdes; migration real
+`0007 → 0008` preserva runs. Gate global: `1028 passed, 2 skipped`, 5552/5552
+statements (100%).
+
+## D36 — Fase 4: staging Cloudflare/Neon (2026-07-25)
+
+O staging foi especificado como código sem acionar provider pago nem publicar
+infraestrutura real:
+
+- `config-staging/` mantém todos os adapters de geração em `mock` e move somente bytes
+  para R2. A imagem OCI Linux/amd64 é a mesma para API e Runner, com comandos distintos.
+- O Worker TypeScript serve a SPA com fallback, encaminha `/api/*` e SSE sem guardar
+  estado, preserva o JWT do Cloudflare Access e injeta somente o contexto de organização.
+  O callback da Queue chama o Runner interno; cron de um minuto cobre a recuperação.
+- `CloudflareAccessMiddleware` valida RS256 contra o JWKS oficial, issuer e audience.
+  O sujeito validado entra em `TenantIdentity`, mas a autorização final exige membership
+  preexistente no PostgreSQL; não há bootstrap implícito em tráfego autenticado.
+- A administração explícita ganhou `db org-create`, `db membership-grant` e
+  `db membership-revoke`. O `runner-service` expõe somente health e uma chamada
+  autenticada que drena uma outbox e reivindica no máximo um job durável.
+- OpenTofu fixa Cloudflare `~> 5.22` e Neon `~> 0.1.15`: R2 privado/CORS restrito,
+  wake queue + DLQ, Access com MFA, WAF/rate limit, DNS e PostgreSQL 16 em
+  `aws-sa-east-1`, branch protegida e history retention de sete dias.
+- O workflow de deploy constrói uma única imagem por SHA, publica o mesmo artefato no
+  registry Cloudflare e ECR, migra/provisiona o papel runtime antes do rollout gradual e
+  nunca usa tag `latest`. `docs/STAGING.md` documenta bootstrap, rollback e o requisito
+  de conexão direta (sem pooler) para migrações e checkpoints.
+
+### Red → Green e falhas investigadas
+
+- RED inicial: `ModuleNotFoundError: jwt`. Causa: a validação Access não tinha biblioteca
+  JOSE. Correção: `PyJWT[crypto]` no runtime e lock atualizado.
+- RED seguinte: `orchestrator.auth` e `orchestrator.runner_service` inexistentes.
+  Correção: middleware ASGI e serviço interno implementados pelas interfaces públicas
+  exercitadas nos testes.
+- Sintoma: o parser estático de `wrangler.jsonc` corrompia `https://` ao remover `//` e
+  asserções dependiam de whitespace/forma textual. Causa: teste acoplado à representação.
+  Correção: JSON sem comentários foi lido semanticamente e HCL/workflow passaram a usar
+  regex/contratos observáveis.
+- Sintoma TypeScript: bindings de `cloudflare:workers` e secrets não eram conhecidos.
+  Correção: tipos gerados pelo Wrangler e declaração separada dos secrets, sem conflito
+  com a lib WebWorker.
+- Sintoma de segurança: `npm audit` encontrou três vulnerabilidades altas transitivas em
+  `sharp`/`miniflare` no Wrangler 4.112. Correção: Wrangler 4.114; audit voltou a zero.
+- Sintoma IaC: `tofu fmt -check` rejeitou o alinhamento do ruleset. Correção: formatação
+  canônica; `init` gerou lockfile e `validate` passou com a imagem oficial
+  `ghcr.io/opentofu/opentofu:1.12.1`.
+- Primeiro gate global: comportamento funcional verde (`1047 passed, 2 skipped`), mas
+  cobertura em 99,15%. Causa: ramos reais de falha/refresh do JWT, pool/lifespan e
+  administração ainda não tinham regressão. Correção: testes pelos endpoints e comandos
+  públicos; nenhum ramo foi excluído nem asserção afrouxada.
+
+**Verificação:** `npm run check`, `npm audit` (zero vulnerabilidades),
+`wrangler deploy --dry-run`, `tofu fmt -check` e `tofu validate` verdes. Gate global:
+`1058 passed, 2 skipped`, 5797/5797 statements (100%).
+
+## D36 — Fase 5: operação, backup e segurança (2026-07-25)
+
+- `ORCHESTRATOR_LOG_FORMAT=json` produz JSON Lines UTC com logger, nível, mensagem e
+  correlação por `run_id`, `job_id`, `organization_id`, `provider` e evento. O staging
+  ativa esse formato; LangSmith continua opt-in por env.
+- `PostgresOperations.inspect_run()` e `orchestrator ops inspect-run RUN_ID` reconstroem
+  read model, items, jobs/leases, gates/resoluções, eventos ordenados, artifacts, efeitos,
+  bytes e custo exclusivamente das fontes duráveis e sob RLS.
+- `health_snapshot()` agrega fila/outbox, leases expiradas, lag de stream, erros de
+  assinatura, quotas e gasto. Alertas têm códigos estáveis: `expired_job_lease`,
+  `outbox_dlq`, `storage_signing_error`, `stream_lag`, `provider_limit` e
+  `anomalous_spend`.
+- `orchestrator ops maintain` executa purge orientado por metadata, inventário via
+  `HeadObject`/`exists` e health no mesmo contexto tenant. O workflow diário agenda
+  manutenção, cria dump PostgreSQL custom, calcula SHA-256, restaura em PostgreSQL 16
+  vazio e só então arquiva dump/checksum no R2 privado.
+- `docs/OPERATIONS.md` fixa RPO <= 5 min pelo PITR Neon, RTO <= 60 min, resposta a alertas,
+  restore, inventário e exercícios trimestrais de carga/restart/SSE/isolamento.
+
+### Red → Green e falhas investigadas
+
+- RED de logs: a saída continuava textual mesmo com `ORCHESTRATOR_LOG_FORMAT=json`.
+  Correção: formatter JSON central e staging configurado para ativá-lo.
+- RED de reconstrução: `orchestrator.operations` inexistente. Correção: read model
+  operacional tenant-scoped; o tracer reúne todas as fontes de um run e custo/bytes.
+- Sintoma no primeiro teste CLI: `asyncio.run()` foi chamado dentro do loop do próprio
+  teste. Causa: teste async dirigindo uma interface Click síncrona. Correção: setup async
+  concluído antes da invocação, preservando o contrato real da CLI.
+- RED de inventário/manutenção: não havia interface para conferir ponteiros nem agendar
+  purge. Correção: inventário derivado do PostgreSQL e comando `ops maintain`; bytes são
+  apagados antes da metadata.
+- Primeiro exercício de restore: `pg_dump` falhou porque a fixture já havia removido
+  `pytest_db`. Correção operacional: banco origem descartável explícito, migração real,
+  dump, restore em segundo banco e remoção somente desses dois alvos.
+
+**Verificação:** 18 testes focados verdes; `orchestrator.operations` 85/85 statements
+(100%); TypeScript verde e `npm audit` sem vulnerabilidades. O exercício Docker restaurou
+o dump e leu `alembic_version=20260725_0008` antes de remover os bancos descartáveis.
+Gate global: `1066 passed, 2 skipped`, 5925/5925 statements (100%).
+
+## D36 — Fase 6: exercício AWS e cutover verificável (2026-07-26)
+
+- O contrato de mídia agora aceita `s3` e `dual`. Durante o cutover, novas escritas vão
+  ao backend configurado e assinatura, inventário, retenção e purge continuam roteados
+  pelo `storage_backend` original de cada artifact.
+- `storage migrate-run RUN_ID` copia a key canônica R2→S3, preserva content type e
+  metadata, verifica SHA-256/tamanho via `HeadObject` e só então troca o ponteiro no
+  PostgreSQL. Repetição é idempotente; divergência mantém o artifact no R2.
+- `sqs-runner` recebe o wake-up SQS, mas reivindica e executa o job canônico no
+  PostgreSQL. Falha de processamento não confirma a mensagem, preservando retry/DLQ.
+- `infra/aws-staging` declara ECR imutável, ECS/Fargate API+Runner, ALB, SQS+DLQ, S3
+  privado/versionado, IAM mínimo, logs e alarmes. API e Runner permanecem com
+  `desired_count=0`; o workflow exige decisão explícita e não foi aplicado.
+- `docs/AWS-CUTOVER.md` fixa drenagem, leitura dual, migração verificável, canário e gate
+  Go/No-Go sem mudar `run_id`, `storage_key`, checkpoints ou eventos.
+- O frontend migrou para React 19.2.8 e React Router 8.3.0, com Node 22.22.3 na imagem
+  OCI. O pacote legado `react-router-dom` foi removido e todos os imports usam
+  `react-router`.
+- Estado/segredos/planos OpenTofu locais (`*.tfstate*`, `*.auto.tfvars`, `*.tfplan`) são
+  ignorados; o workflow salva o plano com extensão coberta por essa política.
+
+### Red → Green e falhas investigadas
+
+- Sintoma no primeiro gate global: dois testes legados de signed URL deixaram ponteiros
+  R2 sem resolução. Causa: o roteamento dual passou a exigir que todo signer anunciasse
+  `.backend`, mas o contrato R2 legado expunha apenas `get_signed_url`. Correção: signer
+  simples sem marcador continua sendo tratado como R2, enquanto ponteiro S3 nunca é
+  assinado pelo backend errado; regressões cobrem ambos os casos.
+- Sintoma de segurança: `npm audit` reportou duas vulnerabilidades altas em
+  `react-router@7.18.1` (GHSA-qwww-vcr4-c8h2). Causa: a correção existe apenas em
+  `react-router@8.3.0`; o pacote `react-router-dom` foi removido na v8 e o novo baseline
+  exige React >=19.2.7 e Node >=22.22.0. Correção: migração direta para
+  `react-router@8.3.0`, React/ReactDOM 19.2.8 e imagem Node 22.22.3; audit voltou a zero,
+  sem `npm audit fix --force`.
+- RED de segurança IaC: o teste de contrato provou que `.terraform/` era ignorado, mas
+  state, `auto.tfvars` e plano salvo ainda podiam entrar no Git. Correção: padrões
+  explícitos no `.gitignore` e plano `aws-no-traffic.tfplan`; o mesmo teste ficou verde.
+
+**Verificação:** 72 testes focados verdes. Frontend com build Vite/TypeScript,
+boundaries e audit zero; Cloudflare com TypeScript, audit zero e
+`wrangler deploy --dry-run`; OpenTofu 1.12.1 com `fmt -check` e `validate`. A imagem
+`ugc-orchestrator:d36` Linux/amd64 expôs CLI, `storage migrate-run` e `sqs-runner`, com
+Python 3.12.13 e Node 22.22.3. Gate global PostgreSQL:
+`1092 passed, 2 skipped`, 6131/6131 statements (100%).
+
+**Estado externo:** nenhuma infraestrutura Cloudflare/AWS foi aplicada, nenhum DNS ou
+publisher foi trocado e nenhum provider pago foi chamado.
+
+## D30 — R2 + DB relacional de mídia: implementação (2026-07-16)
+
+Execução da `docs/ADR-D30-media-storage-r2-db.md`, que estava aceita mas não implementada.
+Escopo travado com o usuário: **só a D30** (storage + DB), SQLite-first, atrás de config.
+Hospedar o app na Cloudflare ficou **fora** — ver "Cloudflare" abaixo.
+
+### Fases entregues
+- **Fase 1 (`b345136`)** — contrato `MediaStorage` (`put_bytes`, `put_from_url`,
+  `get_signed_url`, `delete`, `exists`) + `LocalMediaStorage`. Toda escrita devolve
+  `StoredObject` (backend, key, uri, content_type, size_bytes, sha256). `media_store`
+  virou orquestração por cima: decide *o que* persistir e sob qual key canônica; o
+  backend decide *onde*. URIs servíveis inalteradas.
+- **Fase 2 (`a913a01`)** — `ArtifactDB` (SQLite) com as colunas mínimas da ADR. `id`
+  determinístico (`sha256` de `run_id:storage_key`), não `uuid4` → `record()` idempotente.
+- **Fase 3 (`78b943a`)** — `R2MediaStorage` (boto3, S3-compatible), backend selecionável
+  por `providers.yaml` (`storage.backend`), coberto com stub de S3.
+- **Fase 3.5 (`66e4cc3`)** — o elo que faltava: as Fases 1-3 eram infra sem consumidor.
+  `runner._build_config` resolve storage + DB uma vez por run (como o adapter) e os nodes
+  passam adiante via `_persistence()`.
+- **Fase 5 (`696e450`)** — retenção: `keep` / `rejected` (3d) / `intermediate` (2d),
+  `purge_expired` orientado pelo DB.
+- **Fase 4** — signed URLs sob demanda: `resolve_signed_uris` troca `r2://{bucket}/{key}`
+  por URL assinada (TTL 900s) **só na saída** de `/api/state/{run_id}` e `/api/creators`.
+
+### Decisões de desenho
+- **`aiosqlite` trava neste ambiente** (já documentado em `graph/checkpoint.py`), então o
+  `ArtifactDB` usa `sqlite3` síncrono sob lock com fachada async — mesmo padrão, mesmo
+  motivo. Já o R2 usa `asyncio.to_thread`: upload de vídeo segurando o event loop mataria
+  o fan-out paralelo de items.
+- **Retenção só é decidível depois do fato.** Quando o clip é persistido, o QC ainda não
+  rodou. `classify_item_retention` roda no veredito: aprovado → última take `keep`,
+  anteriores `intermediate`; drop → todas `rejected`. Item ainda em voo não é classificado.
+- **`storage_key` carimbado no `meta` do Artifact.** Sem ele, quem está a jusante teria de
+  reconstruir a key a partir da uri — impossível no R2 (`r2://bucket/key`) e dependente de
+  adivinhar a extensão.
+- **`kind` vem do próprio `Artifact`** (`clip`/`video`), não de um vocabulário paralelo: o
+  modelo de estado já carregava essa informação (descoberto quando o pydantic recusou um
+  `Artifact` sem `kind` num teste meu).
+- **Falhar alto**: backend desconhecido em `providers.yaml` e credencial R2 ausente
+  levantam no boot, em vez de degradar para disco local (mídia paga em disco efêmero) ou
+  quebrar no meio de um run pago. **Exceção deliberada**: `_signing_storage` engole config
+  quebrada e devolve `None` — o run já falhou alto no boot, mas cegar o dashboard tiraria
+  justamente a tela onde o operador lê o erro.
+- **Assinar é transformação de saída, nunca mutação.** `resolve_signed_uris` devolve
+  cópia. Se escrevesse a URL de volta no estado, o checkpoint passaria a guardar uma URL
+  vencida como se fosse o ponteiro — exatamente o que a D30 proíbe. Cada key é assinada
+  uma vez por payload (o mesmo clip aparece em `results` e em `artifacts`).
+- **`r2://` é renderável para a UI**, porque vira https assinado na saída; os demais
+  schemes (`s3://`, `gs://`) seguem sendo referência opaca.
+
+### Falhas investigadas (sintoma → causa → correção)
+- **Teste próprio com `RecursionError` de monkeypatch.** Sintoma: `transport` duplicado em
+  `test_put_from_url_uses_its_own_client...`. Causa: a lambda que substituía
+  `httpx.AsyncClient` chamava `httpx.AsyncClient` — já era ela mesma. Correção: guardar a
+  classe real antes do patch, idioma que `test_gateway_llm.py` já usava. Bug do teste, não
+  do código.
+- **Inserção duplicada ao ligar os call sites.** Sintoma: `**_persistence(...)` duplicado
+  num call site. Causa: substituição textual com padrão de 8 espaços que é **substring**
+  do de 12 espaços. Correção: remoção manual + `ast.parse` como gate antes de rodar.
+
+### Cloudflare (por que o app não foi para lá)
+A D30 é sobre **onde os bytes moram**, não sobre hospedagem — R2 é S3-compatible e serve
+de qualquer host. Hospedar *este* app na Cloudflare esbarra em: **Python Workers** roda
+Pyodide/Wasm (langgraph, pillow e o SDK anthropic não têm wheel PyEmscripten); **Containers**
+é viável mas tem **disco efêmero**, então o checkpointer SQLite e a mídia local
+evaporariam — exigiria DB durável, que a própria D30 põe em *fora de escopo* ("trocar
+SQLite por Postgres nesta etapa"). Seria uma ADR nova (compute/DB), não a D30.
+
+**Critérios de aceite da ADR — todos atendidos:** `config-mock` offline/determinístico/sem
+custo; suíte verde sem credenciais R2; bytes no R2 + metadata no DB no perfil live; signed
+URLs sob demanda e não persistidas; reprovados 3 dias; intermediárias 2 dias; creator
+assets, aprovados e finais sem expiração automática.
+
+**Escopo mantido fora:** migrar artifacts existentes, Postgres e purge agendado seguem
+fora, como a própria ADR define.
+
+**Verificação:** `rtk proxy .venv/bin/python -m pytest` → **884 passed, 2 skipped**,
+cobertura 100% (era 772). Dirigido fora da suíte, em dois níveis:
+1. Run mock de batch 4 gravou 18 artifacts reais no DB com key canônica, content_type,
+   size_bytes e sha256 — 8 `intermediate` com `expires_at` em +2 dias e 10 `keep` sem
+   expiração, com a última take de cada item retida.
+2. Caminho **live** inteiro com stub de S3 (sem credencial): bytes no bucket, linha no DB
+   com `backend=r2`, estado guardando `r2://ugc-prod/run-1/items/item-0/clip-0.mp4`, UI
+   marcando `renderable=True`/`media_type=video`, API servindo
+   `https://acct.r2.cloudflarestorage.com/...?X-Amz-Expires=900&X-Amz-Signature=...` — e
+   estado e DB **inalterados** depois de assinar.
+
+## D30 — Fase 6: SSE assina e R2 ligado de verdade (2026-07-16)
+
+Bucket `generation-video` provisionado e as `R2_*` configuradas, então `config/providers.yaml`
+passou a `storage: backend: r2`. `config-mock` segue `local` — dry-run continua offline,
+determinístico e sem custo.
+
+**Conectividade verificada contra o R2 real** (fora da suíte): `put_bytes` → `exists` →
+`get_signed_url` com GET 200 e bytes idênticos → `delete`. `list_buckets` dá `AccessDenied`
+e isso é o esperado: o token é escopado a um bucket só, e ListBuckets é permissão de conta.
+
+**Fase 4 fechada — o SSE agora assina.** `stream_events` resolve `r2://` no `yield`, não no
+`_emit`. O ponto é o buffer de replay: ele é reenviado a quem conecta tarde, então guardar a
+URL assinada nele entregaria uma URL já vencida. Assinando na saída, o buffer mantém o
+ponteiro canônico e o TTL só começa a correr quando o evento chega ao cliente. O backend de
+assinatura é construído **uma vez por stream** (era um `boto3.client` por evento).
+
+**Verificação:** `rtk proxy .venv/bin/python -m pytest` → **888 passed, 2 skipped**,
+cobertura 100%.
+
+**Não verificado:** o bucket ser privado. O GET sem assinatura devolve 400, mas isso não
+prova nada — o endpoint da API S3 rejeita qualquer requisição não assinada de qualquer jeito.
+Quem decide acesso público é o Public Development URL (`r2.dev`) no dashboard, que precisa
+ser confirmado desabilitado. Um batch pago end-to-end também não foi rodado.
+
+## D35 — Persona antes de conceitos, scripts e creator (2026-07-16)
+
+Objetivo: adicionar uma persona batch-level antes de qualquer conceito, reutilizada como
+contexto em concepts/scripts e como briefing do creator, preservando dry-run offline,
+determinismo e execução agentic via typed tools.
+
+### Red → Green (TDD)
+- RED inicial: `tests/test_persona.py` falhava com `ModuleNotFoundError` para
+  `orchestrator.tools.persona`, `KeyError: 'write_persona'` no registry e ausência de
+  `MockAdapter.write_persona`/`CompositeAdapter.write_persona`.
+- GREEN:
+  - `LLMPort.write_persona`, `write_persona_tool`, `ToolSpec(write_persona)` e delegação
+    `CompositeAdapter.write_persona`.
+  - `MockAdapter`, `GatewayLLMAdapter` e `AnthropicLLMAdapter` implementam persona; Gateway
+    e Anthropic streamam com stage `persona`.
+  - Top graph agora roda `persona -> concepts -> scripts -> concept_review -> roster`.
+  - `BatchState.persona` é salvo; persona é passada para concepts/scripts e prefixa o
+    `creator_prompt` sem alterar o prompt seguro de imagem.
+  - `agent_catalog` permite `persona`; `config/agents.yaml` usa `executor: agent` e
+    `config-mock/agents.yaml` usa `executor: tool`.
+  - Backend/frontend exibem `Persona` na timeline.
+- Continuação D35: cada stage agentic atual (`persona`, `concepts`, `scripts`, `video`)
+  agora declara `target_agent` e `system_prompt_path`; o loader concatena
+  `prompts/agents/_shared.md` + prompt do stage, valida arquivo ausente/vazio e expõe
+  apenas `system_prompt_path`/`has_system_prompt` no catálogo. O texto resolvido é passado
+  internamente para `run_stage_agent` em Mock, Gateway e Anthropic.
+
+### Falhas investigadas nesta fase
+- Sintoma: após inserir persona, a suíte completa quebrou em
+  `test_feedback_loop_biases_next_cycle` (`share2 == 1`).
+  - Causa: o mock distribuía o viés entre todos os estilos vencedores
+    (`bias[i % len(bias)]`); com a persona no hash, o top winner do ciclo anterior podia
+    receber só um slot enviesado.
+  - Correção: slots enviesados do mock agora privilegiam `bias[0]`; slots não enviesados
+    continuam preservando spread determinístico.
+- Sintoma: gate de cobertura caiu para 99,81% em `AnthropicLLMAdapter.write_persona`.
+  - Causa: os ramos novos de streaming e refusal da persona não estavam cobertos.
+  - Correção: adicionar regressões offline para streaming stage `persona` e refusal.
+- Sintoma: ao adicionar `system_prompt` ao `AgentPort`, a suíte completa falhou em
+  `tests/test_video_agent_node.py` com `_MultiTakeAdapter.run_stage_agent() got an
+  unexpected keyword argument 'system_prompt'`.
+  - Causa: o fake de vídeo no teste ainda implementava a assinatura antiga do port.
+  - Correção: atualizar o fake para aceitar o kwarg opcional e manter a simulação de
+    múltiplas takes inalterada.
+- Sintoma: cobertura caiu para 99,95% em `agent_catalog.py`.
+  - Causa: os ramos de `system_prompt_path` inválido e prompt sem `_shared.md` eram novos
+    e ainda não exercitados.
+  - Correção: adicionar regressões para path traversal e prompt stage-only.
+
+**Verificação:** `rtk proxy .venv/bin/python -m pytest` → **772 passed, 2 skipped**,
+cobertura 100%. `cd front && rtk npm run build` → build Vite/TypeScript limpo.
+
+
 ## Caminho A — tool layer foundation (2026-07-14)
 
 Objetivo: entregar a primeira fundação do Caminho A sem `AgentRuntime`: o LangGraph
@@ -1298,3 +2107,183 @@ mídia foi limpa, a referência permanece o path `/media/...` e a geração falh
 `test_node_roster_seed_reconstructs_reference_from_local_media` e
 `test_node_roster_seed_keeps_remote_reference_untouched` (stages). Suíte
 `rtk proxy python -m pytest` → **576 passed, 2 skipped**, cobertura 100%.
+
+## Transformação agent — Fase 0: ativação do modo agent (2026-07-15)
+
+Objetivo: ligar o loop agentic (critique→refine) que já existia implementado mas estava
+dormente. Toda a máquina (`AgentPort.run_stage_agent`, `stage_executor`, `agent_catalog`)
+já estava pronta e testada; faltava apenas nenhuma config ativá-la — `config/agents.yaml`
+declarava todos os stages como `executor: tool, agent_enabled: false`.
+
+### Red → Green (TDD)
+- RED: `test_live_config_activates_agent_mode_on_llm_stages` (test_live_config_no_mock.py)
+  afirma que o perfil live (`config`) ships `concepts`/`scripts` em `executor: agent,
+  agent_enabled: true` e mantém os stages de mídia em modo tool. Falhou (config ainda tool).
+- GREEN: `config/agents.yaml` — `concepts` e `scripts` viram `executor: agent,
+  agent_enabled: true`. Nenhum código de produto mudou; o roteamento agent já existia no
+  `stage_executor`. `config-mock/agents.yaml` permanece tool (perfil offline/dry-run).
+
+### Falha investigada (sintoma → causa → correção)
+- **Sintoma:** `test_project_config_dirs_ship_valid_agents_yaml[config]` quebrou.
+- **Causa:** o teste travava o estado *antigo* (concepts/scripts sempre `executor == "tool"`)
+  para ambos os perfis. O comportamento desejado do perfil live mudou legitimamente na Fase 0.
+- **Correção:** o teste passou a esperar `executor` específico por perfil — `agent` para
+  `config`, `tool` para `config-mock` — mantendo as demais asserções (tools por stage,
+  validade do YAML). Não foi afrouxamento: continua provando o contrato, agora correto.
+
+**Escopo:** o loop ativado ainda é o wrapper bounded de 2 passos (draft→critique→refine ×1),
+não um loop de tool-calling. A Fase 1 (tool-calling real) é a próxima etapa do roadmap.
+
+**Verificação:** `rtk proxy python -m pytest` → suíte verde, cobertura 100%. Ao vivo:
+`orchestrator run --batch 2 --offer "serum X" --config-dir config` com `AI_GATEWAY_API_KEY`
+setado mostra `agent_backend`/`agent_revised` no trace do LangSmith.
+
+## Transformação agent — Fase 1: loop de tool-calling real (2026-07-15)
+
+Objetivo: substituir o wrapper agentic fixo de 2 passos (draft→critique→refine ×1) por um
+**loop de tool-calling real** — o modelo recebe schemas das tools, escolhe quais chamar e
+itera multi-pass até convergir ou estourar um budget. Ver ADR **D32**.
+
+### Red → Green (TDD)
+- `tools/registry.py`: `ToolSpec.parameters` (JSON schema agent-facing) + `tool_call_schemas`.
+  concepts/scripts expõem só `revision`; media tools = schema vazio (Fase 2).
+  Testes: `test_tool_registry_exposes_agent_parameter_schemas`,
+  `test_tool_call_schemas_builds_neutral_schema_for_allowed_tools` (test_tools.py).
+- `adapters/_agent_loop.py` (novo): loop compartilhado provider-agnostic + `ToolCall` +
+  `AgentBrain` Protocol. Centraliza budget (`max_steps`), fronteira D29 (só `run_tool`),
+  enforcement de `allowed_tools` e safety-net (garante ≥1 output de domínio válido).
+  Testes: `tests/test_agent_loop.py` (single-call, multi-pass, budget, safety-net, allowlist).
+- `stage_executor.py`: closure `run_tool(tool_name, **inputs)` — o agent nomeia a tool; o
+  executor valida contra `allowed_tools` e mantém offer/n/seed server-authoritative
+  (filtra args do modelo aos params declarados). Novo `_agent_max_steps` lê `agent.max_steps`
+  do pipeline. Teste: `test_stage_executor_agent_run_tool_enforces_boundary_and_budget`.
+- Adapters `mock.py` / `gateway_llm.py` / `anthropic_llm.py`: `run_stage_agent` reescrito
+  sobre `run_agent_loop`, cada um com seu brain (`_MockAgentBrain` determinístico,
+  `_GatewayAgentBrain` OpenAI function-calling via httpx, `_AnthropicAgentBrain` `tool_use`
+  do SDK). `_agent_critique` (crítica-como-diretiva) removido — coberto pelo novo loop.
+- `config/pipeline.yaml`: seção `agent.max_steps: 4` (budget documentado; default se ausente).
+
+### Contratos alterados (comportamento desejado mudou — não afrouxamento)
+- `StageToolRunner`: de `run_tool(**inputs)` para `run_tool(tool_name, **inputs)`. Os testes
+  agentic de mock/gateway/anthropic foram reescritos para o novo contrato de tool-calling
+  (draft inicial via tool nomeada; refino via 2ª chamada com `revision`; budget; safety-net;
+  allowlist). A cobertura foi **substituída**, não reduzida: os testes de `_agent_critique`
+  deram lugar a testes do loop real.
+
+### Falhas investigadas (sintoma → causa → correção)
+- **Cobertura 99.6%** após o rewrite: branches defensivos/futuros não exercitados —
+  (a) resolução multi-tool no closure (Fase 2): **removida** por YAGNI (entra na Fase 2 com
+  teste); (b) guard D29 do closure, knob `max_steps`, `_summarize_result` (ref. circular),
+  resposta malformada do gateway e args de tool inválidos: cobertos com testes diretos.
+  Voltou a 100%.
+
+**Escopo mantido fora (Fase 2/3):** multi-tool por stage, agentificar mídia
+(`_AGENT_STAGES` ainda = concepts/scripts), streaming de token, judge proxy, R2.
+
+**Verificação:** `rtk proxy python -m pytest` → **687 passed, 2 skipped**, cobertura 100%.
+O pipeline mock agentic ponta a ponta (`test_mock_pipeline_can_opt_into_agentic_concepts_and_scripts`)
+exercita o novo loop através do grafo. Ao vivo: `orchestrator run --config-dir config` com
+`AI_GATEWAY_API_KEY` mostra `agent_steps` no trace.
+
+## Fase 2 (D33): stage `video` agentic (2026-07-16)
+
+**Entregue:** o agent dirige a geração de clips. `_AGENT_STAGES` ganha `video`;
+`generate_clip` expõe `revision` (diretiva apendada ao brief server-authored);
+`run_agent_loop` devolve `AgentRunResult` (output final + todas as tentativas); erro de
+tool vira feedback ao modelo; budget e cap de chamadas por stage.
+
+**Arquivos:** `adapters/_agent_loop.py` (AgentRunResult/ToolAttempt, try/except no
+run_tool, `summarize_tool_result`), `adapters/base.py` (DEFAULT_MAX_STEPS + AgentPort
+atualizado), `stage_executor.py` (`with_attempts`, `_agent_max_steps(pipeline, stage)`,
+`_agent_max_tool_calls`), `tools/video.py` (`_compose_prompt`), `tools/registry.py`
+(`_VIDEO_REVISION_PARAM_SCHEMA`), `nodes/stages.py` (`_settle_takes`),
+`agent_catalog.py`, `config/agents.yaml`, `config/pipeline.yaml`.
+
+### Contratos alterados (comportamento desejado mudou — não afrouxamento)
+- `run_agent_loop`/`run_stage_agent`: de `(result, executed)` para `AgentRunResult`.
+  Dataclass, não tupla: a Fase 3 (tokens/latência) quebraria os call-sites de novo.
+- `execute_stage_tool(..., with_attempts=False)`: sem o opt-in, o retorno mudaria de tipo
+  entre modo tool e agent e quebraria concepts/scripts. Com `with_attempts=True` o retorno
+  é `AgentRunResult` **também** em modo tool e no passthrough (tentativa sintética
+  `id="direct"`), para o node de vídeo ter um só caminho de contabilidade.
+- `test_live_config_no_mock` e `test_tools::test_tool_registry_exposes_agent_parameter_schemas`
+  afirmavam "mídia fica em tool / schema vazio". Passaram a afirmar o novo comportamento.
+  Dois testes usavam `video` como exemplo de stage **proibido** em modo agent
+  (`test_agent_catalog`, `test_stage_executor`); o exemplo virou `roster`, que segue fora
+  do gate — o invariante continua provado.
+
+### Falhas investigadas (sintoma → causa → correção)
+- **Premissa errada no plano — "fan-out paralelo por tier".** Sintoma: o plano previa
+  escrita concorrente em `item.clips` e colisão de índice em `persist_item_media`. Causa:
+  `builder.py:57` usa `add_conditional_edges(START, make_script_route_node(tns), ...)` —
+  é um **router**, um só node de tier roda por item; o paralelismo é por item
+  (`batch.max_concurrency`). Prova: `Item.clips` é `list[Artifact]` **sem reducer**
+  (`graph/state.py:72`), então fan-out real já seria `InvalidUpdateError` hoje. Correção:
+  desenho simplificado, sem tratamento de concorrência.
+- **`RecursionError` no `summarize_tool_result`.** Sintoma:
+  `test_summarize_tool_result_falls_back_on_unserializable` estourou a pilha em vez de
+  cair no fallback. Causa: `_elide_data_uris` desce na estrutura, então uma referência
+  circular estoura **antes** de o `json.dumps` virar `ValueError` (o único erro que o
+  código antigo esperava). Correção: `except (TypeError, ValueError, RecursionError)`.
+- **Cobertura 99,94%** após o refactor: o `except` do `model_dump()` era um branch
+  defensivo especulativo (nenhum caso real). Correção: `model_dump()` foi para dentro do
+  `try` existente — mais simples e coberto pelo mesmo teste, com um `model_dump` que
+  levante caindo no fallback do `repr`. Voltou a 100%. (Mesmo critério da Fase 1: branch
+  sem caso real sai, não ganha teste artificial.)
+- **Bug latente corrigido:** a safety-net usava o sentinela `last_result is None`, que
+  confundia "o modelo nunca chamou uma tool" com "a tool rodou e retornou `None`" — e
+  disparava uma **segunda chamada paga** invisível. Agora há um flag `had_success`
+  explícito. Coberto por `test_agent_loop_does_not_call_safety_net_when_a_tool_returned_none`.
+
+**Escopo mantido fora (Fase 3):** `roster`/`assembly`/`upscale` agentic, multi-tool por
+stage (segue YAGNI: nenhum stage tem 2 tools legítimas), streaming de token, judge proxy,
+R2. Risco aceito: custo de take que falhe após a cobrança do provider não é contabilizado.
+
+**Verificação:** `rtk proxy python -m pytest` → **737 passed, 2 skipped**, cobertura 100%
+(era 687). `orchestrator run --batch 2 --offer "serum X" --config-dir config-mock` → 2
+produzidos, 2 aprovados, custo mock $0.64. O caminho agentic de vídeo pelo grafo inteiro
+é coberto por `test_mock_pipeline_can_opt_into_agentic_video` (offline, custo zero).
+Ao vivo ainda não rodado: exige `AI_GATEWAY_API_KEY` + Replicate (custo real).
+
+## Fase 3 (D34): streaming de tokens no GatewayLLMAdapter (2026-07-16)
+
+**Entregue:** o adapter LLM default do perfil live passa a emitir tokens ao vivo para o
+dashboard. `_chat(..., stage=...)` → SSE (`"stream": true`) → `llm_start`/`llm_token`/
+`llm_end` no `stream_bus`. Contrato do front inalterado.
+
+**Arquivos:** `adapters/gateway_llm.py` (`_sse_payload`, `_stream_chat`, `_consume_sse`,
+param `stage` em `_chat`; call-sites `generate_concepts` → `"concepts"` e `write_script` →
+`"script:<id>"`), `front/src/api/useRunStream.ts` (reset do buffer no `llm_start`).
+
+### Decisões de desenho
+- **`stage` é o gate do streaming.** O brain do agent chama `_chat` sem `stage`, então o
+  loop agentic nunca streama — paridade com o Anthropic e sem remontar `tool_calls`
+  fragmentados do SSE. Em modo agent quem streama é a chamada de domínio dentro do
+  `run_tool`, que é o que o usuário quer ver.
+- **Retry não reemite token por construção** (ver D34): `_is_retryable` só cobre erros
+  pré-envio e 429. Nenhum código novo de guarda foi preciso.
+
+### Falhas investigadas (sintoma → causa → correção)
+- **UI concatenaria dois JSONs no painel de LLM.** Sintoma: dirigindo o loop agentic com
+  streaming (script fora da suíte), o stage `concepts` emitiu **2** `llm_start` e o texto
+  acumulado deu 246 chars para um payload de 123 — a revisão grudou no draft. Causa: em
+  modo agent `generate_concepts` roda 2x (draft + revisão) e o reducer do front tratava
+  `llm_start` só como "active: true", sem zerar o `text` do stage. Correção: `llm_start`
+  zera o buffer daquele stage. Era pré-existente (o Anthropic tem a mesma forma), mas só
+  ficou visível ao ligar streaming no adapter default. Verificado reproduzindo o reducer
+  contra a sequência real de eventos: 246 → 123 chars.
+- **Cobertura 99,94%:** o ramo "sem client injetado" do `_stream_chat` (produção cria o
+  próprio `AsyncClient`) não era exercitado. Correção: espelhado o
+  `test_uses_own_client_when_not_injected` já existente para o caminho de streaming.
+  Voltou a 100%.
+
+**Escopo mantido fora:** judge proxy ao vivo + wiring do `GatewayJudge` no QC, R2
+(`R2MediaStorage`, D30), streaming das rodadas de decisão do agent.
+
+**Verificação:** `rtk proxy .venv/bin/python -m pytest` → **746 passed, 2 skipped**,
+cobertura 100%. `tsc --noEmit` do front limpo. O caminho agentic + streaming foi dirigido
+fora da suíte (MockTransport servindo SSE) para observar os eventos reais — foi assim que
+o bug do reducer apareceu. Ao vivo ainda não rodado: exige `AI_GATEWAY_API_KEY` (custo
+real); em particular, **`stream_options.include_usage` só pode ser confirmado ao vivo** —
+se o gateway ignorar o campo, o custo do run vai a zero (mesmo comportamento que o
+caminho não-streaming já tem quando o `usage` vem ausente).

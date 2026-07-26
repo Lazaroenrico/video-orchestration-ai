@@ -1,4 +1,4 @@
-import { NavLink, useNavigate } from "react-router-dom";
+import { NavLink, useNavigate } from "react-router";
 import { Icon } from "../components/Icon";
 
 type NavItem = { label: string; icon: string; to: string; end?: boolean };

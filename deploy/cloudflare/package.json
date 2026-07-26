@@ -1,0 +1,16 @@
+{
+  "name": "ugc-orchestrator-cloudflare-edge",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "tsc --noEmit",
+    "deploy": "wrangler deploy --containers-rollout=gradual"
+  },
+  "dependencies": {
+    "@cloudflare/containers": "0.3.7"
+  },
+  "devDependencies": {
+    "typescript": "5.9.2",
+    "wrangler": "^4.114.0"
+  }
+}

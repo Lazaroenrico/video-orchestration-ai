@@ -59,12 +59,18 @@ def test_agents_yaml_null_stages_uses_default_catalog(tmp_path):
 def test_agent_catalog_serializes_to_stable_mapping(tmp_path):
     from orchestrator.config import load_agent_catalog
 
+    prompt = tmp_path / "prompts" / "agents"
+    prompt.mkdir(parents=True)
+    (prompt / "_shared.md").write_text("Shared guardrails.", encoding="utf-8")
+    (prompt / "concepts.md").write_text("Concept guardrails.", encoding="utf-8")
     (tmp_path / "agents.yaml").write_text(
         "stages:\n"
         "  concepts:\n"
         "    executor: agent\n"
         "    tools: [generate_concepts]\n"
         "    target_model: claude-sonnet-4\n"
+        "    target_agent: concept-agent\n"
+        "    system_prompt_path: prompts/agents/concepts.md\n"
         "    agent_enabled: true\n",
         encoding="utf-8",
     )
@@ -75,9 +81,86 @@ def test_agent_catalog_serializes_to_stable_mapping(tmp_path):
         "executor": "agent",
         "tools": ["generate_concepts"],
         "target_model": "claude-sonnet-4",
-        "target_agent": None,
+        "target_agent": "concept-agent",
+        "system_prompt_path": "prompts/agents/concepts.md",
+        "has_system_prompt": True,
         "agent_enabled": True,
     }
+
+
+def test_agents_yaml_resolves_stage_system_prompt_from_files(tmp_path):
+    from orchestrator.config import load_agent_catalog
+
+    prompt = tmp_path / "prompts" / "agents"
+    prompt.mkdir(parents=True)
+    (prompt / "_shared.md").write_text("Shared guardrails.", encoding="utf-8")
+    (prompt / "concepts.md").write_text("Concept guardrails.", encoding="utf-8")
+    (tmp_path / "agents.yaml").write_text(
+        "stages:\n"
+        "  concepts:\n"
+        "    executor: agent\n"
+        "    tools: [generate_concepts]\n"
+        "    target_agent: concept-agent\n"
+        "    system_prompt_path: prompts/agents/concepts.md\n"
+        "    agent_enabled: true\n",
+        encoding="utf-8",
+    )
+
+    spec = load_agent_catalog(str(tmp_path)).stage("concepts")
+
+    assert spec.system_prompt_path == "prompts/agents/concepts.md"
+    assert spec.system_prompt == "Shared guardrails.\n\nConcept guardrails."
+
+
+def test_agents_yaml_resolves_stage_system_prompt_without_shared_file(tmp_path):
+    from orchestrator.config import load_agent_catalog
+
+    prompt = tmp_path / "prompts" / "agents"
+    prompt.mkdir(parents=True)
+    (prompt / "concepts.md").write_text("Concept guardrails.", encoding="utf-8")
+    (tmp_path / "agents.yaml").write_text(
+        "stages:\n"
+        "  concepts:\n"
+        "    executor: agent\n"
+        "    tools: [generate_concepts]\n"
+        "    system_prompt_path: prompts/agents/concepts.md\n"
+        "    agent_enabled: true\n",
+        encoding="utf-8",
+    )
+
+    spec = load_agent_catalog(str(tmp_path)).stage("concepts")
+
+    assert spec.system_prompt == "Concept guardrails."
+
+
+@pytest.mark.parametrize(
+    ("filename", "body", "message"),
+    [
+        ("agents.yaml", "stages:\n  concepts:\n    executor: agent\n    tools: [generate_concepts]\n    system_prompt_path: prompts/agents/missing.md\n    agent_enabled: true\n", "system_prompt_path"),
+        ("agents.yaml", "stages:\n  concepts:\n    executor: agent\n    tools: [generate_concepts]\n    system_prompt_path: ../outside.md\n    agent_enabled: true\n", "invalid system_prompt_path"),
+        ("empty.md", "", "empty system prompt"),
+    ],
+)
+def test_agents_yaml_rejects_invalid_system_prompt_files(tmp_path, filename, body, message):
+    from orchestrator.config import load_agent_catalog
+
+    prompt = tmp_path / "prompts" / "agents"
+    prompt.mkdir(parents=True)
+    (prompt / "_shared.md").write_text("Shared guardrails.", encoding="utf-8")
+    if filename == "empty.md":
+        (prompt / filename).write_text(body, encoding="utf-8")
+        body = (
+            "stages:\n"
+            "  concepts:\n"
+            "    executor: agent\n"
+            "    tools: [generate_concepts]\n"
+            f"    system_prompt_path: prompts/agents/{filename}\n"
+            "    agent_enabled: true\n"
+        )
+    (tmp_path / "agents.yaml").write_text(body, encoding="utf-8")
+
+    with pytest.raises(ValueError, match=message):
+        load_agent_catalog(str(tmp_path))
 
 
 @pytest.mark.parametrize("config_dir", ["config", "config-mock"])
@@ -89,10 +172,21 @@ def test_project_config_dirs_ship_valid_agents_yaml(config_dir):
     assert (Path(config_dir) / "agents.yaml").exists()
     catalog = load_agent_catalog(config_dir)
 
-    assert catalog.stage("concepts").executor == "tool"
+    # As tools por stage sao as mesmas nos dois perfis; o executor difere:
+    # o perfil live (`config`) ativa o loop agentic nos stages LLM-only (Fase 0),
+    # enquanto o perfil offline (`config-mock`) permanece em modo tool.
     assert catalog.stage("concepts").tools == ("generate_concepts",)
-    assert catalog.stage("scripts").executor == "tool"
     assert catalog.stage("scripts").tools == ("write_script",)
+    assert catalog.stage("persona").tools == ("write_persona",)
+    assert catalog.stage("video").tools == ("generate_clip",)
+
+    expected_executor = "agent" if config_dir == "config" else "tool"
+    for stage in ("persona", "concepts", "scripts", "video"):
+        spec = catalog.stage(stage)
+        assert spec.system_prompt_path == f"prompts/agents/{stage}.md"
+        assert spec.system_prompt
+        assert spec.executor == expected_executor
+        assert spec.agent_enabled is (expected_executor == "agent")
 
 
 def test_runner_config_includes_agent_catalog(pipeline_cfg):
@@ -225,10 +319,11 @@ async def test_web_execute_run_injects_agent_catalog(monkeypatch, tmp_path):
             "requires executor: agent",
         ),
         (
+            # roster segue fora do gate de agent (video entrou no D33).
             "stages:\n"
-            "  video:\n"
+            "  roster:\n"
             "    executor: agent\n"
-            "    tools: [generate_clip]\n"
+            "    tools: [build_creator]\n"
             "    agent_enabled: true\n",
             "only supported for stages",
         ),
@@ -285,3 +380,16 @@ def test_agent_catalog_stage_lookup_rejects_unknown_stage():
 
     with pytest.raises(KeyError, match="unknown"):
         default_agent_catalog().stage("unknown")
+
+
+def test_video_is_an_allowed_agent_stage():
+    """D33: video entra no gate de agent execution; a demais mídia segue fora."""
+    from orchestrator.agent_catalog import (
+        agent_stage_not_allowed_message,
+        is_agent_stage_allowed,
+    )
+
+    assert is_agent_stage_allowed("video") is True
+    for stage in ("roster", "assembly", "upscale", "qc"):
+        assert is_agent_stage_allowed(stage) is False
+    assert "video" in agent_stage_not_allowed_message()

@@ -135,12 +135,14 @@ function reduce(s: RunStreamState, ev: StreamEvent): RunStreamState {
     }
     case "llm_start": {
       const stage = llmStage(ev);
-      const current = s.llmByStage[stage] ?? { stage, text: "", active: false };
+      // Zera o buffer do stage: em modo agent o mesmo stage gera mais de uma vez
+      // (draft -> revisão), e sem o reset a 2ª geração grudaria na 1ª — o painel
+      // mostraria dois JSONs concatenados. llm_start = "nova geração começando".
       return {
         ...s,
         llmByStage: {
           ...s.llmByStage,
-          [stage]: { ...current, active: true },
+          [stage]: { stage, text: "", active: true },
         },
       };
     }

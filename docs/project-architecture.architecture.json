@@ -1,0 +1,306 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Arquitetura Atual do UGC Orchestrator",
+    "subtitle": "LangGraph + AgentCatalog + tools tipadas + adapters por papel",
+    "output": "docs/project-architecture.html",
+    "viewBox": [1600, 880]
+  },
+  "components": [
+    {
+      "id": "operator",
+      "type": "external",
+      "label": "Operador",
+      "sublabel": "CLI ou dashboard",
+      "pos": [40, 350],
+      "size": [120, 60]
+    },
+    {
+      "id": "surfaces",
+      "type": "frontend",
+      "label": "CLI + Web UI",
+      "sublabel": "Click + React SPA",
+      "pos": [220, 350],
+      "size": [135, 60]
+    },
+    {
+      "id": "web_api",
+      "type": "backend",
+      "label": "FastAPI + SSE",
+      "sublabel": "runs, status, stream",
+      "pos": [410, 350],
+      "size": [145, 60]
+    },
+    {
+      "id": "config",
+      "type": "database",
+      "label": "Config Profiles",
+      "sublabel": "pipeline/providers/agents",
+      "pos": [410, 135],
+      "size": [155, 66],
+      "tag": "live + mock"
+    },
+    {
+      "id": "prompts",
+      "type": "security",
+      "label": "Agent Prompts",
+      "sublabel": "_shared + stage guardrails",
+      "pos": [610, 135],
+      "size": [165, 66],
+      "tag": "D35"
+    },
+    {
+      "id": "runner",
+      "type": "backend",
+      "label": "Runner",
+      "sublabel": "run/resume/status",
+      "pos": [610, 350],
+      "size": [135, 60]
+    },
+    {
+      "id": "graph",
+      "type": "backend",
+      "label": "LangGraph",
+      "sublabel": "batch + item graphs",
+      "pos": [800, 350],
+      "size": [140, 60],
+      "tag": "resume"
+    },
+    {
+      "id": "checkpoint",
+      "type": "database",
+      "label": "Checkpoint",
+      "sublabel": "AsyncSqliteSaver",
+      "pos": [800, 565],
+      "size": [145, 60],
+      "tag": "thread_id"
+    },
+    {
+      "id": "executor",
+      "type": "backend",
+      "label": "Stage Executor",
+      "sublabel": "tool mode or agent mode",
+      "pos": [990, 350],
+      "size": [155, 60]
+    },
+    {
+      "id": "agent_loop",
+      "type": "backend",
+      "label": "Agent Loop",
+      "sublabel": "persona/concepts/scripts/video",
+      "pos": [990, 135],
+      "size": [170, 66],
+      "tag": "bounded"
+    },
+    {
+      "id": "tools",
+      "type": "messagebus",
+      "label": "Typed Tools",
+      "sublabel": "schemas + output validation",
+      "pos": [1195, 350],
+      "size": [155, 60]
+    },
+    {
+      "id": "composite",
+      "type": "backend",
+      "label": "CompositeAdapter",
+      "sublabel": "role -> provider",
+      "pos": [1400, 350],
+      "size": [150, 60]
+    },
+    {
+      "id": "stores",
+      "type": "database",
+      "label": "Local Stores",
+      "sublabel": "media, videos, prompts, creators",
+      "pos": [1195, 565],
+      "size": [165, 60]
+    },
+    {
+      "id": "gateway",
+      "type": "cloud",
+      "label": "Vercel AI Gateway",
+      "sublabel": "LLM + image + Seedance",
+      "pos": [1400, 115],
+      "size": [150, 66]
+    },
+    {
+      "id": "replicate",
+      "type": "cloud",
+      "label": "Replicate",
+      "sublabel": "LTX + creator assets",
+      "pos": [1400, 510],
+      "size": [150, 60]
+    },
+    {
+      "id": "langsmith",
+      "type": "cloud",
+      "label": "LangSmith",
+      "sublabel": "optional tracing",
+      "pos": [1400, 665],
+      "size": [150, 60]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "Repositorio / runtime Python",
+      "wraps": ["surfaces", "web_api", "config", "prompts", "runner", "graph", "checkpoint", "executor", "agent_loop", "tools", "stores"]
+    },
+    {
+      "kind": "security-group",
+      "label": "Providers externos opt-in",
+      "wraps": ["gateway", "replicate", "langsmith"]
+    }
+  ],
+  "connections": [
+    {
+      "from": "operator",
+      "to": "surfaces",
+      "label": "start run",
+      "variant": "emphasis"
+    },
+    {
+      "from": "surfaces",
+      "to": "web_api",
+      "label": "HTTP / SSE",
+      "variant": "emphasis"
+    },
+    {
+      "from": "web_api",
+      "to": "runner",
+      "variant": "emphasis"
+    },
+    {
+      "from": "config",
+      "to": "runner",
+      "label": "load",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "route": "orthogonal-v",
+      "labelDy": -10
+    },
+    {
+      "from": "prompts",
+      "to": "agent_loop",
+      "label": "system prompts",
+      "variant": "security",
+      "fromSide": "right",
+      "toSide": "left",
+      "labelDy": -46
+    },
+    {
+      "from": "runner",
+      "to": "graph",
+      "variant": "emphasis"
+    },
+    {
+      "from": "graph",
+      "to": "checkpoint",
+      "label": "resume",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "route": "orthogonal-v",
+      "labelDy": 58
+    },
+    {
+      "from": "graph",
+      "to": "executor",
+      "variant": "emphasis"
+    },
+    {
+      "from": "agent_loop",
+      "to": "executor",
+      "label": "revision only",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "route": "orthogonal-v",
+      "labelDy": -12
+    },
+    {
+      "from": "executor",
+      "to": "tools",
+      "variant": "emphasis"
+    },
+    {
+      "from": "tools",
+      "to": "composite",
+      "label": "validated calls",
+      "variant": "emphasis",
+      "labelDy": 54
+    },
+    {
+      "from": "tools",
+      "to": "stores",
+      "label": "persist artifacts",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "route": "orthogonal-v",
+      "labelDy": 58
+    },
+    {
+      "from": "composite",
+      "to": "gateway",
+      "label": "llm/image/assembly",
+      "variant": "emphasis",
+      "fromSide": "top",
+      "toSide": "left",
+      "route": "orthogonal-v",
+      "labelDy": -46
+    },
+    {
+      "from": "composite",
+      "to": "replicate",
+      "label": "creator/video",
+      "variant": "default",
+      "fromSide": "bottom",
+      "toSide": "left",
+      "route": "orthogonal-v",
+      "labelAt": [1438, 584]
+    },
+    {
+      "from": "runner",
+      "to": "langsmith",
+      "label": "trace if env",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "left",
+      "route": "orthogonal-v",
+      "labelAt": [1085, 750]
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Core runtime",
+      "items": [
+        "LangGraph owns topology and resumability",
+        "Stage Executor enforces tool vs agent execution",
+        "Typed tools validate outputs before adapters"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "D35 agent contract",
+      "items": [
+        "Persona runs before concepts",
+        "Persona, concepts, scripts, video have own system prompts",
+        "Catalog exposes path + has_system_prompt, not prompt text"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Profiles and providers",
+      "items": [
+        "config/ uses live providers through role routing",
+        "config-mock/ stays offline and deterministic",
+        "External calls require env keys; LangSmith is optional"
+      ]
+    }
+  ]
+}

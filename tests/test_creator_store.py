@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import pytest
 
-from orchestrator.creator_store import record_creators, load_creators
+from orchestrator.creator_store import JsonCreatorRepository, load_creators, record_creators
 
 
 # ---------------------------------------------------------------------------
@@ -199,3 +199,30 @@ def test_record_creators_overwrites_same_run_creator_with_updated_voice_metadata
     assert entries[0]["voice_ref"] == "voice-reroll-0"
     assert entries[0]["voice"] == "voice-reroll-0"
     assert entries[0]["voice_preview_uri"] == "data:audio/wav;base64,reroll-0"
+
+
+async def test_json_repository_finds_newest_requested_run_or_missing(tmp_path):
+    repository = JsonCreatorRepository(tmp_path / "creators.json")
+    await repository.record_creators(
+        "run-old",
+        [{"id": "creator-0", "voice_ref": "voice-old"}],
+        approved_ids=["creator-0"],
+    )
+    await repository.record_creators(
+        "run-new",
+        [{"id": "creator-0", "voice_ref": "voice-new"}],
+        approved_ids=["creator-0"],
+    )
+    await repository.record_creators(
+        "run-other",
+        [{"id": "creator-1", "voice_ref": "voice-other"}],
+        approved_ids=["creator-1"],
+    )
+
+    newest = await repository.find_creator("creator-0")
+    exact = await repository.find_creator("creator-0", "run-old")
+    missing = await repository.find_creator("missing")
+
+    assert newest is not None and newest["voice_ref"] == "voice-new"
+    assert exact is not None and exact["voice_ref"] == "voice-old"
+    assert missing is None
