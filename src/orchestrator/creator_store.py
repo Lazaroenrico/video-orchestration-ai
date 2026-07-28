@@ -201,8 +201,9 @@ async def open_repository(path: str | Path) -> AsyncIterator[CreatorRepository]:
         yield JsonCreatorRepository(path)
         return
 
-    from orchestrator.db import Database, PostgresCreatorRepository, TenantIdentity
+    from orchestrator.db import PostgresCreatorRepository, TenantIdentity, get_shared_database
 
-    async with Database.from_env() as database:
-        tenant = await database.resolve_tenant(TenantIdentity.from_env())
-        yield PostgresCreatorRepository(database, tenant)
+    database = await get_shared_database()
+    tenant = await database.resolve_tenant(TenantIdentity.from_env())
+    yield PostgresCreatorRepository(database, tenant)
+

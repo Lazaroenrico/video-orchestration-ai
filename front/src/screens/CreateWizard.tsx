@@ -6,14 +6,11 @@ import { Card } from "../components/Card";
 import { api } from "../api/client";
 
 const PLATFORMS = ["tiktok", "instagram", "youtube"] as const;
-const OBJECTIVES = ["Conversions", "Awareness", "Engagement", "Lead Generation"];
-const CHANNELS = ["LinkedIn", "Twitter / X", "Instagram", "Email Newsletter"];
-const STEPS = ["Brief", "Direction", "Settings", "Review"];
+const STEPS = ["Offer", "Direction", "Quality Gates", "Review"];
 
 const label =
   "block font-label-sm text-label-sm uppercase tracking-wider text-on-surface-variant mb-1";
-const field =
-  "w-full rounded-lg border-surface-border bg-surface-container-lowest font-body-md text-body-md focus:ring-primary focus:border-primary";
+const field = "hm-field";
 
 export function CreateWizard() {
   const navigate = useNavigate();
@@ -21,19 +18,13 @@ export function CreateWizard() {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const [name, setName] = useState("");
   const [offer, setOffer] = useState("");
-  const [objective, setObjective] = useState("");
-  const [audience, setAudience] = useState("");
-  const [channels, setChannels] = useState<string[]>(["LinkedIn"]);
   const [creatorPrompt, setCreatorPrompt] = useState("");
   const [videoPrompt, setVideoPrompt] = useState("");
   const [batch, setBatch] = useState(6);
   const [platform, setPlatform] = useState<(typeof PLATFORMS)[number]>("tiktok");
+  const [editConcepts, setEditConcepts] = useState(true);
   const [approveCreators, setApproveCreators] = useState(true);
-
-  const toggleChannel = (c: string) =>
-    setChannels((cur) => (cur.includes(c) ? cur.filter((x) => x !== c) : [...cur, c]));
 
   const canContinue = step === 0 ? offer.trim().length > 0 : true;
 
@@ -42,11 +33,12 @@ export function CreateWizard() {
     setError(null);
     try {
       const { run_id } = await api.startRun({
-        offer: offer.trim() || name.trim() || "untitled campaign",
+        offer: offer.trim(),
         batch,
         platform,
         creator_prompt: creatorPrompt.trim() || null,
         video_prompt: videoPrompt.trim() || null,
+        edit_concepts: editConcepts,
         approve_creators: approveCreators,
       });
       navigate(`/campaigns/${run_id}`);
@@ -57,111 +49,64 @@ export function CreateWizard() {
   }
 
   return (
-    <div className="min-h-screen bg-background p-margin-desktop">
-      <div className="max-w-3xl mx-auto">
-        <div className="flex items-start justify-between mb-gutter">
-          <div>
-            <h1 className="font-headline-lg text-headline-lg text-primary mb-1">
+    <div className="min-h-[100dvh] bg-background px-4 py-6 sm:px-6 lg:px-margin-desktop lg:py-10">
+      <div className="mx-auto max-w-3xl">
+        <div className="mb-gutter flex items-start justify-between gap-4">
+          <div className="min-w-0">
+            <h1 className="hm-page-title mb-1 text-primary">
               Create New Campaign
             </h1>
             <p className="font-body-md text-body-md text-on-surface-variant">
-              Configure your orchestration pipeline parameters.
+              Set the production brief, then choose where people review the work.
             </p>
           </div>
           <button
+            type="button"
             onClick={() => navigate("/")}
-            className="flex items-center gap-2 text-on-surface-variant hover:text-primary font-label-md text-label-md"
+            className="inline-flex min-h-11 items-center gap-2 whitespace-nowrap rounded-lg px-2 font-label-md text-label-md text-on-surface-variant hover:text-primary"
           >
-            <Icon name="close" size={18} /> Exit Setup
+            <Icon name="close" size={18} /> <span className="hidden sm:inline">Exit setup</span>
           </button>
         </div>
 
         {/* Stepper */}
-        <div className="flex items-center gap-2 mb-8">
+        <ol className="mb-8 grid grid-cols-4 gap-2" aria-label="Campaign setup progress">
           {STEPS.map((s, i) => (
-            <div key={s} className="flex items-center gap-2 flex-1">
+            <li key={s} className="min-w-0">
               <div
-                className={`w-7 h-7 rounded-full flex items-center justify-center font-label-sm text-label-sm font-bold ${
+                className={`flex min-h-11 items-center gap-2 rounded-lg px-2 font-label-sm text-label-sm font-bold ${
                   i <= step
                     ? "bg-primary text-on-primary"
                     : "bg-surface-container-high text-on-surface-variant"
                 }`}
+                aria-current={i === step ? "step" : undefined}
               >
-                {i < step ? <Icon name="check" size={16} /> : i + 1}
+                <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-surface-container-lowest text-primary">
+                  {i < step ? <Icon name="check" size={16} /> : i + 1}
+                </span>
+                <span className="hidden truncate sm:block">{s}</span>
               </div>
-              <span
-                className={`font-label-md text-label-md ${
-                  i <= step ? "text-primary" : "text-on-surface-variant"
-                }`}
-              >
-                {s}
-              </span>
-              {i < STEPS.length - 1 && <div className="flex-1 h-px bg-surface-border" />}
-            </div>
+            </li>
           ))}
-        </div>
+        </ol>
 
         <Card>
           {step === 0 && (
             <div className="flex flex-col gap-5">
               <div>
-                <label className={label}>Campaign Name</label>
+                <label className={label} htmlFor="offer">Product / Offer *</label>
                 <input
-                  className={field}
-                  placeholder="e.g., Q3 Product Launch"
-                  value={name}
-                  onChange={(e) => setName(e.target.value)}
-                />
-              </div>
-              <div>
-                <label className={label}>Product / Offer *</label>
-                <input
+                  id="offer"
                   className={field}
                   placeholder="e.g., Serum X"
                   value={offer}
                   onChange={(e) => setOffer(e.target.value)}
+                  aria-required="true"
+                  aria-invalid={Boolean(error && !offer.trim())}
                 />
-              </div>
-              <div>
-                <label className={label}>Primary Objective</label>
-                <select className={field} value={objective} onChange={(e) => setObjective(e.target.value)}>
-                  <option value="">Select objective…</option>
-                  {OBJECTIVES.map((o) => (
-                    <option key={o}>{o}</option>
-                  ))}
-                </select>
-              </div>
-              <div>
-                <label className={label}>Audience Description</label>
-                <textarea
-                  className={field}
-                  rows={3}
-                  placeholder="Describe your target demographic in detail…"
-                  value={audience}
-                  onChange={(e) => setAudience(e.target.value)}
-                />
-                <p className="mt-1 font-label-sm text-label-sm text-on-surface-variant">
-                  Used to calibrate generated copy tone.
+                <p className="mt-2 min-h-[1lh] font-label-sm text-label-sm text-on-surface-variant">
+                  This exact offer becomes the shared context for concepts, scripts, creators and video.
                 </p>
-              </div>
-              <div>
-                <label className={label}>Distribution Channels</label>
-                <div className="flex flex-wrap gap-2">
-                  {CHANNELS.map((c) => (
-                    <button
-                      key={c}
-                      onClick={() => toggleChannel(c)}
-                      className={`px-3 py-1.5 rounded-full font-label-md text-label-md border ${
-                        channels.includes(c)
-                          ? "bg-primary text-on-primary border-primary"
-                          : "bg-surface-container-lowest text-on-surface-variant border-surface-border"
-                      }`}
-                    >
-                      {channels.includes(c) && <Icon name="check" size={14} className="mr-1 align-middle" />}
-                      {c}
-                    </button>
-                  ))}
-                </div>
               </div>
             </div>
           )}
@@ -173,27 +118,29 @@ export function CreateWizard() {
                 <span className="font-headline-md text-headline-md">Creative Direction</span>
               </div>
               <div>
-                <label className={label}>Creator Prompt</label>
+                <label className={label} htmlFor="creator-prompt">Creator guidance</label>
                 <textarea
+                  id="creator-prompt"
                   className={field}
                   rows={4}
-                  placeholder="Describe the on-camera persona: look, energy, wardrobe, setting…"
+                  placeholder="Look, energy, wardrobe and setting…"
                   value={creatorPrompt}
                   onChange={(e) => setCreatorPrompt(e.target.value)}
                 />
               </div>
               <div>
-                <label className={label}>Video Prompt</label>
+                <label className={label} htmlFor="video-prompt">Video guidance</label>
                 <textarea
+                  id="video-prompt"
                   className={field}
                   rows={4}
-                  placeholder="Describe the talking-head shot: framing, camera motion, mood…"
+                  placeholder="Framing, camera motion and mood…"
                   value={videoPrompt}
                   onChange={(e) => setVideoPrompt(e.target.value)}
                 />
               </div>
               <p className="font-label-sm text-label-sm text-on-surface-variant">
-                Leave blank to let the engine derive prompts from the brief.
+                Both fields are optional. Leave them blank to let the engine derive direction from the offer.
               </p>
             </div>
           )}
@@ -201,8 +148,9 @@ export function CreateWizard() {
           {step === 2 && (
             <div className="flex flex-col gap-5">
               <div>
-                <label className={label}>Batch Size</label>
+                <label className={label} htmlFor="batch-size">Batch size</label>
                 <input
+                  id="batch-size"
                   type="number"
                   min={1}
                   max={48}
@@ -211,12 +159,13 @@ export function CreateWizard() {
                   onChange={(e) => setBatch(Math.max(1, Number(e.target.value) || 1))}
                 />
                 <p className="mt-1 font-label-sm text-label-sm text-on-surface-variant">
-                  Number of concepts fanned out in parallel.
+                  Number of concepts the pipeline will fan out in parallel.
                 </p>
               </div>
               <div>
-                <label className={label}>Platform</label>
+                <label className={label} htmlFor="platform">Platform</label>
                 <select
+                  id="platform"
                   className={field}
                   value={platform}
                   onChange={(e) => setPlatform(e.target.value as (typeof PLATFORMS)[number])}
@@ -228,15 +177,28 @@ export function CreateWizard() {
                   ))}
                 </select>
               </div>
-              <label className="flex items-center gap-3 cursor-pointer">
+              <label className="flex min-h-11 items-start gap-3 rounded-lg border border-surface-border p-3 cursor-pointer">
                 <input
                   type="checkbox"
-                  className="rounded border-surface-border text-primary focus:ring-primary"
+                  className="mt-0.5 rounded border-surface-border text-primary focus:ring-primary"
+                  checked={editConcepts}
+                  onChange={(e) => setEditConcepts(e.target.checked)}
+                />
+                <span>
+                  <span className="block font-body-md text-body-md text-primary">Review concepts before scripts</span>
+                  <span className="block font-label-sm text-label-sm text-on-surface-variant">Pause after concepts so a person can edit or exclude them.</span>
+                </span>
+              </label>
+              <label className="flex min-h-11 items-start gap-3 rounded-lg border border-surface-border p-3 cursor-pointer">
+                <input
+                  type="checkbox"
+                  className="mt-0.5 rounded border-surface-border text-primary focus:ring-primary"
                   checked={approveCreators}
                   onChange={(e) => setApproveCreators(e.target.checked)}
                 />
-                <span className="font-body-md text-body-md text-primary">
-                  Review &amp; approve creators before generating videos
+                <span>
+                  <span className="block font-body-md text-body-md text-primary">Review creators before videos</span>
+                  <span className="block font-label-sm text-label-sm text-on-surface-variant">Pause at the roster gate before the video stage starts.</span>
                 </span>
               </label>
             </div>
@@ -249,20 +211,20 @@ export function CreateWizard() {
                 <span className="font-headline-md text-headline-md">Review &amp; Launch</span>
               </div>
               {[
-                ["Campaign", name || "—"],
                 ["Product / Offer", offer || "—"],
-                ["Objective", objective || "—"],
                 ["Platform", platform],
                 ["Batch size", String(batch)],
-                ["Approve creators", approveCreators ? "Yes (human gate)" : "No (auto)"],
-                ["Channels", channels.join(", ") || "—"],
+                ["Concept review", editConcepts ? "Yes (human gate)" : "No (continue automatically)"],
+                ["Creator approval", approveCreators ? "Yes (human gate)" : "No (continue automatically)"],
+                ["Creator guidance", creatorPrompt.trim() ? "Provided" : "Derived by engine"],
+                ["Video guidance", videoPrompt.trim() ? "Provided" : "Derived by engine"],
               ].map(([k, v]) => (
                 <div key={k} className="flex justify-between border-b border-surface-border py-2">
                   <span className="text-on-surface-variant">{k}</span>
                   <span className="text-primary font-medium">{v}</span>
                 </div>
               ))}
-              {error && <p className="text-error font-label-md text-label-md mt-2">{error}</p>}
+              {error && <p role="alert" className="mt-2 font-label-md text-label-md text-error">{error}</p>}
             </div>
           )}
         </Card>
@@ -280,8 +242,8 @@ export function CreateWizard() {
               Continue to {STEPS[step + 1]}
             </Button>
           ) : (
-            <Button icon="rocket_launch" disabled={submitting} onClick={launch}>
-              {submitting ? "Launching…" : "Launch Campaign"}
+            <Button icon="rocket_launch" loading={submitting} onClick={launch}>
+              {submitting ? "Launching" : "Launch Campaign"}
             </Button>
           )}
         </div>

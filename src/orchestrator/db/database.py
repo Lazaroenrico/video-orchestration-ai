@@ -1,18 +1,47 @@
 """Pool assíncrono e fronteira transacional multi-tenant."""
 from __future__ import annotations
 
+import asyncio
+import json
 import os
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
 
-from psycopg import AsyncConnection
+from psycopg import AsyncConnection, AsyncCursor
 from psycopg_pool import AsyncConnectionPool
+from sqlalchemy.dialects import postgresql
 
 from orchestrator.db.tenancy import TenantContext, TenantIdentity
 
 
 class TenantAuthorizationError(PermissionError):
     """O usuário foi identificado, mas não possui membership no tenant."""
+
+
+_shared_database: Database | None = None
+_shared_database_lock = asyncio.Lock()
+
+
+async def get_shared_database() -> Database:
+    """Retorna uma instância compartilhada do Database com o pool mantido aberto."""
+    global _shared_database
+    if _shared_database is None or _shared_database._pool.closed:
+        async with _shared_database_lock:
+            if _shared_database is None or _shared_database._pool.closed:
+                db = Database.from_env()
+                await db.open()
+                _shared_database = db
+    return _shared_database
+
+
+async def close_shared_database() -> None:
+    """Encerra com segurança o pool compartilhado do processo."""
+    global _shared_database
+    async with _shared_database_lock:
+        if _shared_database is not None:
+            if not _shared_database._pool.closed:
+                await _shared_database.close()
+            _shared_database = None
 
 
 class Database:
@@ -32,6 +61,7 @@ class Database:
         if not database_url:
             raise ValueError("DATABASE_URL é obrigatória para o backend PostgreSQL")
         return cls(database_url)
+
 
     async def __aenter__(self) -> "Database":
         await self.open()
@@ -63,6 +93,33 @@ class Database:
 
     async def close(self) -> None:
         await self._pool.close()
+
+    @staticmethod
+    async def execute(
+        connection: AsyncConnection,
+        query_or_stmt: Any,
+        params: Any = None,
+    ) -> AsyncCursor:
+        """Executa uma string SQL bruta ou uma declaração compilada do SQLAlchemy 2.0."""
+        if hasattr(query_or_stmt, "compile"):
+            compiled = query_or_stmt.compile(
+                dialect=postgresql.dialect(),
+                compile_kwargs={"render_postcompile_vars": True},
+            )
+            if compiled.post_compile_params:
+                state = compiled._process_parameters_for_postcompile(compiled.params)
+                sql_str = state.statement
+                raw_params = state.parameters
+            else:
+                sql_str = str(compiled)
+                raw_params = compiled.params or {}
+
+            sql_params = {
+                k: json.dumps(v) if isinstance(v, (dict, list)) else v
+                for k, v in raw_params.items()
+            }
+            return await connection.execute(sql_str, sql_params)
+        return await connection.execute(query_or_stmt, params)
 
     @asynccontextmanager
     async def connection(

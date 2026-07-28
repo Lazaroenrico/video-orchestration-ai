@@ -2,6 +2,7 @@ import { PageHeader } from "../components/PageHeader";
 import { Card, SectionTitle } from "../components/Card";
 import { Icon } from "../components/Icon";
 import { Button } from "../components/Button";
+import { useNavigate } from "react-router";
 import { useAsync } from "../api/useAsync";
 import { api } from "../api/client";
 
@@ -29,10 +30,11 @@ function StoreRow({ label, path, exists }: { label: string; path?: string; exist
 export function Settings() {
   const prompts = useAsync(() => api.getPrompts(), []);
   const creators = useAsync(() => api.getCreators(), []);
+  const navigate = useNavigate();
 
   return (
     <div>
-      <PageHeader title="Workspace Settings" subtitle="Configure your workspace and inspect local stores." />
+      <PageHeader title="Workspace Configuration" subtitle="Inspect persisted local stores and the launch defaults used by this frontend." />
 
       <div className="grid grid-cols-12 gap-gutter">
         <div className="col-span-12 lg:col-span-7">
@@ -51,7 +53,7 @@ export function Settings() {
           </Card>
 
           <Card>
-            <SectionTitle title="Preferences" />
+            <SectionTitle title="Frontend launch defaults" />
             {[
               ["Default platform", "TikTok"],
               ["Default batch size", "6"],
@@ -64,7 +66,7 @@ export function Settings() {
               </div>
             ))}
             <p className="mt-3 font-label-sm text-label-sm text-on-surface-variant">
-              Preferences shown for reference — persisted workspace settings are not yet backed by an API.
+              These are the defaults shown when starting a campaign. Change them per run in the launch wizard; this screen does not persist preferences.
             </p>
           </Card>
         </div>
@@ -76,10 +78,9 @@ export function Settings() {
               <span className="font-headline-md text-headline-md">Pro Workspace</span>
             </div>
             <p className="font-body-md text-body-md text-on-surface-variant mb-4">
-              Marketing Suite · AI UGC Orchestrator. Runtime adapters and credits are managed in the
-              Integrations hub.
+              Marketing Suite · AI UGC Orchestrator. Runtime adapters are managed in the integrations view.
             </p>
-            <Button variant="secondary" icon="extension" className="w-full">
+            <Button variant="secondary" icon="extension" className="w-full" onClick={() => navigate("/integrations")}>
               Manage Integrations
             </Button>
           </Card>

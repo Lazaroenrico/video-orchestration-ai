@@ -14,12 +14,13 @@ export function RunSelect({
 }) {
   if (runs.length === 0) return null;
   return (
-    <div className="inline-flex items-center gap-2 rounded-lg border border-surface-border bg-surface-container-lowest px-3 py-1.5">
+    <label className="inline-flex min-h-11 max-w-full items-center gap-2 rounded-lg border border-surface-border bg-surface-container-lowest px-3 py-1.5">
       <Icon name="tune" size={16} className="text-on-surface-variant" />
       <select
         value={selected ?? ""}
         onChange={(e) => onChange(e.target.value)}
-        className="border-0 bg-transparent font-label-md text-label-md text-primary focus:ring-0 p-0 pr-6"
+        aria-label="Select campaign run"
+        className="min-w-0 border-0 bg-transparent p-0 pr-6 font-label-md text-label-md text-primary focus:ring-0"
       >
         {runs.map((id) => (
           <option key={id} value={id}>
@@ -28,6 +29,6 @@ export function RunSelect({
           </option>
         ))}
       </select>
-    </div>
+    </label>
   );
 }

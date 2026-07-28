@@ -1,0 +1,46 @@
+/* Hallmark · macrostructure: Workbench · genre: editorial · tone: austere · anchor hue: cobalt
+ * theme: Kinetic Command (inherited) · nav: responsive side rail · enrichment: none
+ */
+:root {
+  --color-page: oklch(98.2% 0.004 250);
+  --color-paper: oklch(99.5% 0.005 250);
+  --color-paper-muted: oklch(95.2% 0.007 250);
+  --color-paper-strong: oklch(91.8% 0.009 250);
+  --color-ink: oklch(15.2% 0.008 250);
+  --color-ink-muted: oklch(45.5% 0.012 250);
+  --color-rule: oklch(89.4% 0.009 250);
+  --color-accent: oklch(47.5% 0.17 258);
+  --color-accent-ink: oklch(99.5% 0.005 250);
+  --color-focus: oklch(47.5% 0.17 258);
+  --color-processing: oklch(58% 0.19 295);
+  --color-success: oklch(66% 0.15 160);
+  --color-warning: oklch(79% 0.16 80);
+  --color-error: oklch(48% 0.19 28);
+
+  --font-display: "Hanken Grotesk", sans-serif;
+  --font-body: "Inter", sans-serif;
+  --font-mono: "JetBrains Mono", monospace;
+
+  --space-2xs: 0.25rem;
+  --space-xs: 0.5rem;
+  --space-sm: 0.75rem;
+  --space-md: 1rem;
+  --space-lg: 1.5rem;
+  --space-xl: 2rem;
+  --space-2xl: 2.5rem;
+  --space-3xl: 4rem;
+
+  --text-label: 0.75rem;
+  --text-body: 0.875rem;
+  --text-title: 1.25rem;
+  --text-page-title: clamp(1.75rem, 2vw + 1rem, 2.5rem);
+  --radius-sm: 0.5rem;
+  --radius-md: 0.75rem;
+  --radius-lg: 1rem;
+  --rule-subtle: 1px solid var(--color-rule);
+  --dur-fast: 120ms;
+  --dur-base: 180ms;
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in: cubic-bezier(0.7, 0, 0.84, 0);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+}

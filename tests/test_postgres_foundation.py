@@ -5,6 +5,7 @@ import logging
 
 import pytest
 from click.testing import CliRunner
+from psycopg import sql
 
 from orchestrator.cli import cli
 from orchestrator.db import (
@@ -20,7 +21,7 @@ from orchestrator.db import (
 
 def _database_url(postgresql) -> str:
     info = postgresql.info
-    return f"postgresql://{info.user}@{info.host}:{info.port}/{info.dbname}"
+    return f"postgresql://postgres:postgres@{info.host}:{info.port}/{info.dbname}"
 
 
 def _runtime_database_url(postgresql) -> str:
@@ -28,9 +29,9 @@ def _runtime_database_url(postgresql) -> str:
         """
         DO $$
         BEGIN
-            CREATE ROLE tenant_app LOGIN;
+            CREATE ROLE tenant_app LOGIN PASSWORD 'tenant_app';
         EXCEPTION WHEN duplicate_object THEN
-            NULL;
+            ALTER ROLE tenant_app LOGIN PASSWORD 'tenant_app';
         END
         $$
         """
@@ -41,7 +42,35 @@ def _runtime_database_url(postgresql) -> str:
     )
     postgresql.commit()
     info = postgresql.info
-    return f"postgresql://tenant_app@{info.host}:{info.port}/{info.dbname}"
+    return f"postgresql://tenant_app:tenant_app@{info.host}:{info.port}/{info.dbname}"
+
+
+def _managed_admin_database_url(postgresql) -> str:
+    """Simula o papel administrativo não-superuser fornecido pelo Neon."""
+    role_name = "managed_migration_admin"
+    role = sql.Identifier(role_name)
+    database = sql.Identifier(postgresql.info.dbname)
+    postgresql.execute("DROP ROLE IF EXISTS orchestrator_runtime")
+    postgresql.execute(
+        sql.SQL(
+            "DO $$ BEGIN CREATE ROLE {} LOGIN PASSWORD 'managed_migration_admin'; "
+            "EXCEPTION WHEN duplicate_object THEN "
+            "ALTER ROLE {} LOGIN PASSWORD 'managed_migration_admin'; END $$"
+        ).format(role, role)
+    )
+    postgresql.execute(
+        sql.SQL(
+            "ALTER ROLE {} LOGIN NOSUPERUSER BYPASSRLS "
+            "CREATEDB CREATEROLE REPLICATION"
+        ).format(role)
+    )
+    postgresql.execute(
+        sql.SQL("ALTER DATABASE {} OWNER TO {}").format(database, role)
+    )
+    postgresql.execute(sql.SQL("ALTER SCHEMA public OWNER TO {}").format(role))
+    postgresql.commit()
+    info = postgresql.info
+    return f"postgresql://{role_name}:{role_name}@{info.host}:{info.port}/{info.dbname}"
 
 
 async def test_tenant_bootstrap_is_idempotent_after_migrations(postgresql):
@@ -187,14 +216,14 @@ def test_cli_migrate_uses_privileged_url_in_staging(postgresql):
     assert "PostgreSQL migrado" in result.output
 
 
-def test_cli_provisions_fixed_runtime_role_without_echoing_password(postgresql):
+def test_cli_provisions_fixed_runtime_role_with_managed_admin(postgresql):
     password = "runtime-secret-for-test"
 
     result = CliRunner().invoke(
         cli,
         ["db", "provision-runtime"],
         env={
-            "MIGRATION_DATABASE_URL": _database_url(postgresql),
+            "MIGRATION_DATABASE_URL": _managed_admin_database_url(postgresql),
             "ORCHESTRATOR_RUNTIME_PASSWORD": password,
         },
     )
@@ -203,12 +232,38 @@ def test_cli_provisions_fixed_runtime_role_without_echoing_password(postgresql):
     assert password not in result.output
     row = postgresql.execute(
         """
-        SELECT rolname, rolcanlogin, rolsuper, rolbypassrls, rolcreatedb, rolcreaterole
+        SELECT rolname, rolcanlogin, rolsuper, rolbypassrls,
+               rolcreatedb, rolcreaterole, rolreplication
         FROM pg_roles
         WHERE rolname = 'orchestrator_runtime'
         """
     ).fetchone()
-    assert row == ("orchestrator_runtime", True, False, False, False, False)
+    assert row == ("orchestrator_runtime", True, False, False, False, False, False)
+
+
+def test_cli_refuses_an_existing_runtime_role_that_can_bypass_rls(postgresql):
+    migration_url = _managed_admin_database_url(postgresql)
+    postgresql.execute("CREATE ROLE orchestrator_runtime LOGIN BYPASSRLS")
+    postgresql.commit()
+
+    try:
+        result = CliRunner().invoke(
+            cli,
+            ["db", "provision-runtime"],
+            env={
+                "MIGRATION_DATABASE_URL": migration_url,
+                "ORCHESTRATOR_RUNTIME_PASSWORD": "must-not-be-applied",
+            },
+        )
+
+        assert result.exit_code == 1
+        assert "SUPERUSER/BYPASSRLS/REPLICATION" in result.output
+        assert postgresql.execute(
+            "SELECT rolbypassrls FROM pg_roles WHERE rolname = 'orchestrator_runtime'"
+        ).fetchone() == (True,)
+    finally:
+        postgresql.execute("DROP ROLE IF EXISTS orchestrator_runtime")
+        postgresql.commit()
 
 
 async def test_database_builds_from_the_portable_database_url(monkeypatch, postgresql):

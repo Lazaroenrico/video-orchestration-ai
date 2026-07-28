@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useSearchParams } from "react-router";
 import { PageHeader } from "../components/PageHeader";
 import { Card, SectionTitle } from "../components/Card";
 import { Icon } from "../components/Icon";
@@ -14,9 +15,9 @@ import { usd } from "../lib/format";
 function itemStatus(it: Item): { status: Status; label: string } {
   if (it.error) return { status: "failed", label: "Assembly Failed" };
   if (it.dropped) return { status: "failed", label: "QC Failed" };
+  if (it.assembled) return { status: "done", label: "Final Video Ready" };
   if (it.qc?.passed) return { status: "approved", label: "QC Passed" };
   if (it.qc) return { status: "review", label: "Needs Review" };
-  if (it.assembled) return { status: "done", label: "Ready" };
   return { status: "processing", label: "Processing" };
 }
 
@@ -25,7 +26,8 @@ function bestArtifact(it: Item) {
 }
 
 export function VideoReview() {
-  const { runs, active, selected, setSelected, loading, error } = useRunSelection();
+  const [searchParams] = useSearchParams();
+  const { runs, active, selected, setSelected, loading, error } = useRunSelection(searchParams.get("run"));
   const run = useRunStream(selected);
   const items = Object.values(run.items);
   const [pick, setPick] = useState<string | null>(null);
@@ -40,7 +42,7 @@ export function VideoReview() {
     <div>
       <PageHeader
         title="Video Review & QC"
-        subtitle="Review generated content for quality assurance before publishing."
+        subtitle="Inspect generated clips, QC decisions and final assembly output."
         actions={<RunSelect runs={runs} active={active} selected={selected} onChange={setSelected} />}
       />
 
@@ -81,7 +83,9 @@ export function VideoReview() {
               {current?.error && (
                 <div className="mx-4 mb-4 flex items-start gap-2 p-3 rounded-lg bg-error-container font-body-md text-body-md text-on-error-container">
                   <Icon name="error" size={18} className="mt-0.5 shrink-0" />
-                  <span>{current.error}</span>
+                  <span>
+                    <strong className="font-semibold">Assembly did not finish.</strong> {current.error} Source clips remain available above when the provider returned them.
+                  </span>
                 </div>
               )}
             </Card>
@@ -128,9 +132,12 @@ export function VideoReview() {
                 </>
               ) : (
                 <p className="font-body-md text-body-md text-on-surface-variant">
-                  QC runs after a clip is assembled. Nothing to score yet.
+                  QC and final assembly have not both completed for this item yet.
                 </p>
               )}
+              <p className="mt-5 border-t border-surface-border pt-4 font-label-sm text-label-sm leading-relaxed text-on-surface-variant">
+                Final-video upscale runs after assembly. Follow its progress in the campaign timeline.
+              </p>
             </Card>
           </div>
 
@@ -144,7 +151,8 @@ export function VideoReview() {
                   <button
                     key={it.id}
                     onClick={() => setPick(it.id)}
-                    className={`text-left rounded-lg overflow-hidden border ${
+                    aria-pressed={pick === it.id}
+                    className={`text-left rounded-lg overflow-hidden border focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary ${
                       pick === it.id ? "border-primary ring-1 ring-primary" : "border-surface-border"
                     }`}
                   >

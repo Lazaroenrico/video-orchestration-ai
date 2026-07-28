@@ -31,8 +31,8 @@ function CreatorCard({ c, onOpen }: { c: Creator; onOpen: () => void }) {
       <div className="p-4 flex flex-col gap-2">
         <div className="flex items-center justify-between">
           <span className="font-headline-md text-headline-md text-primary truncate">{c.id}</span>
-          <span className="inline-flex items-center gap-1 font-label-sm text-label-sm text-warning-review">
-            <Icon name="star" size={14} fill /> 4.8
+          <span className="inline-flex items-center gap-1 font-label-sm text-label-sm text-success-published">
+            <Icon name="check_circle" size={14} /> Media ready
           </span>
         </div>
         <p className="font-body-md text-body-md text-on-surface-variant truncate">
@@ -115,8 +115,8 @@ export function Creators() {
     <div>
       <PageHeader
         title="AI Creators Library"
-        subtitle="Manage and deploy synthetic personas for your video campaigns."
-        actions={<Button icon="add">New Creator</Button>}
+        subtitle="Reuse generated creators for draft videos and review their available media."
+        actions={<Button icon="add" onClick={() => navigate("/campaigns/new")}>Run Campaign</Button>}
       />
 
       <div className="grid grid-cols-12 gap-gutter">
@@ -134,7 +134,7 @@ export function Creators() {
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               placeholder="creator id…"
-              className="w-full rounded-lg border-surface-border bg-surface-container-lowest font-body-md text-body-md focus:ring-primary focus:border-primary"
+              className="hm-field"
             />
             <div className="mt-4 font-body-md text-body-md text-on-surface-variant">
               {creators.length} creator{creators.length === 1 ? "" : "s"} with complete media
@@ -173,8 +173,8 @@ export function Creators() {
         title={selected?.id ?? ""}
         footer={
           selected ? (
-            <Button icon="movie" className="w-full" onClick={launchDraft} disabled={drafting}>
-              {drafting ? "Starting draft..." : `Draft Video with ${selected.id}`}
+            <Button icon="movie" className="w-full" onClick={launchDraft} loading={drafting}>
+              {drafting ? "Starting draft" : `Draft Video with ${selected.id}`}
             </Button>
           ) : null
         }
@@ -193,10 +193,10 @@ export function Creators() {
             <div className="grid grid-cols-2 gap-4">
               <div className="flex flex-col">
                 <span className="font-label-sm text-label-sm uppercase tracking-wider text-on-surface-variant">
-                  Performance
+                  Media
                 </span>
                 <span className="font-headline-md text-headline-md text-primary flex items-center gap-1">
-                  <Icon name="star" size={18} fill className="text-warning-review" /> 4.8
+                  <Icon name="check_circle" size={18} className="text-success-published" /> Ready
                 </span>
               </div>
               <div className="flex flex-col">
@@ -227,7 +227,7 @@ export function Creators() {
                   if (draftError) setDraftError(null);
                 }}
                 placeholder={selected.offer || "creator draft"}
-                className="mt-2 w-full rounded-lg border-surface-border bg-surface-container-lowest font-body-md text-body-md focus:ring-primary focus:border-primary"
+                className="hm-field mt-2"
               />
             </label>
             {draftError && (

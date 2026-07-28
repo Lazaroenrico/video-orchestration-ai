@@ -7,7 +7,12 @@ from click.testing import CliRunner
 from orchestrator.cli import cli
 
 
-CLI_OFFLINE_ENV = {"LANGSMITH_TRACING": "false"}
+CLI_OFFLINE_ENV = {
+    "LANGSMITH_TRACING": "false",
+    "DATABASE_URL": "",
+    "MIGRATION_DATABASE_URL": "",
+    "ORCHESTRATOR_RUNTIME_PASSWORD": "",
+}
 
 
 def _invoke(cr: CliRunner, args):
@@ -126,6 +131,7 @@ def test_cli_provision_runtime_requires_password(monkeypatch):
     result = CliRunner().invoke(
         cli,
         ["db", "provision-runtime", "--migration-database-url", "postgresql://unused"],
+        env=CLI_OFFLINE_ENV,
     )
 
     assert result.exit_code != 0

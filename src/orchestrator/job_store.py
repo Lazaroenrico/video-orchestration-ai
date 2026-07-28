@@ -14,8 +14,9 @@ async def open_repository() -> AsyncIterator[Optional[PostgresJobRepository]]:
         yield None
         return
 
-    from orchestrator.db import Database, TenantIdentity
+    from orchestrator.db import TenantIdentity, get_shared_database
 
-    async with Database.from_env() as database:
-        tenant = await database.resolve_tenant(TenantIdentity.from_env())
-        yield PostgresJobRepository(database, tenant)
+    database = await get_shared_database()
+    tenant = await database.resolve_tenant(TenantIdentity.from_env())
+    yield PostgresJobRepository(database, tenant)
+

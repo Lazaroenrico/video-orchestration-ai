@@ -611,3 +611,12 @@ Datas absolutas. Apendar novas decisões ao final.
   tráfego de produção. A ADR detalhada `docs/ADR-D36-cloudflare-aws-portability.md` é o
   plano, com critérios de aceite e exercício de migração AWS. Nenhuma infraestrutura foi
   provisionada por esta decisão.
+
+### D37 — Migração da Camada de Persistência PostgreSQL para SQLAlchemy 2.0 Async ORM
+- **Contexto:** As consultas PostgreSQL na Fase 2 eram escritas com SQL inline nativo em strings.
+  Isso impedia verificação de tipos estática, dificultava refatorações e aumentava o risco de erros na montagem manual de cláusulas `ON CONFLICT` e `WITH ... FOR UPDATE SKIP LOCKED`.
+- **Decisão:** Refatorar todos os repositórios em `src/orchestrator/db/` (`admin.py`, `prompts.py`, `creators.py`, `feedback.py`, `artifacts.py`, `runs.py`, `effects.py`, `jobs.py`) para utilizar **SQLAlchemy 2.0 Async ORM Declarativo** e seleções tipadas (`select()`, `delete()`, `update()`, `pg_insert().on_conflict_do_update()`).
+- **Mapeamento:** Criadas 17 classes declarativas herdeiras de `DeclarativeBase` em `src/orchestrator/db/models.py`.
+- **Compilador e Dumper JSONB:** O assistente estático `Database.execute()` compila declarações especificamente para o dialecto PostgreSQL, serializa dicionários/listas Python para JSONB via `json.dumps()` e expande variáveis post-compile para cláusulas `IN (...)` / `NOT IN (...)`.
+- **Consequência:** 100% das consultas SQL inline foram substituídas sem alterar os contratos dos repositórios ou violar o isolamento RLS multi-tenant. Todos os 1093 testes da aplicação passam 100% verde. A ADR detalhada está em `docs/ADR-D37-sqlalchemy-2.0-async-orm-migration.md`.
+

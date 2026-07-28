@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useSearchParams } from "react-router";
 import { PageHeader } from "../components/PageHeader";
 import { Card, SectionTitle } from "../components/Card";
 import { Icon } from "../components/Icon";
@@ -9,7 +10,8 @@ import { useRunSelection } from "../api/useRunSelection";
 import { useRunStream } from "../api/useRunStream";
 
 export function Queue() {
-  const { runs, active, selected, setSelected, loading, error } = useRunSelection();
+  const [searchParams] = useSearchParams();
+  const { runs, active, selected, setSelected, loading, error } = useRunSelection(searchParams.get("run"));
   const run = useRunStream(selected);
   const [showTrace, setShowTrace] = useState(true);
 
@@ -21,8 +23,8 @@ export function Queue() {
   return (
     <div>
       <PageHeader
-        title="Job Queue Orchestrator"
-        subtitle="Real-time orchestration pipeline status."
+        title="Operations Trace"
+        subtitle="Real-time stage activity for the selected orchestration run."
         actions={
           <RunSelect runs={runs} active={active} selected={selected} onChange={setSelected} />
         }
@@ -38,7 +40,7 @@ export function Queue() {
         <div className="grid grid-cols-12 gap-gutter">
           <div className="col-span-12 xl:col-span-8">
             <Card>
-              <SectionTitle title="Active Jobs" />
+              <SectionTitle title="Stage activity" />
               {jobs.length === 0 && (
                 <p className="font-body-md text-body-md text-on-surface-variant py-8 text-center">
                   {active.has(selected ?? "")
@@ -51,7 +53,7 @@ export function Queue() {
                   const s = jobStatus(n.status);
                   return (
                     <div key={`${n.node}-${i}`} className="flex items-center gap-4 py-3">
-                      <span className="font-mono text-label-sm text-label-sm text-on-surface-variant w-16">
+                      <span className="font-mono text-label-sm text-label-sm text-on-surface-variant w-16" aria-hidden="true">
                         #{String(i + 1).padStart(3, "0")}
                       </span>
                       <div className="w-9 h-9 rounded-lg bg-surface-container flex items-center justify-center text-on-surface-variant">
@@ -73,7 +75,7 @@ export function Queue() {
           <div className="col-span-12 xl:col-span-4">
             <Card>
               <div className="flex items-center justify-between mb-4">
-                <span className="font-headline-md text-headline-md text-primary">Run Detail</span>
+                <span className="font-headline-md text-headline-md text-primary">Runtime detail</span>
                 <StatusPill
                   status={run.phase === "error" ? "failed" : run.phase === "done" ? "done" : "processing"}
                   label={run.phase}
@@ -85,7 +87,7 @@ export function Queue() {
                     onClick={() => setShowTrace((v) => !v)}
                     className="flex items-center gap-2 text-error font-label-md text-label-md mb-2"
                   >
-                    <Icon name={showTrace ? "expand_less" : "expand_more"} size={18} /> Error Trace
+                    <Icon name={showTrace ? "expand_less" : "expand_more"} size={18} /> Technical error detail
                   </button>
                   {showTrace && (
                     <pre className="bg-inverse-surface text-inverse-on-surface rounded-lg p-3 text-xs overflow-x-auto whitespace-pre-wrap font-mono">

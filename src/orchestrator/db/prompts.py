@@ -3,7 +3,11 @@ from __future__ import annotations
 
 from typing import Any
 
+from sqlalchemy import delete, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+
 from orchestrator.db.database import Database
+from orchestrator.db.models import PromptLastUsed, PromptTemplate
 from orchestrator.db.tenancy import TenantContext
 from orchestrator.prompts import validate_template
 
@@ -32,17 +36,19 @@ class PostgresPromptRepository:
             text=text,
             desc=desc,
         )
-        async with self._database.connection(self._tenant) as connection:
-            cursor = await connection.execute(
-                """
-                INSERT INTO prompt_templates (
-                    organization_id, kind, title, description, text
-                )
-                VALUES (%s, %s, %s, %s, %s)
-                RETURNING id
-                """,
-                (self._tenant.organization_id, kind, title, desc, text),
+        stmt = (
+            pg_insert(PromptTemplate)
+            .values(
+                organization_id=self._tenant.organization_id,
+                kind=kind,
+                title=title,
+                description=desc,
+                text=text,
             )
+            .returning(PromptTemplate.id)
+        )
+        async with self._database.connection(self._tenant) as connection:
+            cursor = await self._database.execute(connection, stmt)
             template_id = (await cursor.fetchone())[0]
         return {
             "id": str(template_id),
@@ -53,18 +59,22 @@ class PostgresPromptRepository:
         }
 
     async def list_templates(self, kind: str | None = None) -> list[dict[str, Any]]:
-        query = """
-            SELECT id, kind, title, description, text
-            FROM prompt_templates
-            WHERE organization_id = %s
-        """
-        params: tuple[object, ...] = (self._tenant.organization_id,)
+        stmt = (
+            select(
+                PromptTemplate.id,
+                PromptTemplate.kind,
+                PromptTemplate.title,
+                PromptTemplate.description,
+                PromptTemplate.text,
+            )
+            .where(PromptTemplate.organization_id == self._tenant.organization_id)
+            .order_by(PromptTemplate.id.desc())
+        )
         if kind is not None:
-            query += " AND kind = %s"
-            params += (kind,)
-        query += " ORDER BY id DESC"
+            stmt = stmt.where(PromptTemplate.kind == kind)
+
         async with self._database.connection(self._tenant) as connection:
-            cursor = await connection.execute(query, params)
+            cursor = await self._database.execute(connection, stmt)
             rows = await cursor.fetchall()
         return [
             {
@@ -82,15 +92,16 @@ class PostgresPromptRepository:
             numeric_id = int(template_id)
         except (TypeError, ValueError):
             return False
-        async with self._database.connection(self._tenant) as connection:
-            cursor = await connection.execute(
-                """
-                DELETE FROM prompt_templates
-                WHERE organization_id = %s AND id = %s
-                RETURNING id
-                """,
-                (self._tenant.organization_id, numeric_id),
+        stmt = (
+            delete(PromptTemplate)
+            .where(
+                PromptTemplate.organization_id == self._tenant.organization_id,
+                PromptTemplate.id == numeric_id,
             )
+            .returning(PromptTemplate.id)
+        )
+        async with self._database.connection(self._tenant) as connection:
+            cursor = await self._database.execute(connection, stmt)
             deleted = await cursor.fetchone()
         return deleted is not None
 
@@ -108,27 +119,29 @@ class PostgresPromptRepository:
         if not updates:
             return
         async with self._database.connection(self._tenant) as connection:
-            for kind, text in updates.items():
-                await connection.execute(
-                    """
-                    INSERT INTO prompt_last_used (organization_id, kind, text)
-                    VALUES (%s, %s, %s)
-                    ON CONFLICT (organization_id, kind) DO UPDATE
-                    SET text = EXCLUDED.text, updated_at = CURRENT_TIMESTAMP
-                    """,
-                    (self._tenant.organization_id, kind, text),
+            for kind, text_val in updates.items():
+                stmt = (
+                    pg_insert(PromptLastUsed)
+                    .values(
+                        organization_id=self._tenant.organization_id,
+                        kind=kind,
+                        text=text_val,
+                    )
+                    .on_conflict_do_update(
+                        index_elements=["organization_id", "kind"],
+                        set_={"text": text_val},
+                    )
                 )
+                await self._database.execute(connection, stmt)
 
     async def get_last_used(self) -> dict[str, str]:
+        stmt = (
+            select(PromptLastUsed.kind, PromptLastUsed.text)
+            .where(PromptLastUsed.organization_id == self._tenant.organization_id)
+            .order_by(PromptLastUsed.kind)
+        )
         async with self._database.connection(self._tenant) as connection:
-            cursor = await connection.execute(
-                """
-                SELECT kind, text
-                FROM prompt_last_used
-                WHERE organization_id = %s
-                ORDER BY kind
-                """,
-                (self._tenant.organization_id,),
-            )
+            cursor = await self._database.execute(connection, stmt)
             rows = await cursor.fetchall()
         return dict(rows)
+

@@ -2,13 +2,21 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import NAMESPACE_URL, UUID, uuid5
 
-from psycopg.types.json import Jsonb
+from sqlalchemy import and_, delete, func, or_, select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from orchestrator.db.database import Database
+from orchestrator.db.models import (
+    Job as JobModel,
+    Outbox as OutboxModel,
+    Run as RunModel,
+    RunEvent as RunEventModel,
+    RunGate as RunGateModel,
+)
 from orchestrator.db.tenancy import TenantContext
 
 
@@ -95,15 +103,19 @@ def _job(row: tuple[Any, ...]) -> Job:
     )
 
 
-_JOB_COLUMNS = """
-    id, run_id, kind, status, payload, attempt, max_attempts,
-    available_at, lease_expires_at, worker_id, error
-"""
-_QUALIFIED_JOB_COLUMNS = """
-    jobs.id, jobs.run_id, jobs.kind, jobs.status, jobs.payload, jobs.attempt,
-    jobs.max_attempts, jobs.available_at, jobs.lease_expires_at,
-    jobs.worker_id, jobs.error
-"""
+_JOB_COLUMNS = (
+    JobModel.id,
+    JobModel.run_id,
+    JobModel.kind,
+    JobModel.status,
+    JobModel.payload,
+    JobModel.attempt,
+    JobModel.max_attempts,
+    JobModel.available_at,
+    JobModel.lease_expires_at,
+    JobModel.worker_id,
+    JobModel.error,
+)
 
 
 class PostgresJobRepository:
@@ -127,46 +139,40 @@ class PostgresJobRepository:
         timestamp = now or datetime.now(UTC)
         job_id = _job_id(self._tenant.organization_id, run_id, "execute_run")
         async with self._database.connection(self._tenant) as connection:
-            await connection.execute(
-                """
-                INSERT INTO runs (
-                    organization_id, id, offer, platform, batch_size, phase
+            stmt_run = (
+                pg_insert(RunModel)
+                .values(
+                    organization_id=self._tenant.organization_id,
+                    id=run_id,
+                    offer=offer,
+                    platform=platform,
+                    batch_size=batch_size,
+                    phase="running",
+                    summary={},
+                    state={},
                 )
-                VALUES (%s, %s, %s, %s, %s, 'running')
-                ON CONFLICT (organization_id, id) DO NOTHING
-                """,
-                (
-                    self._tenant.organization_id,
-                    run_id,
-                    offer,
-                    platform,
-                    batch_size,
-                ),
+                .on_conflict_do_nothing(index_elements=["organization_id", "id"])
             )
-            inserted = await connection.execute(
-                """
-                INSERT INTO jobs (
-                    organization_id, id, run_id, kind, status,
-                    payload, max_attempts, available_at, created_at, updated_at
+            await self._database.execute(connection,stmt_run)
+
+            stmt_job = (
+                pg_insert(JobModel)
+                .values(
+                    organization_id=self._tenant.organization_id,
+                    id=job_id,
+                    run_id=run_id,
+                    kind="execute_run",
+                    status="queued",
+                    payload=payload,
+                    max_attempts=max_attempts,
+                    available_at=timestamp,
+                    created_at=timestamp,
+                    updated_at=timestamp,
                 )
-                VALUES (
-                    %s, %s, %s, 'execute_run', 'queued',
-                    %s, %s, %s, %s, %s
-                )
-                ON CONFLICT (organization_id, id) DO NOTHING
-                RETURNING id
-                """,
-                (
-                    self._tenant.organization_id,
-                    job_id,
-                    run_id,
-                    Jsonb(payload),
-                    max_attempts,
-                    timestamp,
-                    timestamp,
-                    timestamp,
-                ),
+                .on_conflict_do_nothing(index_elements=["organization_id", "id"])
+                .returning(JobModel.id)
             )
+            inserted = await self._database.execute(connection,stmt_job)
             if await inserted.fetchone() is not None:
                 await self._append_event(
                     connection,
@@ -186,27 +192,24 @@ class PostgresJobRepository:
                     },
                     timestamp,
                 )
-                await connection.execute(
-                    """
-                    INSERT INTO outbox (
-                        organization_id, topic, message_key, payload,
-                        available_at, created_at
-                    )
-                    VALUES (%s, 'run.queued', %s, %s, %s, %s)
-                    """,
-                    (
-                        self._tenant.organization_id,
-                        str(job_id),
-                        Jsonb({"job_id": str(job_id), "run_id": run_id}),
-                        timestamp,
-                        timestamp,
-                    ),
+                stmt_outbox = pg_insert(OutboxModel).values(
+                    organization_id=self._tenant.organization_id,
+                    topic="run.queued",
+                    message_key=str(job_id),
+                    payload={"job_id": str(job_id), "run_id": run_id},
+                    available_at=timestamp,
+                    created_at=timestamp,
                 )
-            cursor = await connection.execute(
-                f"SELECT {_JOB_COLUMNS} FROM jobs "
-                "WHERE organization_id = %s AND id = %s",
-                (self._tenant.organization_id, job_id),
+                await self._database.execute(connection,stmt_outbox)
+
+            stmt_select = (
+                select(*_JOB_COLUMNS)
+                .where(
+                    JobModel.organization_id == self._tenant.organization_id,
+                    JobModel.id == job_id,
+                )
             )
+            cursor = await self._database.execute(connection,stmt_select)
             row = await cursor.fetchone()
         assert row is not None
         return _job(row)
@@ -219,51 +222,45 @@ class PostgresJobRepository:
         now: datetime | None = None,
     ) -> list[Job]:
         timestamp = now or datetime.now(UTC)
-        async with self._database.connection(self._tenant) as connection:
-            cursor = await connection.execute(
-                f"""
-                WITH candidates AS (
-                    SELECT id
-                    FROM jobs
-                    WHERE organization_id = %s
-                      AND (
-                        (
-                          status IN ('queued', 'retry')
-                          AND available_at <= %s
-                        )
-                        OR (
-                          status = 'running'
-                          AND lease_expires_at <= %s
-                        )
-                      )
-                    ORDER BY available_at, created_at, id
-                    FOR UPDATE SKIP LOCKED
-                    LIMIT %s
-                )
-                UPDATE jobs AS jobs
-                SET status = 'running',
-                    attempt = jobs.attempt + 1,
-                    worker_id = %s,
-                    lease_expires_at = %s + make_interval(secs => %s),
-                    error = NULL,
-                    updated_at = %s
-                FROM candidates
-                WHERE jobs.organization_id = %s
-                  AND jobs.id = candidates.id
-                RETURNING {_QUALIFIED_JOB_COLUMNS}
-                """,
-                (
-                    self._tenant.organization_id,
-                    timestamp,
-                    timestamp,
-                    limit,
-                    worker_id,
-                    timestamp,
-                    LEASE_SECONDS,
-                    timestamp,
-                    self._tenant.organization_id,
+        candidates = (
+            select(JobModel.id)
+            .where(
+                JobModel.organization_id == self._tenant.organization_id,
+                or_(
+                    and_(
+                        JobModel.status.in_(["queued", "retry"]),
+                        JobModel.available_at <= timestamp,
+                    ),
+                    and_(
+                        JobModel.status == "running",
+                        JobModel.lease_expires_at <= timestamp,
+                    ),
                 ),
             )
+            .order_by(JobModel.available_at, JobModel.created_at, JobModel.id)
+            .with_for_update(skip_locked=True)
+            .limit(limit)
+            .cte("candidates")
+        )
+
+        stmt = (
+            update(JobModel)
+            .where(
+                JobModel.organization_id == self._tenant.organization_id,
+                JobModel.id == candidates.c.id,
+            )
+            .values(
+                status="running",
+                attempt=JobModel.attempt + 1,
+                worker_id=worker_id,
+                lease_expires_at=timestamp + timedelta(seconds=LEASE_SECONDS),
+                error=None,
+                updated_at=timestamp,
+            )
+            .returning(*_JOB_COLUMNS)
+        )
+        async with self._database.connection(self._tenant) as connection:
+            cursor = await self._database.execute(connection,stmt)
             rows = await cursor.fetchall()
             jobs = [_job(row) for row in rows]
             for claimed in jobs:
@@ -288,25 +285,24 @@ class PostgresJobRepository:
         now: datetime | None = None,
     ) -> None:
         timestamp = now or datetime.now(UTC)
-        async with self._database.connection(self._tenant) as connection:
-            cursor = await connection.execute(
-                """
-                UPDATE jobs
-                SET status = 'succeeded', lease_expires_at = NULL,
-                    updated_at = %s
-                WHERE organization_id = %s AND id = %s
-                  AND status = 'running' AND worker_id = %s
-                  AND lease_expires_at > %s
-                RETURNING run_id
-                """,
-                (
-                    timestamp,
-                    self._tenant.organization_id,
-                    job_id,
-                    worker_id,
-                    timestamp,
-                ),
+        stmt = (
+            update(JobModel)
+            .where(
+                JobModel.organization_id == self._tenant.organization_id,
+                JobModel.id == job_id,
+                JobModel.status == "running",
+                JobModel.worker_id == worker_id,
+                JobModel.lease_expires_at > timestamp,
             )
+            .values(
+                status="succeeded",
+                lease_expires_at=None,
+                updated_at=timestamp,
+            )
+            .returning(JobModel.run_id)
+        )
+        async with self._database.connection(self._tenant) as connection:
+            cursor = await self._database.execute(connection,stmt)
             row = await cursor.fetchone()
             if row is None:
                 raise LeaseLostError(f"lease perdido para job {job_id}")
@@ -326,27 +322,23 @@ class PostgresJobRepository:
         now: datetime | None = None,
     ) -> Job:
         timestamp = now or datetime.now(UTC)
-        async with self._database.connection(self._tenant) as connection:
-            cursor = await connection.execute(
-                f"""
-                UPDATE jobs
-                SET lease_expires_at = %s + make_interval(secs => %s),
-                    updated_at = %s
-                WHERE organization_id = %s AND id = %s
-                  AND status = 'running' AND worker_id = %s
-                  AND lease_expires_at > %s
-                RETURNING {_JOB_COLUMNS}
-                """,
-                (
-                    timestamp,
-                    LEASE_SECONDS,
-                    timestamp,
-                    self._tenant.organization_id,
-                    job_id,
-                    worker_id,
-                    timestamp,
-                ),
+        stmt = (
+            update(JobModel)
+            .where(
+                JobModel.organization_id == self._tenant.organization_id,
+                JobModel.id == job_id,
+                JobModel.status == "running",
+                JobModel.worker_id == worker_id,
+                JobModel.lease_expires_at > timestamp,
             )
+            .values(
+                lease_expires_at=timestamp + timedelta(seconds=LEASE_SECONDS),
+                updated_at=timestamp,
+            )
+            .returning(*_JOB_COLUMNS)
+        )
+        async with self._database.connection(self._tenant) as connection:
+            cursor = await self._database.execute(connection,stmt)
             row = await cursor.fetchone()
             if row is None:
                 raise LeaseLostError(f"lease perdido para job {job_id}")
@@ -369,51 +361,43 @@ class PostgresJobRepository:
         now: datetime | None = None,
     ) -> Job:
         timestamp = now or datetime.now(UTC)
-        async with self._database.connection(self._tenant) as connection:
-            cursor = await connection.execute(
-                f"""
-                SELECT {_JOB_COLUMNS}
-                FROM jobs
-                WHERE organization_id = %s AND id = %s
-                  AND status = 'running' AND worker_id = %s
-                  AND lease_expires_at > %s
-                FOR UPDATE
-                """,
-                (
-                    self._tenant.organization_id,
-                    job_id,
-                    worker_id,
-                    timestamp,
-                ),
+        stmt_check = (
+            select(*_JOB_COLUMNS)
+            .where(
+                JobModel.organization_id == self._tenant.organization_id,
+                JobModel.id == job_id,
+                JobModel.status == "running",
+                JobModel.worker_id == worker_id,
+                JobModel.lease_expires_at > timestamp,
             )
+            .with_for_update()
+        )
+        async with self._database.connection(self._tenant) as connection:
+            cursor = await self._database.execute(connection,stmt_check)
             row = await cursor.fetchone()
             if row is None:
                 raise LeaseLostError(f"lease perdido para job {job_id}")
             current = _job(row)
             will_retry = current.attempt < current.max_attempts
             delay_seconds = min(5 * (2 ** (current.attempt - 1)), 300)
-            updated = await connection.execute(
-                f"""
-                UPDATE jobs
-                SET status = %s,
-                    available_at = %s + make_interval(secs => %s),
-                    lease_expires_at = NULL,
-                    worker_id = NULL,
-                    error = %s,
-                    updated_at = %s
-                WHERE organization_id = %s AND id = %s
-                RETURNING {_JOB_COLUMNS}
-                """,
-                (
-                    "retry" if will_retry else "failed",
-                    timestamp,
-                    delay_seconds if will_retry else 0,
-                    error[:2000],
-                    timestamp,
-                    self._tenant.organization_id,
-                    job_id,
-                ),
+
+            stmt_update = (
+                update(JobModel)
+                .where(
+                    JobModel.organization_id == self._tenant.organization_id,
+                    JobModel.id == job_id,
+                )
+                .values(
+                    status="retry" if will_retry else "failed",
+                    available_at=timestamp + timedelta(seconds=delay_seconds if will_retry else 0),
+                    lease_expires_at=None,
+                    worker_id=None,
+                    error=error[:2000],
+                    updated_at=timestamp,
+                )
+                .returning(*_JOB_COLUMNS)
             )
+            updated = await self._database.execute(connection,stmt_update)
             updated_row = await updated.fetchone()
             assert updated_row is not None
             failed = _job(updated_row)
@@ -430,19 +414,19 @@ class PostgresJobRepository:
                 timestamp,
             )
             if not will_retry:
-                await connection.execute(
-                    """
-                    UPDATE runs
-                    SET phase = 'error', error = %s, updated_at = %s
-                    WHERE organization_id = %s AND id = %s
-                    """,
-                    (
-                        failed.error,
-                        timestamp,
-                        self._tenant.organization_id,
-                        failed.run_id,
-                    ),
+                stmt_run_error = (
+                    update(RunModel)
+                    .where(
+                        RunModel.organization_id == self._tenant.organization_id,
+                        RunModel.id == failed.run_id,
+                    )
+                    .values(
+                        phase="error",
+                        error=failed.error,
+                        updated_at=timestamp,
+                    )
                 )
+                await self._database.execute(connection,stmt_run_error)
                 await self._append_event(
                     connection,
                     failed.run_id,
@@ -453,12 +437,15 @@ class PostgresJobRepository:
         return failed
 
     async def get(self, job_id: UUID) -> Job | None:
-        async with self._database.connection(self._tenant) as connection:
-            cursor = await connection.execute(
-                f"SELECT {_JOB_COLUMNS} FROM jobs "
-                "WHERE organization_id = %s AND id = %s",
-                (self._tenant.organization_id, job_id),
+        stmt = (
+            select(*_JOB_COLUMNS)
+            .where(
+                JobModel.organization_id == self._tenant.organization_id,
+                JobModel.id == job_id,
             )
+        )
+        async with self._database.connection(self._tenant) as connection:
+            cursor = await self._database.execute(connection,stmt)
             row = await cursor.fetchone()
         return _job(row) if row is not None else None
 
@@ -471,63 +458,59 @@ class PostgresJobRepository:
         now: datetime | None = None,
     ) -> RunGate:
         timestamp = now or datetime.now(UTC)
-        async with self._database.connection(self._tenant) as connection:
-            locked_run = await connection.execute(
-                """
-                SELECT id
-                FROM runs
-                WHERE organization_id = %s AND id = %s
-                FOR UPDATE
-                """,
-                (self._tenant.organization_id, run_id),
+        stmt_run = (
+            select(RunModel.id)
+            .where(
+                RunModel.organization_id == self._tenant.organization_id,
+                RunModel.id == run_id,
             )
+            .with_for_update()
+        )
+        stmt_version = (
+            select(func.coalesce(func.max(RunGateModel.version), 0) + 1)
+            .where(
+                RunGateModel.organization_id == self._tenant.organization_id,
+                RunGateModel.run_id == run_id,
+                RunGateModel.gate_type == gate_type,
+            )
+        )
+        async with self._database.connection(self._tenant) as connection:
+            locked_run = await self._database.execute(connection,stmt_run)
             if await locked_run.fetchone() is None:
                 raise ValueError(f"run {run_id!r} inexistente")
-            versions = await connection.execute(
-                """
-                SELECT COALESCE(MAX(version), 0) + 1
-                FROM run_gates
-                WHERE organization_id = %s AND run_id = %s AND gate_type = %s
-                """,
-                (self._tenant.organization_id, run_id, gate_type),
-            )
+            versions = await self._database.execute(connection,stmt_version)
             version = int((await versions.fetchone())[0])
             gate_id = _job_id(
                 self._tenant.organization_id,
                 run_id,
                 f"gate:{gate_type}:{version}",
             )
-            await connection.execute(
-                """
-                INSERT INTO run_gates (
-                    organization_id, id, run_id, gate_type, version,
-                    status, payload, created_at
+            stmt_insert_gate = (
+                pg_insert(RunGateModel)
+                .values(
+                    organization_id=self._tenant.organization_id,
+                    id=gate_id,
+                    run_id=run_id,
+                    gate_type=gate_type,
+                    version=version,
+                    status="pending",
+                    payload=payload,
+                    created_at=timestamp,
                 )
-                VALUES (%s, %s, %s, %s, %s, 'pending', %s, %s)
-                """,
-                (
-                    self._tenant.organization_id,
-                    gate_id,
-                    run_id,
-                    gate_type,
-                    version,
-                    Jsonb(payload),
-                    timestamp,
-                ),
             )
-            await connection.execute(
-                """
-                UPDATE runs
-                SET phase = %s, updated_at = %s
-                WHERE organization_id = %s AND id = %s
-                """,
-                (
-                    "editing" if gate_type == "edit_concepts" else "awaiting",
-                    timestamp,
-                    self._tenant.organization_id,
-                    run_id,
-                ),
+            stmt_update_run = (
+                update(RunModel)
+                .where(
+                    RunModel.organization_id == self._tenant.organization_id,
+                    RunModel.id == run_id,
+                )
+                .values(
+                    phase="editing" if gate_type == "edit_concepts" else "awaiting",
+                    updated_at=timestamp,
+                )
             )
+            await self._database.execute(connection,stmt_insert_gate)
+            await self._database.execute(connection,stmt_update_run)
             await self._append_event(
                 connection,
                 run_id,
@@ -567,17 +550,26 @@ class PostgresJobRepository:
         )
 
     async def get_pending_gate(self, run_id: str) -> RunGate | None:
-        async with self._database.connection(self._tenant) as connection:
-            cursor = await connection.execute(
-                """
-                SELECT id, run_id, gate_type, version, status, payload, resolution
-                FROM run_gates
-                WHERE organization_id = %s AND run_id = %s AND status = 'pending'
-                ORDER BY version DESC
-                LIMIT 1
-                """,
-                (self._tenant.organization_id, run_id),
+        stmt = (
+            select(
+                RunGateModel.id,
+                RunGateModel.run_id,
+                RunGateModel.gate_type,
+                RunGateModel.version,
+                RunGateModel.status,
+                RunGateModel.payload,
+                RunGateModel.resolution,
             )
+            .where(
+                RunGateModel.organization_id == self._tenant.organization_id,
+                RunGateModel.run_id == run_id,
+                RunGateModel.status == "pending",
+            )
+            .order_by(RunGateModel.version.desc())
+            .limit(1)
+        )
+        async with self._database.connection(self._tenant) as connection:
+            cursor = await self._database.execute(connection,stmt)
             row = await cursor.fetchone()
         return RunGate(*row) if row is not None else None
 
@@ -590,41 +582,47 @@ class PostgresJobRepository:
         now: datetime | None = None,
     ) -> Job:
         timestamp = now or datetime.now(UTC)
-        async with self._database.connection(self._tenant) as connection:
-            cursor = await connection.execute(
-                """
-                UPDATE run_gates
-                SET status = 'resolved', resolution = %s, resolved_at = %s
-                WHERE organization_id = %s AND id = %s
-                  AND version = %s AND status = 'pending'
-                RETURNING run_id, gate_type, payload
-                """,
-                (
-                    Jsonb(resolution),
-                    timestamp,
-                    self._tenant.organization_id,
-                    gate_id,
-                    version,
-                ),
+        stmt_gate = (
+            update(RunGateModel)
+            .where(
+                RunGateModel.organization_id == self._tenant.organization_id,
+                RunGateModel.id == gate_id,
+                RunGateModel.version == version,
+                RunGateModel.status == "pending",
             )
+            .values(
+                status="resolved",
+                resolution=resolution,
+                resolved_at=timestamp,
+            )
+            .returning(
+                RunGateModel.run_id,
+                RunGateModel.gate_type,
+                RunGateModel.payload,
+            )
+        )
+        async with self._database.connection(self._tenant) as connection:
+            cursor = await self._database.execute(connection,stmt_gate)
             gate_row = await cursor.fetchone()
             if gate_row is None:
                 raise StaleGateError(
                     f"gate {gate_id} versão {version} está stale"
                 )
             run_id, gate_type, gate_payload = gate_row
-            initial_cursor = await connection.execute(
-                """
-                SELECT payload
-                FROM jobs
-                WHERE organization_id = %s AND run_id = %s
-                  AND kind = 'execute_run'
-                ORDER BY created_at
-                LIMIT 1
-                """,
-                (self._tenant.organization_id, run_id),
+
+            stmt_initial_job = (
+                select(JobModel.payload)
+                .where(
+                    JobModel.organization_id == self._tenant.organization_id,
+                    JobModel.run_id == run_id,
+                    JobModel.kind == "execute_run",
+                )
+                .order_by(JobModel.created_at)
+                .limit(1)
             )
+            initial_cursor = await self._database.execute(connection,stmt_initial_job)
             initial_row = await initial_cursor.fetchone()
+
             payload = {
                 "gate_id": str(gate_id),
                 "gate_version": version,
@@ -638,50 +636,36 @@ class PostgresJobRepository:
                 run_id,
                 f"resume:{gate_id}:{version}",
             )
-            await connection.execute(
-                """
-                INSERT INTO jobs (
-                    organization_id, id, run_id, kind, status, payload,
-                    available_at, created_at, updated_at
-                )
-                VALUES (
-                    %s, %s, %s, 'resume_run', 'queued', %s, %s, %s, %s
-                )
-                """,
-                (
-                    self._tenant.organization_id,
-                    job_id,
-                    run_id,
-                    Jsonb(payload),
-                    timestamp,
-                    timestamp,
-                    timestamp,
-                ),
+            stmt_insert_job = pg_insert(JobModel).values(
+                organization_id=self._tenant.organization_id,
+                id=job_id,
+                run_id=run_id,
+                kind="resume_run",
+                status="queued",
+                payload=payload,
+                available_at=timestamp,
+                created_at=timestamp,
+                updated_at=timestamp,
             )
-            await connection.execute(
-                """
-                INSERT INTO outbox (
-                    organization_id, topic, message_key, payload,
-                    available_at, created_at
+            stmt_outbox = pg_insert(OutboxModel).values(
+                organization_id=self._tenant.organization_id,
+                topic="run.resume",
+                message_key=str(job_id),
+                payload={"job_id": str(job_id), "run_id": run_id},
+                available_at=timestamp,
+                created_at=timestamp,
+            )
+            stmt_run_phase = (
+                update(RunModel)
+                .where(
+                    RunModel.organization_id == self._tenant.organization_id,
+                    RunModel.id == run_id,
                 )
-                VALUES (%s, 'run.resume', %s, %s, %s, %s)
-                """,
-                (
-                    self._tenant.organization_id,
-                    str(job_id),
-                    Jsonb({"job_id": str(job_id), "run_id": run_id}),
-                    timestamp,
-                    timestamp,
-                ),
+                .values(phase="running", updated_at=timestamp)
             )
-            await connection.execute(
-                """
-                UPDATE runs
-                SET phase = 'running', updated_at = %s
-                WHERE organization_id = %s AND id = %s
-                """,
-                (timestamp, self._tenant.organization_id, run_id),
-            )
+            await self._database.execute(connection,stmt_insert_job)
+            await self._database.execute(connection,stmt_outbox)
+            await self._database.execute(connection,stmt_run_phase)
             await self._append_event(
                 connection,
                 run_id,
@@ -693,11 +677,14 @@ class PostgresJobRepository:
                 },
                 timestamp,
             )
-            job_cursor = await connection.execute(
-                f"SELECT {_JOB_COLUMNS} FROM jobs "
-                "WHERE organization_id = %s AND id = %s",
-                (self._tenant.organization_id, job_id),
+            stmt_job = (
+                select(*_JOB_COLUMNS)
+                .where(
+                    JobModel.organization_id == self._tenant.organization_id,
+                    JobModel.id == job_id,
+                )
             )
+            job_cursor = await self._database.execute(connection,stmt_job)
             job_row = await job_cursor.fetchone()
         assert job_row is not None
         return _job(job_row)
@@ -708,31 +695,44 @@ class PostgresJobRepository:
         *,
         after_seq: int = 0,
     ) -> list[RunEvent]:
-        async with self._database.connection(self._tenant) as connection:
-            cursor = await connection.execute(
-                """
-                SELECT seq, run_id, event_type, data, created_at
-                FROM run_events
-                WHERE organization_id = %s AND run_id = %s AND seq > %s
-                ORDER BY seq
-                """,
-                (self._tenant.organization_id, run_id, after_seq),
+        stmt = (
+            select(
+                RunEventModel.seq,
+                RunEventModel.run_id,
+                RunEventModel.event_type,
+                RunEventModel.data,
+                RunEventModel.created_at,
             )
+            .where(
+                RunEventModel.organization_id == self._tenant.organization_id,
+                RunEventModel.run_id == run_id,
+                RunEventModel.seq > after_seq,
+            )
+            .order_by(RunEventModel.seq)
+        )
+        async with self._database.connection(self._tenant) as connection:
+            cursor = await self._database.execute(connection,stmt)
             rows = await cursor.fetchall()
         return [RunEvent(*row) for row in rows]
 
     async def list_outbox(self) -> list[OutboxEntry]:
-        async with self._database.connection(self._tenant) as connection:
-            cursor = await connection.execute(
-                """
-                SELECT id, topic, message_key, payload, status, attempt,
-                       lease_expires_at, worker_id, error
-                FROM outbox
-                WHERE organization_id = %s
-                ORDER BY id
-                """,
-                (self._tenant.organization_id,),
+        stmt = (
+            select(
+                OutboxModel.id,
+                OutboxModel.topic,
+                OutboxModel.message_key,
+                OutboxModel.payload,
+                OutboxModel.status,
+                OutboxModel.attempt,
+                OutboxModel.lease_expires_at,
+                OutboxModel.worker_id,
+                OutboxModel.error,
             )
+            .where(OutboxModel.organization_id == self._tenant.organization_id)
+            .order_by(OutboxModel.id)
+        )
+        async with self._database.connection(self._tenant) as connection:
+            cursor = await self._database.execute(connection,stmt)
             rows = await cursor.fetchall()
         return [OutboxEntry(*row) for row in rows]
 
@@ -744,48 +744,54 @@ class PostgresJobRepository:
         now: datetime | None = None,
     ) -> list[OutboxEntry]:
         timestamp = now or datetime.now(UTC)
-        async with self._database.connection(self._tenant) as connection:
-            cursor = await connection.execute(
-                """
-                WITH candidates AS (
-                    SELECT id
-                    FROM outbox
-                    WHERE organization_id = %s
-                      AND (
-                        (status = 'pending' AND available_at <= %s)
-                        OR (
-                          status = 'publishing'
-                          AND lease_expires_at <= %s
-                        )
-                      )
-                    ORDER BY available_at, id
-                    FOR UPDATE SKIP LOCKED
-                    LIMIT %s
-                )
-                UPDATE outbox AS outbox
-                SET status = 'publishing',
-                    attempt = outbox.attempt + 1,
-                    worker_id = %s,
-                    lease_expires_at = %s + make_interval(secs => %s),
-                    error = NULL
-                FROM candidates
-                WHERE outbox.organization_id = %s
-                  AND outbox.id = candidates.id
-                RETURNING outbox.id, outbox.topic, outbox.message_key,
-                          outbox.payload, outbox.status, outbox.attempt,
-                          outbox.lease_expires_at, outbox.worker_id, outbox.error
-                """,
-                (
-                    self._tenant.organization_id,
-                    timestamp,
-                    timestamp,
-                    limit,
-                    worker_id,
-                    timestamp,
-                    LEASE_SECONDS,
-                    self._tenant.organization_id,
+        candidates = (
+            select(OutboxModel.id)
+            .where(
+                OutboxModel.organization_id == self._tenant.organization_id,
+                or_(
+                    and_(
+                        OutboxModel.status == "pending",
+                        OutboxModel.available_at <= timestamp,
+                    ),
+                    and_(
+                        OutboxModel.status == "publishing",
+                        OutboxModel.lease_expires_at <= timestamp,
+                    ),
                 ),
             )
+            .order_by(OutboxModel.available_at, OutboxModel.id)
+            .with_for_update(skip_locked=True)
+            .limit(limit)
+            .cte("candidates")
+        )
+
+        stmt = (
+            update(OutboxModel)
+            .where(
+                OutboxModel.organization_id == self._tenant.organization_id,
+                OutboxModel.id == candidates.c.id,
+            )
+            .values(
+                status="publishing",
+                attempt=OutboxModel.attempt + 1,
+                worker_id=worker_id,
+                lease_expires_at=timestamp + timedelta(seconds=LEASE_SECONDS),
+                error=None,
+            )
+            .returning(
+                OutboxModel.id,
+                OutboxModel.topic,
+                OutboxModel.message_key,
+                OutboxModel.payload,
+                OutboxModel.status,
+                OutboxModel.attempt,
+                OutboxModel.lease_expires_at,
+                OutboxModel.worker_id,
+                OutboxModel.error,
+            )
+        )
+        async with self._database.connection(self._tenant) as connection:
+            cursor = await self._database.execute(connection,stmt)
             rows = await cursor.fetchall()
         return [OutboxEntry(*row) for row in rows]
 
@@ -797,25 +803,25 @@ class PostgresJobRepository:
         now: datetime | None = None,
     ) -> None:
         timestamp = now or datetime.now(UTC)
-        async with self._database.connection(self._tenant) as connection:
-            cursor = await connection.execute(
-                """
-                UPDATE outbox
-                SET status = 'published', published_at = %s,
-                    lease_expires_at = NULL, worker_id = NULL
-                WHERE organization_id = %s AND id = %s
-                  AND status = 'publishing' AND worker_id = %s
-                  AND lease_expires_at > %s
-                RETURNING id
-                """,
-                (
-                    timestamp,
-                    self._tenant.organization_id,
-                    entry_id,
-                    worker_id,
-                    timestamp,
-                ),
+        stmt = (
+            update(OutboxModel)
+            .where(
+                OutboxModel.organization_id == self._tenant.organization_id,
+                OutboxModel.id == entry_id,
+                OutboxModel.status == "publishing",
+                OutboxModel.worker_id == worker_id,
+                OutboxModel.lease_expires_at > timestamp,
             )
+            .values(
+                status="published",
+                published_at=timestamp,
+                lease_expires_at=None,
+                worker_id=None,
+            )
+            .returning(OutboxModel.id)
+        )
+        async with self._database.connection(self._tenant) as connection:
+            cursor = await self._database.execute(connection,stmt)
             if await cursor.fetchone() is None:
                 raise LeaseLostError(f"lease perdido para outbox {entry_id}")
 
@@ -828,51 +834,62 @@ class PostgresJobRepository:
         now: datetime | None = None,
     ) -> OutboxEntry:
         timestamp = now or datetime.now(UTC)
-        async with self._database.connection(self._tenant) as connection:
-            current_cursor = await connection.execute(
-                """
-                SELECT id, topic, message_key, payload, status, attempt,
-                       lease_expires_at, worker_id, error
-                FROM outbox
-                WHERE organization_id = %s AND id = %s
-                  AND status = 'publishing' AND worker_id = %s
-                  AND lease_expires_at > %s
-                FOR UPDATE
-                """,
-                (
-                    self._tenant.organization_id,
-                    entry_id,
-                    worker_id,
-                    timestamp,
-                ),
+        stmt_check = (
+            select(
+                OutboxModel.id,
+                OutboxModel.topic,
+                OutboxModel.message_key,
+                OutboxModel.payload,
+                OutboxModel.status,
+                OutboxModel.attempt,
+                OutboxModel.lease_expires_at,
+                OutboxModel.worker_id,
+                OutboxModel.error,
             )
+            .where(
+                OutboxModel.organization_id == self._tenant.organization_id,
+                OutboxModel.id == entry_id,
+                OutboxModel.status == "publishing",
+                OutboxModel.worker_id == worker_id,
+                OutboxModel.lease_expires_at > timestamp,
+            )
+            .with_for_update()
+        )
+        async with self._database.connection(self._tenant) as connection:
+            current_cursor = await self._database.execute(connection,stmt_check)
             current_row = await current_cursor.fetchone()
             if current_row is None:
                 raise LeaseLostError(f"lease perdido para outbox {entry_id}")
             current = OutboxEntry(*current_row)
             will_retry = current.attempt < OUTBOX_MAX_ATTEMPTS
             delay_seconds = min(5 * (2 ** (current.attempt - 1)), 300)
-            cursor = await connection.execute(
-                """
-                UPDATE outbox
-                SET status = %s,
-                    available_at = %s + make_interval(secs => %s),
-                    lease_expires_at = NULL,
-                    worker_id = NULL,
-                    error = %s
-                WHERE organization_id = %s AND id = %s
-                RETURNING id, topic, message_key, payload, status, attempt,
-                          lease_expires_at, worker_id, error
-                """,
-                (
-                    "pending" if will_retry else "failed",
-                    timestamp,
-                    delay_seconds if will_retry else 0,
-                    error[:2000],
-                    self._tenant.organization_id,
-                    entry_id,
-                ),
+
+            stmt_update = (
+                update(OutboxModel)
+                .where(
+                    OutboxModel.organization_id == self._tenant.organization_id,
+                    OutboxModel.id == entry_id,
+                )
+                .values(
+                    status="pending" if will_retry else "failed",
+                    available_at=timestamp + timedelta(seconds=delay_seconds if will_retry else 0),
+                    lease_expires_at=None,
+                    worker_id=None,
+                    error=error[:2000],
+                )
+                .returning(
+                    OutboxModel.id,
+                    OutboxModel.topic,
+                    OutboxModel.message_key,
+                    OutboxModel.payload,
+                    OutboxModel.status,
+                    OutboxModel.attempt,
+                    OutboxModel.lease_expires_at,
+                    OutboxModel.worker_id,
+                    OutboxModel.error,
+                )
             )
+            cursor = await self._database.execute(connection,stmt_update)
             row = await cursor.fetchone()
         assert row is not None
         return OutboxEntry(*row)
@@ -903,18 +920,12 @@ class PostgresJobRepository:
         data: dict[str, Any],
         timestamp: datetime,
     ) -> None:
-        await connection.execute(
-            """
-            INSERT INTO run_events (
-                organization_id, run_id, event_type, data, created_at
-            )
-            VALUES (%s, %s, %s, %s, %s)
-            """,
-            (
-                self._tenant.organization_id,
-                run_id,
-                event_type,
-                Jsonb(data),
-                timestamp,
-            ),
+        stmt = pg_insert(RunEventModel).values(
+            organization_id=self._tenant.organization_id,
+            run_id=run_id,
+            event_type=event_type,
+            data=data,
+            created_at=timestamp,
         )
+        await self._database.execute(connection,stmt)
+

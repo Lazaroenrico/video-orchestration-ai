@@ -4,9 +4,11 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from psycopg.types.json import Jsonb
+from sqlalchemy import delete, select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from orchestrator.db.database import Database
+from orchestrator.db.models import Artifact as ArtifactModel
 from orchestrator.db.tenancy import TenantContext
 from orchestrator.storage.db import ArtifactRecord
 from orchestrator.storage.retention import expires_at_for
@@ -35,11 +37,21 @@ def _to_record(row: tuple[Any, ...]) -> ArtifactRecord:
     )
 
 
-_SELECT_FIELDS = """
-    run_id, item_id, creator_id, kind, storage_backend, storage_key,
-    content_type, size_bytes, sha256, source_uri, retention_class,
-    expires_at, meta
-"""
+_SELECT_COLUMNS = (
+    ArtifactModel.run_id,
+    ArtifactModel.item_id,
+    ArtifactModel.creator_id,
+    ArtifactModel.kind,
+    ArtifactModel.storage_backend,
+    ArtifactModel.storage_key,
+    ArtifactModel.content_type,
+    ArtifactModel.size_bytes,
+    ArtifactModel.sha256,
+    ArtifactModel.source_uri,
+    ArtifactModel.retention_class,
+    ArtifactModel.expires_at,
+    ArtifactModel.meta,
+)
 
 
 class PostgresArtifactRepository:
@@ -50,90 +62,85 @@ class PostgresArtifactRepository:
         self._tenant = tenant
 
     async def record(self, artifact: ArtifactRecord) -> ArtifactRecord:
-        async with self._database.connection(self._tenant) as connection:
-            await connection.execute(
-                """
-                INSERT INTO artifacts (
-                    organization_id, id, run_id, item_id, creator_id, kind,
-                    storage_backend, storage_key, content_type, size_bytes, sha256,
-                    source_uri, retention_class, expires_at, meta
-                )
-                VALUES (
-                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
-                )
-                ON CONFLICT (organization_id, id) DO UPDATE
-                SET run_id = EXCLUDED.run_id,
-                    item_id = EXCLUDED.item_id,
-                    creator_id = EXCLUDED.creator_id,
-                    kind = EXCLUDED.kind,
-                    storage_backend = EXCLUDED.storage_backend,
-                    storage_key = EXCLUDED.storage_key,
-                    content_type = EXCLUDED.content_type,
-                    size_bytes = EXCLUDED.size_bytes,
-                    sha256 = EXCLUDED.sha256,
-                    source_uri = EXCLUDED.source_uri,
-                    retention_class = EXCLUDED.retention_class,
-                    expires_at = EXCLUDED.expires_at,
-                    meta = EXCLUDED.meta,
-                    updated_at = CURRENT_TIMESTAMP
-                """,
-                (
-                    self._tenant.organization_id,
-                    artifact.id,
-                    artifact.run_id,
-                    artifact.item_id,
-                    artifact.creator_id,
-                    artifact.kind,
-                    artifact.storage_backend,
-                    artifact.storage_key,
-                    artifact.content_type,
-                    artifact.size_bytes,
-                    artifact.sha256,
-                    artifact.source_uri,
-                    artifact.retention_class,
-                    artifact.expires_at,
-                    Jsonb(artifact.meta),
-                ),
+        stmt = (
+            pg_insert(ArtifactModel)
+            .values(
+                organization_id=self._tenant.organization_id,
+                id=artifact.id,
+                run_id=artifact.run_id,
+                item_id=artifact.item_id,
+                creator_id=artifact.creator_id,
+                kind=artifact.kind,
+                storage_backend=artifact.storage_backend,
+                storage_key=artifact.storage_key,
+                content_type=artifact.content_type,
+                size_bytes=artifact.size_bytes,
+                sha256=artifact.sha256,
+                source_uri=artifact.source_uri,
+                retention_class=artifact.retention_class,
+                expires_at=artifact.expires_at,
+                meta=artifact.meta,
             )
+            .on_conflict_do_update(
+                index_elements=["organization_id", "id"],
+                set_={
+                    "run_id": artifact.run_id,
+                    "item_id": artifact.item_id,
+                    "creator_id": artifact.creator_id,
+                    "kind": artifact.kind,
+                    "storage_backend": artifact.storage_backend,
+                    "storage_key": artifact.storage_key,
+                    "content_type": artifact.content_type,
+                    "size_bytes": artifact.size_bytes,
+                    "sha256": artifact.sha256,
+                    "source_uri": artifact.source_uri,
+                    "retention_class": artifact.retention_class,
+                    "expires_at": artifact.expires_at,
+                    "meta": artifact.meta,
+                },
+            )
+        )
+        async with self._database.connection(self._tenant) as connection:
+            await self._database.execute(connection, stmt)
         return artifact
 
     async def get(self, artifact_id: str) -> Optional[ArtifactRecord]:
-        async with self._database.connection(self._tenant) as connection:
-            cursor = await connection.execute(
-                f"""
-                SELECT {_SELECT_FIELDS}
-                FROM artifacts
-                WHERE organization_id = %s AND id = %s
-                """,
-                (self._tenant.organization_id, artifact_id),
+        stmt = (
+            select(*_SELECT_COLUMNS)
+            .where(
+                ArtifactModel.organization_id == self._tenant.organization_id,
+                ArtifactModel.id == artifact_id,
             )
+        )
+        async with self._database.connection(self._tenant) as connection:
+            cursor = await self._database.execute(connection, stmt)
             row = await cursor.fetchone()
         return _to_record(row) if row is not None else None
 
     async def by_run(self, run_id: str) -> list[ArtifactRecord]:
-        async with self._database.connection(self._tenant) as connection:
-            cursor = await connection.execute(
-                f"""
-                SELECT {_SELECT_FIELDS}
-                FROM artifacts
-                WHERE organization_id = %s AND run_id = %s
-                ORDER BY storage_key
-                """,
-                (self._tenant.organization_id, run_id),
+        stmt = (
+            select(*_SELECT_COLUMNS)
+            .where(
+                ArtifactModel.organization_id == self._tenant.organization_id,
+                ArtifactModel.run_id == run_id,
             )
+            .order_by(ArtifactModel.storage_key)
+        )
+        async with self._database.connection(self._tenant) as connection:
+            cursor = await self._database.execute(connection, stmt)
             rows = await cursor.fetchall()
         return [_to_record(row) for row in rows]
 
     async def by_key(self, storage_key: str) -> Optional[ArtifactRecord]:
-        async with self._database.connection(self._tenant) as connection:
-            cursor = await connection.execute(
-                f"""
-                SELECT {_SELECT_FIELDS}
-                FROM artifacts
-                WHERE organization_id = %s AND storage_key = %s
-                """,
-                (self._tenant.organization_id, storage_key),
+        stmt = (
+            select(*_SELECT_COLUMNS)
+            .where(
+                ArtifactModel.organization_id == self._tenant.organization_id,
+                ArtifactModel.storage_key == storage_key,
             )
+        )
+        async with self._database.connection(self._tenant) as connection:
+            cursor = await self._database.execute(connection, stmt)
             row = await cursor.fetchone()
         return _to_record(row) if row is not None else None
 
@@ -145,22 +152,19 @@ class PostgresArtifactRepository:
         now: datetime,
     ) -> None:
         expires_at = expires_at_for(retention_class, now=now)
-        async with self._database.connection(self._tenant) as connection:
-            await connection.execute(
-                """
-                UPDATE artifacts
-                SET retention_class = %s,
-                    expires_at = %s,
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE organization_id = %s AND storage_key = %s
-                """,
-                (
-                    retention_class,
-                    expires_at,
-                    self._tenant.organization_id,
-                    storage_key,
-                ),
+        stmt = (
+            update(ArtifactModel)
+            .where(
+                ArtifactModel.organization_id == self._tenant.organization_id,
+                ArtifactModel.storage_key == storage_key,
             )
+            .values(
+                retention_class=retention_class,
+                expires_at=expires_at,
+            )
+        )
+        async with self._database.connection(self._tenant) as connection:
+            await self._database.execute(connection, stmt)
 
     async def set_storage_backend(
         self,
@@ -168,43 +172,40 @@ class PostgresArtifactRepository:
         storage_backend: str,
     ) -> None:
         """Troca somente a localização após uma cópia já verificada."""
-        async with self._database.connection(self._tenant) as connection:
-            await connection.execute(
-                """
-                UPDATE artifacts
-                SET storage_backend = %s,
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE organization_id = %s AND storage_key = %s
-                """,
-                (
-                    storage_backend,
-                    self._tenant.organization_id,
-                    storage_key,
-                ),
+        stmt = (
+            update(ArtifactModel)
+            .where(
+                ArtifactModel.organization_id == self._tenant.organization_id,
+                ArtifactModel.storage_key == storage_key,
             )
+            .values(storage_backend=storage_backend)
+        )
+        async with self._database.connection(self._tenant) as connection:
+            await self._database.execute(connection, stmt)
 
     async def expired(self, *, now: datetime) -> list[ArtifactRecord]:
-        async with self._database.connection(self._tenant) as connection:
-            cursor = await connection.execute(
-                f"""
-                SELECT {_SELECT_FIELDS}
-                FROM artifacts
-                WHERE organization_id = %s
-                  AND expires_at IS NOT NULL
-                  AND expires_at <= %s
-                ORDER BY storage_key
-                """,
-                (self._tenant.organization_id, now),
+        stmt = (
+            select(*_SELECT_COLUMNS)
+            .where(
+                ArtifactModel.organization_id == self._tenant.organization_id,
+                ArtifactModel.expires_at.is_not(None),
+                ArtifactModel.expires_at <= now,
             )
+            .order_by(ArtifactModel.storage_key)
+        )
+        async with self._database.connection(self._tenant) as connection:
+            cursor = await self._database.execute(connection, stmt)
             rows = await cursor.fetchall()
         return [_to_record(row) for row in rows]
 
     async def delete(self, artifact_id: str) -> None:
-        async with self._database.connection(self._tenant) as connection:
-            await connection.execute(
-                """
-                DELETE FROM artifacts
-                WHERE organization_id = %s AND id = %s
-                """,
-                (self._tenant.organization_id, artifact_id),
+        stmt = (
+            delete(ArtifactModel)
+            .where(
+                ArtifactModel.organization_id == self._tenant.organization_id,
+                ArtifactModel.id == artifact_id,
             )
+        )
+        async with self._database.connection(self._tenant) as connection:
+            await self._database.execute(connection, stmt)
+

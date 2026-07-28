@@ -4,7 +4,7 @@ import { Card, SectionTitle } from "../components/Card";
 import { Icon } from "../components/Icon";
 import { Button } from "../components/Button";
 import { StatusPill, type Status } from "../components/StatusPill";
-import { ProgressBar } from "../components/ProgressBar";
+import { ProgressBar, StatTile } from "../components/ProgressBar";
 import { useRunStream, type RunPhase } from "../api/useRunStream";
 import { api } from "../api/client";
 import { mediaUrl } from "../api/urls";
@@ -19,7 +19,7 @@ const STAGES: { key: string; label: string; nodes: string[] }[] = [
   { key: "roster", label: "Creators", nodes: ["roster", "approval"] },
   { key: "video", label: "Video", nodes: ["ltx", "kling", "seedance", "product_demo"] },
   { key: "qc", label: "QC", nodes: ["qc"] },
-  { key: "assembly", label: "Assembly", nodes: ["assembly", "upscale"] },
+  { key: "assembly", label: "Final video", nodes: ["assembly", "upscale"] },
 ];
 
 function phasePill(phase: RunPhase): { status: Status; label: string } {
@@ -31,7 +31,7 @@ function phasePill(phase: RunPhase): { status: Status; label: string } {
     case "editing":
       return { status: "review", label: "Review Scripts" };
     case "done":
-      return { status: "published", label: "Completed" };
+      return { status: "done", label: "Completed" };
     case "error":
       return { status: "failed", label: "Error" };
     default:
@@ -61,6 +61,7 @@ function ApprovalPanel({ runId, creators }: { runId: string; creators: Creator[]
   const [roster, setRoster] = useState<Creator[]>(creators);
   const [busy, setBusy] = useState<string | null>(null);
   const [done, setDone] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
 
   const toggle = (id: string) =>
     setSelected((s) => {
@@ -71,11 +72,12 @@ function ApprovalPanel({ runId, creators }: { runId: string; creators: Creator[]
 
   async function reroll(id: string) {
     setBusy(id);
+    setActionError(null);
     try {
       const { creator } = await api.rerollVoice(runId, id);
       setRoster((r) => r.map((c) => (c.id === id ? creator : c)));
-    } catch {
-      /* reroll needs the live gate + adapter; ignore if unavailable */
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : "Could not reroll this voice.");
     } finally {
       setBusy(null);
     }
@@ -83,9 +85,12 @@ function ApprovalPanel({ runId, creators }: { runId: string; creators: Creator[]
 
   async function approve() {
     setBusy("__all__");
+    setActionError(null);
     try {
       await api.approve(runId, [...selected]);
       setDone(true);
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : "Could not approve the selected creators.");
     } finally {
       setBusy(null);
     }
@@ -109,10 +114,19 @@ function ApprovalPanel({ runId, creators }: { runId: string; creators: Creator[]
           return (
             <div
               key={c.id}
-              className={`rounded-lg border p-2 flex flex-col gap-2 cursor-pointer ${
+              className={`rounded-lg border p-2 flex flex-col gap-2 cursor-pointer focus-within:ring-2 focus-within:ring-primary ${
                 selected.has(c.id) ? "border-primary ring-1 ring-primary" : "border-surface-border"
               }`}
               onClick={() => toggle(c.id)}
+              role="checkbox"
+              aria-checked={selected.has(c.id)}
+              tabIndex={0}
+              onKeyDown={(event) => {
+                if (event.key === " " || event.key === "Enter") {
+                  event.preventDefault();
+                  toggle(c.id);
+                }
+              }}
             >
               <div className="aspect-square rounded overflow-hidden bg-surface-container">
                 {(c.image_uri || c.image) && (
@@ -131,12 +145,13 @@ function ApprovalPanel({ runId, creators }: { runId: string; creators: Creator[]
                 <audio src={mediaUrl(voice)} controls className="w-full h-8" onClick={(e) => e.stopPropagation()} />
               )}
               <button
+                type="button"
                 onClick={(e) => {
                   e.stopPropagation();
                   reroll(c.id);
                 }}
                 disabled={busy === c.id}
-                className="text-ai-processing font-label-sm text-label-sm flex items-center gap-1 hover:underline disabled:opacity-50"
+                className="inline-flex min-h-11 items-center gap-1 whitespace-nowrap text-ai-processing font-label-sm text-label-sm hover:underline disabled:opacity-50"
               >
                 <Icon name="refresh" size={14} /> {busy === c.id ? "…" : "Reroll voice"}
               </button>
@@ -144,8 +159,13 @@ function ApprovalPanel({ runId, creators }: { runId: string; creators: Creator[]
           );
         })}
       </div>
+      {actionError && (
+        <p role="alert" className="mt-3 rounded-lg border border-error/30 bg-error/5 px-3 py-2 font-body-md text-body-md text-error">
+          {actionError}
+        </p>
+      )}
       <div className="flex justify-end mt-4">
-        <Button icon="check" disabled={busy === "__all__"} onClick={approve}>
+        <Button icon="check" loading={busy === "__all__"} onClick={approve}>
           Approve {selected.size} creator{selected.size === 1 ? "" : "s"}
         </Button>
       </div>
@@ -159,6 +179,7 @@ export function CampaignDetail() {
   const run = useRunStream(runId);
   const items = Object.values(run.items);
   const pill = phasePill(run.phase);
+  const [itemView, setItemView] = useState<"all" | "attention" | "finished">("all");
 
   const stageState = (nodes: string[]): "done" | "active" | "pending" => {
     const seen = run.nodes.filter((n) => nodes.includes(n.node));
@@ -169,6 +190,13 @@ export function CampaignDetail() {
 
   const doneItems = items.filter((i) => i.assembled || i.dropped || i.error).length;
   const totalCost = items.reduce((a, i) => a + (i.cost_usd || 0), 0);
+  const attentionItems = items.filter((i) => i.dropped || i.error || (i.qc && !i.qc.passed));
+  const visibleItems =
+    itemView === "attention"
+      ? attentionItems
+      : itemView === "finished"
+      ? items.filter((i) => i.assembled || i.dropped || i.error)
+      : items;
 
   return (
     <div>
@@ -178,15 +206,15 @@ export function CampaignDetail() {
         <span className="font-mono">{shortRun(runId)}</span>
       </div>
 
-      <div className="flex items-start justify-between mb-gutter gap-4">
-        <div>
+      <div className="mb-gutter flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+        <div className="min-w-0">
           <StatusPill status={pill.status} label={pill.label} />
-          <h1 className="font-headline-lg text-headline-lg text-primary mt-2">
+          <h1 className="hm-page-title mt-2 text-primary">
             Campaign {shortRun(runId)}
           </h1>
         </div>
-        <div className="flex gap-2">
-          <Button variant="secondary" icon="visibility" onClick={() => navigate("/review")}>
+        <div className="flex flex-wrap gap-2">
+          <Button variant="secondary" icon="visibility" onClick={() => navigate(`/review?run=${encodeURIComponent(runId)}`)}>
             Review
           </Button>
           <Button icon="add" onClick={() => navigate("/campaigns/new")}>
@@ -195,16 +223,42 @@ export function CampaignDetail() {
         </div>
       </div>
 
+      <div className="mb-gutter grid grid-cols-2 gap-3 xl:grid-cols-4">
+        <StatTile label="Finished clips" value={`${doneItems}/${items.length || "—"}`} />
+        <StatTile label="Needs attention" value={attentionItems.length} hint={attentionItems.length ? "QC / assembly" : "Clear"} hintTone={attentionItems.length ? "error" : "success"} />
+        <StatTile label="In progress" value={Math.max(0, items.length - doneItems)} hint={run.phase === "running" ? "Live" : undefined} hintTone="muted" />
+        <StatTile label="Run cost" value={usd(totalCost)} />
+      </div>
+
+      {run.phase === "error" && (
+        <Card className="mb-gutter border-error/40 bg-error/5">
+          <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+            <div className="flex min-w-0 gap-3">
+              <Icon name="error" className="mt-0.5 shrink-0 text-error" />
+              <div>
+                <h2 className="font-headline-md text-headline-md text-primary">This run stopped with an error</h2>
+                <p className="mt-1 break-words font-body-md text-body-md text-on-surface-variant">
+                  {run.error || "The runtime did not provide an error message."}
+                </p>
+              </div>
+            </div>
+            <Button variant="secondary" icon="visibility" onClick={() => navigate(`/review?run=${encodeURIComponent(runId)}`)}>
+              Review available clips
+            </Button>
+          </div>
+        </Card>
+      )}
+
       {/* Pipeline stages */}
       <Card className="mb-gutter">
         <SectionTitle title="Orchestration Pipeline" />
-        <div className="flex items-center gap-2 overflow-x-auto">
-          {STAGES.map((st, i) => {
+        <ol className="grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-7">
+          {STAGES.map((st) => {
             const state = stageState(st.nodes);
             return (
-              <div key={st.key} className="flex items-center gap-2 flex-shrink-0">
+              <li key={st.key} className="min-w-0">
                 <div
-                  className={`px-4 py-3 rounded-lg border min-w-[130px] ${
+                  className={`min-h-14 rounded-lg border px-3 py-3 ${
                     state === "done"
                       ? "border-success-published/40 bg-success-published/5"
                       : state === "active"
@@ -229,13 +283,13 @@ export function CampaignDetail() {
                     <span className="font-label-md text-label-md text-primary">{st.label}</span>
                   </div>
                 </div>
-                {i < STAGES.length - 1 && (
-                  <Icon name="arrow_forward" size={16} className="text-on-surface-variant" />
+                {st.key === "assembly" && (
+                  <p className="mt-1 font-label-sm text-label-sm text-on-surface-variant">Assembly + upscale</p>
                 )}
-              </div>
+              </li>
             );
           })}
-        </div>
+        </ol>
       </Card>
 
       {run.phase === "awaiting" && (
@@ -277,9 +331,22 @@ export function CampaignDetail() {
             <SectionTitle
               title={`Clips (${doneItems}/${items.length})`}
               action={
-                <span className="font-label-sm text-label-sm text-on-surface-variant">
-                  {usd(totalCost)}
-                </span>
+                <div className="flex flex-wrap gap-1" aria-label="Clip filter">
+                  {([
+                    ["all", "All"],
+                    ["attention", `Attention (${attentionItems.length})`],
+                    ["finished", "Finished"],
+                  ] as const).map(([view, label]) => (
+                    <button
+                      key={view}
+                      type="button"
+                      onClick={() => setItemView(view)}
+                      className={`min-h-9 whitespace-nowrap rounded-md px-2 font-label-sm text-label-sm ${itemView === view ? "bg-primary text-on-primary" : "text-on-surface-variant hover:bg-surface-container-low"}`}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
               }
             />
             {items.length > 0 && (
@@ -297,7 +364,7 @@ export function CampaignDetail() {
               </p>
             )}
             <div className="flex flex-col divide-y divide-surface-border">
-              {items.map((it) => {
+              {visibleItems.map((it) => {
                 const s = itemStatus(it);
                 return (
                   <div key={it.id} className="flex items-center gap-3 py-3">
@@ -324,8 +391,8 @@ export function CampaignDetail() {
         <div className="col-span-12 lg:col-span-4">
           {Object.values(run.llmByStage).length > 0 && (
             <Card className="mb-gutter">
-              <SectionTitle title="AI Stream" />
-              <div className="flex flex-col gap-3 max-h-[360px] overflow-y-auto">
+              <SectionTitle title="Live model output" />
+              <div className="flex flex-col gap-3 max-h-[360px] overflow-y-auto" aria-live="polite">
                 {Object.values(run.llmByStage).map((stream) => (
                   <div key={stream.stage} className="rounded-lg border border-surface-border bg-surface-container-low p-3">
                     <div className="flex items-center justify-between gap-3 mb-2">
@@ -343,7 +410,7 @@ export function CampaignDetail() {
             </Card>
           )}
           <Card>
-            <SectionTitle title="Recent Activity" />
+              <SectionTitle title="Recent activity" />
             <div className="flex flex-col gap-3 max-h-[420px] overflow-y-auto">
               {run.log.length === 0 && (
                 <p className="font-body-md text-body-md text-on-surface-variant">No activity yet.</p>

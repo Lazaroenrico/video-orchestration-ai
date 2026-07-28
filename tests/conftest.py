@@ -42,6 +42,8 @@ def _force_mock_providers(monkeypatch):
         "ORCH_USER_SUBJECT",
     ):
         monkeypatch.delenv(key, raising=False)
+    import orchestrator.db.database as db_mod
+    db_mod._shared_database = None
 
 
 def pytest_addoption(parser):

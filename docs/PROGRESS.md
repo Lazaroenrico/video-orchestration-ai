@@ -2287,3 +2287,86 @@ o bug do reducer apareceu. Ao vivo ainda não rodado: exige `AI_GATEWAY_API_KEY`
 real); em particular, **`stream_options.include_usage` só pode ser confirmado ao vivo** —
 se o gateway ignorar o campo, o custo do run vai a zero (mesmo comportamento que o
 caminho não-streaming já tem quando o `usage` vem ausente).
+
+## Diagnóstico local Neon/RLS (2026-07-26)
+
+### Falhas investigadas (sintoma → causa → correção)
+
+- **`GET /api/runs` e `GET /api/creators` retornavam 500 com
+  `papel runtime 'neondb_owner' não pode ter SUPERUSER/BYPASSRLS`.** Causa confirmada
+  diretamente no Neon: a `DATABASE_URL` local usa `neondb_owner`, cujo atributo é
+  `BYPASSRLS=true`; a role restrita `orchestrator_runtime` ainda não existe. A mesma URL
+  usa o endpoint `-pooler`, embora o contrato operacional exija conexão direta.
+  Correção operacional: reservar a conexão direta de `neondb_owner` para
+  `MIGRATION_DATABASE_URL`, executar `migrate` e `db provision-runtime`, e configurar
+  `DATABASE_URL` com a conexão direta da nova role `orchestrator_runtime`.
+- **O gate focado de PostgreSQL terminou em dois erros de setup.** Sintoma:
+  `test_cli_provisions_fixed_runtime_role_without_echoing_password` e
+  `test_database_rejects_a_runtime_role_that_bypasses_rls` não chegaram às asserções.
+  Causa: o fixture `pytest-postgresql` está configurado para o PostgreSQL local em
+  `127.0.0.1:5432`, que não estava rodando (`Connection refused`). Nenhum teste ou
+  asserção foi alterado. A reprodução direta contra o Neon executou duas vezes e produziu
+  deterministicamente o erro esperado; a role remota também foi inspecionada como
+  `rolsuper=false`, `rolbypassrls=true`.
+- **`db provision-runtime` falhou após a migration com `permission denied to alter
+  role`.** Causa: `provision_runtime_role()` agrupa `NOSUPERUSER`, `NOBYPASSRLS` e
+  `NOREPLICATION` no `ALTER ROLE`; PostgreSQL exige `SUPERUSER` até para desligar esses
+  atributos. O `neondb_owner` do Neon possui `CREATEROLE`, mas não `SUPERUSER`, portanto
+  consegue iniciar a criação e não consegue executar esse hardening explícito. A
+  transação sofreu rollback: `orchestrator_runtime` permaneceu ausente, enquanto Alembic
+  chegou corretamente a `20260725_0008`. Correção aplicada no código: roles novas usam
+  os defaults não privilegiados; roles existentes têm `rolsuper`/`rolbypassrls`/
+  `rolreplication` validados em leitura (fail-closed), e o `ALTER ROLE` limita-se aos
+  atributos que um administrador gerenciado com `CREATEROLE` pode alterar.
+
+### Correção TDD e verificação
+
+- RED: a CLI foi exercitada em PostgreSQL 16 real por um administrador com
+  `CREATEROLE`, `BYPASSRLS` e `REPLICATION`, mas sem `SUPERUSER`, reproduzindo exatamente
+  `Only roles with the SUPERUSER attribute may change the SUPERUSER attribute`.
+- GREEN: `provision_runtime_role()` deixou de pedir mudanças de atributos reservados.
+  Após criar a role com defaults seguros, consulta `pg_roles`, recusa qualquer
+  `SUPERUSER`/`BYPASSRLS`/`REPLICATION` existente e só então aplica `LOGIN`,
+  `NOCREATEDB`, `NOCREATEROLE` e a senha. O teste público também afirma todos os sete
+  atributos finais e que a senha não aparece na saída.
+- Segundo RED→GREEN: uma `orchestrator_runtime` preexistente com `BYPASSRLS` antes
+  falhava com `InsufficientPrivilege` genérico; agora falha cedo e explicitamente,
+  preservando o atributo privilegiado para que somente um superuser possa removê-lo.
+- **Dois testes CLI desviaram para a `.env` real.** Sintoma: o migrate SQLite chamou
+  Alembic no Neon e o teste de senha ausente tentou resolver o host fictício. Causa:
+  `CLI_OFFLINE_ENV` não neutralizava `DATABASE_URL`, `MIGRATION_DATABASE_URL` e
+  `ORCHESTRATOR_RUNTIME_PASSWORD`; `load_dotenv(..., override=False)` carregou os
+  segredos locais. Correção: o ambiente offline fixa as três variáveis como vazias e o
+  teste de senha usa esse ambiente explicitamente.
+- **Primeiro gate global: 33 falhas PostgreSQL e cobertura 96,20%.** Causa: o novo teste
+  fail-closed deixou a role cluster-global `orchestrator_runtime BYPASSRLS` viva e
+  contaminou os testes seguintes. Correção: cleanup em `finally`; uma consulta após o
+  teste confirma zero roles residuais. Nenhuma asserção de produção foi alterada.
+- **Primeira abertura runtime tentou o socket local e expirou.** Causa: `DATABASE_URL`
+  ainda estava vazia na `.env`; não era falha da role provisionada. A URL equivalente
+  foi montada apenas em memória, com senha percent-encoded, e `Database.open()` passou
+  duas vezes.
+
+**Verificação:** gate focado com 41 testes verdes; gate global
+`rtk proxy .venv/bin/python -m pytest` → **1093 passed, 2 skipped**, cobertura
+**100% (6134/6134 statements)**. No Neon real, `db provision-runtime` concluiu; a role
+ficou `LOGIN`, `NOSUPERUSER`, `NOBYPASSRLS`, `NOCREATEDB`, `NOCREATEROLE` e
+`NOREPLICATION`.
+
+---
+
+## ADR-D37 — Migração da Camada de Persistência PostgreSQL para SQLAlchemy 2.0 Async ORM
+
+- **Implementado:** 17 modelos declarativos criados em `src/orchestrator/db/models.py`.
+- **Repositórios Refatorados:** 100% das consultas SQL inline nativas em `admin.py`, `prompts.py`, `creators.py`, `feedback.py`, `artifacts.py`, `runs.py`, `effects.py` e `jobs.py` foram substituídas por seleções e inserções tipadas (`select()`, `delete()`, `update()`, `pg_insert().on_conflict_do_update()`).
+- **Compilador & Adaptação:** Criado o método estático `Database.execute()` em `src/orchestrator/db/database.py` para compilação específica no dialecto `postgresql`, dumper JSONB automático via `json.dumps()` e expansão de parâmetros post-compile (`IN (...)` e `NOT IN (...)`).
+- **Investigações & Correções no Processo de Testes:**
+  - *Sintoma:* `psycopg.errors.DuplicateDatabase` nos testes PostgreSQL em paralelo/reinicio. *Causa:* Resto de base de dados de modelo `tests_tmpl`. *Correção:* Adicionada rotina de limpeza de bancos temporários.
+  - *Sintoma:* `psycopg.ProgrammingError: cannot adapt type 'dict'` ao salvar runs com payloads JSONB. *Causa:* O driver `psycopg3` exige `Json()` ou `json.dumps()` para dicionários/listas compiladas em `params`. *Correção:* Tratamento centralizado em `Database.execute()`.
+  - *Sintoma:* `psycopg.errors.UndefinedColumn: column "__" does not exist` na exclusão com `item_id.notin_()`. *Causa:* SQLAlchemy 2.0 gera cláusulas *post-compile* (`[POSTCOMPILE_...]`) para `IN`/`NOT IN`. *Correção:* Resolução explicita de `compiled._process_parameters_for_postcompile(compiled.params)` em `Database.execute()`.
+  - *Sintoma:* `test_resaved_run_is_updated_and_becomes_latest` ordenando incorretamente. *Causa:* O `on_conflict_do_update` de `RunFeedback` e `Creator` não estava atualizando a coluna `position`. *Correção:* Adicionado `"position": stmt.excluded.position` no `set_` de conflito.
+
+**Verificação Final:**
+- Suíte completa de testes (`rtk proxy .venv/bin/python -m pytest --no-cov`): **1093 passed, 2 skipped** (100% verde).
+- Execução E2E mock (`orchestrator run --offer "Serum X SQLAlchemy ORM" --config-dir config-mock`): 12/12 itens produzidos e persistidos no PostgreSQL sem erros.
+

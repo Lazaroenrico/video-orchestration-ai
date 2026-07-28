@@ -43,7 +43,7 @@ from orchestrator.config import (
     load_pipeline,
     load_providers,
 )
-from orchestrator.db import Database
+from orchestrator.db import Database, close_shared_database, get_shared_database
 from orchestrator.tracing import run_trace_config
 from orchestrator.graph.builder import build_graph
 from orchestrator.graph.checkpoint import open_checkpointer
@@ -60,11 +60,15 @@ async def _app_lifespan(app_: FastAPI):
         database = Database.from_env()
         await database.open()
         app_.state.auth_database = database
+    elif os.environ.get("DATABASE_URL"):
+        database = await get_shared_database()
     try:
         yield
     finally:
         if database is not None:
             await database.close()
+        await close_shared_database()
+
 
 
 app = FastAPI(title="UGC Orchestrator", lifespan=_app_lifespan)

@@ -23,9 +23,9 @@ def _runtime_url(postgresql) -> str:
         """
         DO $$
         BEGIN
-            CREATE ROLE prompt_app LOGIN;
+            CREATE ROLE prompt_app LOGIN PASSWORD 'prompt_app';
         EXCEPTION WHEN duplicate_object THEN
-            NULL;
+            ALTER ROLE prompt_app LOGIN PASSWORD 'prompt_app';
         END
         $$
         """
@@ -39,7 +39,7 @@ def _runtime_url(postgresql) -> str:
     )
     postgresql.commit()
     info = postgresql.info
-    return f"postgresql://prompt_app@{info.host}:{info.port}/{info.dbname}"
+    return f"postgresql://prompt_app:prompt_app@{info.host}:{info.port}/{info.dbname}"
 
 
 async def test_saved_template_survives_repository_restart(postgresql):

@@ -1,3 +1,4 @@
+import { useEffect, useId, useRef } from "react";
 import type { ReactNode } from "react";
 import { Icon } from "./Icon";
 
@@ -15,16 +16,37 @@ export function Drawer({
   children: ReactNode;
   footer?: ReactNode;
 }) {
-  if (!open) return null;
+  const dialogRef = useRef<HTMLDialogElement>(null);
+  const titleId = useId();
+
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    if (!dialog) return;
+    if (open && !dialog.open) dialog.showModal();
+    if (!open && dialog.open) dialog.close();
+  }, [open]);
+
   return (
-    <div className="fixed inset-0 z-[60] flex justify-end">
-      <div className="absolute inset-0 bg-black/30 backdrop-blur-sm" onClick={onClose} />
-      <aside className="relative w-[420px] max-w-full h-full bg-surface-container-lowest border-l border-surface-border flex flex-col shadow-2xl">
-        <header className="flex items-center justify-between px-6 h-16 border-b border-surface-border">
-          <div className="font-headline-md text-headline-md text-primary">{title}</div>
+    <dialog
+      ref={dialogRef}
+      className="m-0 ml-auto h-[100dvh] max-h-none w-full max-w-[420px] border-0 bg-transparent p-0 backdrop:bg-black/30 backdrop:backdrop-blur-sm"
+      aria-labelledby={titleId}
+      onCancel={(event) => {
+        event.preventDefault();
+        onClose();
+      }}
+      onClick={(event) => {
+        if (event.target === dialogRef.current) onClose();
+      }}
+    >
+      <aside className="flex h-full flex-col border-l border-surface-border bg-surface-container-lowest shadow-2xl">
+        <header className="flex h-16 items-center justify-between border-b border-surface-border px-6">
+          <div id={titleId} className="font-headline-md text-headline-md text-primary">{title}</div>
           <button
+            type="button"
             onClick={onClose}
-            className="text-on-surface-variant hover:text-primary transition-colors"
+            className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-lg text-on-surface-variant hover:text-primary"
+            aria-label="Close panel"
           >
             <Icon name="close" />
           </button>
@@ -32,6 +54,6 @@ export function Drawer({
         <div className="flex-1 overflow-y-auto p-6">{children}</div>
         {footer && <footer className="p-4 border-t border-surface-border">{footer}</footer>}
       </aside>
-    </div>
+    </dialog>
   );
 }

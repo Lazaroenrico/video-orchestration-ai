@@ -22,7 +22,7 @@ function Bars({ summaries }: { summaries: RunSummary[] }) {
   const max = Math.max(1, ...summaries.map((s) => s.produced));
   const rows = summaries.slice(-12);
   return (
-    <div className="flex items-end gap-2 h-48">
+    <div className="flex h-48 items-end gap-2" role="img" aria-label="Produced and QC-approved videos across the latest runs">
       {rows.length === 0 && (
         <span className="font-body-md text-body-md text-on-surface-variant m-auto">
           No runs to chart yet.
@@ -66,7 +66,7 @@ export function Analytics() {
 
       <div className="grid grid-cols-2 md:grid-cols-5 gap-4 mb-gutter">
         <StatTile label="Videos Produced" value={num(produced)} />
-        <StatTile label="Approved" value={num(approved)} hint={produced ? `${pct(approved, produced)}%` : undefined} />
+        <StatTile label="QC Approved" value={num(approved)} hint={produced ? `${pct(approved, produced)}%` : undefined} />
         <StatTile label="Dropped (QC)" value={num(dropped)} hint="rejected" hintTone="error" />
         <StatTile label="Total Cost" value={usd(cost)} />
         <StatTile label="Cost / Video" value={usd(cpv)} />
@@ -75,14 +75,14 @@ export function Analytics() {
       <div className="grid grid-cols-12 gap-gutter">
         <div className="col-span-12 xl:col-span-8">
           <Card>
-            <SectionTitle title="Production Over Time" />
+            <SectionTitle title="Latest runs" />
             <Bars summaries={summaries} />
             <div className="flex items-center gap-4 mt-4 font-label-sm text-label-sm text-on-surface-variant">
               <span className="flex items-center gap-1">
                 <span className="w-3 h-3 rounded bg-primary" /> Produced
               </span>
               <span className="flex items-center gap-1">
-                <span className="w-3 h-3 rounded bg-success-published" /> Approved
+                <span className="w-3 h-3 rounded bg-success-published" /> QC Approved
               </span>
             </div>
           </Card>
@@ -91,19 +91,18 @@ export function Analytics() {
         <div className="col-span-12 xl:col-span-4">
           <Card className="bg-ai-processing/5 border-ai-processing/20 h-full">
             <div className="flex items-center gap-2 mb-3 text-ai-processing">
-              <Icon name="auto_awesome" />
-              <span className="font-headline-md text-headline-md">AI Insights</span>
+              <Icon name="monitoring" />
+              <span className="font-headline-md text-headline-md">Observed metrics</span>
             </div>
             <p className="font-body-md text-body-md text-on-surface-variant mb-3">
               {produced
                 ? `Approval rate is ${pct(approved, produced)}% across ${summaries.length} runs, at ${usd(
                     cpv
-                  )} per finished video.`
-                : "Run campaigns to unlock creative performance insights."}
+                  )} per produced video.`
+                : "Run campaigns to populate production metrics."}
             </p>
             <p className="font-label-sm text-label-sm text-on-surface-variant">
-              Hook-level breakdowns (thumbstop, CTR) require a distribution integration and are not
-              tracked in this build.
+              Bars are ordered by the latest stored runs; run timestamps and distribution metrics are not available in this build.
             </p>
           </Card>
         </div>

@@ -33,9 +33,9 @@ def _runtime_url(postgresql) -> str:
         """
         DO $$
         BEGIN
-            CREATE ROLE run_app LOGIN;
+            CREATE ROLE run_app LOGIN PASSWORD 'run_app';
         EXCEPTION WHEN duplicate_object THEN
-            NULL;
+            ALTER ROLE run_app LOGIN PASSWORD 'run_app';
         END
         $$
         """
@@ -49,7 +49,7 @@ def _runtime_url(postgresql) -> str:
     )
     postgresql.commit()
     info = postgresql.info
-    return f"postgresql://run_app@{info.host}:{info.port}/{info.dbname}"
+    return f"postgresql://run_app:run_app@{info.host}:{info.port}/{info.dbname}"
 
 
 async def test_run_repository_selector_keeps_local_mode_without_database_url(

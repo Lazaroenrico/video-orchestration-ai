@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router";
 import { PageHeader } from "../components/PageHeader";
 import { Card } from "../components/Card";
+import { Button } from "../components/Button";
 import { Icon } from "../components/Icon";
 import { StatusPill } from "../components/StatusPill";
 import { RunSelect } from "../components/RunSelect";
@@ -115,8 +116,8 @@ export function Concepts() {
   return (
     <div>
       <PageHeader
-        title="Concepts & Scripts Review"
-        subtitle="Review generated concepts and scripts as they stream in."
+        title="Concept & Script Review"
+        subtitle="Choose the work that should continue through the production pipeline."
         actions={<RunSelect runs={runs} active={active} selected={selected} onChange={setSelected} />}
       />
 
@@ -130,12 +131,22 @@ export function Concepts() {
         run.phase === "editing" ? (
           <div className="grid grid-cols-12 gap-gutter">
             <div className="col-span-12 lg:col-span-4 flex flex-col gap-3">
+              <Card className="border-warning-review/30 bg-warning-review/5">
+                <div className="flex items-start gap-2">
+                  <Icon name="rate_review" className="mt-0.5 text-warning-review" size={18} />
+                  <p className="font-body-md text-body-md text-on-surface-variant">
+                    This campaign is paused. Edit or exclude concepts, then continue generation.
+                  </p>
+                </div>
+              </Card>
               {drafts.map((draft) => {
                 const id = String(draft.concept.id);
                 return (
                   <button
                     key={id}
+                    type="button"
                     onClick={() => setPick(id)}
+                    aria-pressed={pick === id}
                     className={`text-left rounded-xl border p-4 bg-surface-container-lowest transition-colors ${
                       pick === id ? "border-primary ring-1 ring-primary" : "border-surface-border hover:bg-surface-container-low"
                     } ${!draft.included ? "opacity-60" : ""}`}
@@ -195,7 +206,7 @@ export function Concepts() {
                             }
                             rows={key === "id" ? 1 : 3}
                             readOnly={key === "id"}
-                            className="mt-2 w-full resize-y rounded-lg border border-surface-border bg-surface-container-low px-3 py-2 font-body-md text-body-md text-primary outline-none focus:border-primary focus:ring-1 focus:ring-primary disabled:opacity-60"
+                            className="hm-field mt-2 min-h-11 resize-y"
                           />
                         </label>
                       ))}
@@ -211,7 +222,7 @@ export function Concepts() {
                         updateDraft(String(currentDraft.concept.id), "script", ev.target.value)
                       }
                       rows={12}
-                      className="mt-2 w-full resize-y rounded-lg border border-surface-border bg-surface-container-low px-4 py-3 font-body-md text-body-md text-primary leading-relaxed outline-none focus:border-primary focus:ring-1 focus:ring-primary"
+                      className="hm-field mt-2 min-h-[16rem] resize-y leading-relaxed"
                     />
                   </label>
 
@@ -225,15 +236,9 @@ export function Concepts() {
                     <p className="font-body-md text-body-md text-on-surface-variant">
                       {drafts.filter((draft) => draft.included).length} of {drafts.length} concepts selected
                     </p>
-                    <button
-                      type="button"
-                      disabled={saving}
-                      onClick={submitDrafts}
-                      className="inline-flex items-center justify-center gap-2 rounded-lg bg-primary px-4 py-2 font-label-md text-label-md text-on-primary transition-opacity disabled:opacity-60"
-                    >
-                      <Icon name="check" size={16} />
-                      {saving ? "Saving…" : "Save & Continue"}
-                    </button>
+                    <Button icon="check" loading={saving} onClick={submitDrafts}>
+                      {saving ? "Saving" : "Save & Continue"}
+                    </Button>
                   </div>
                 </Card>
               ) : (
@@ -253,7 +258,9 @@ export function Concepts() {
             {items.map((it) => (
               <button
                 key={it.id}
+                type="button"
                 onClick={() => setPick(it.id)}
+                aria-pressed={pick === it.id}
                 className={`text-left rounded-xl border p-4 bg-surface-container-lowest transition-colors ${
                   pick === it.id ? "border-primary ring-1 ring-primary" : "border-surface-border hover:bg-surface-container-low"
                 }`}

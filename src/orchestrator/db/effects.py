@@ -4,9 +4,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from psycopg.types.json import Jsonb
+from sqlalchemy import select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from orchestrator.db.database import Database
+from orchestrator.db.models import EffectLedger as EffectLedgerModel, ProviderQuota
 from orchestrator.db.tenancy import TenantContext
 
 
@@ -45,9 +47,16 @@ def _reservation(row: tuple[Any, ...], *, created: bool) -> EffectReservation:
     )
 
 
-_EFFECT_COLUMNS = """
-    effect_key, run_id, provider, units, status, request, result, error
-"""
+_EFFECT_COLUMNS = (
+    EffectLedgerModel.effect_key,
+    EffectLedgerModel.run_id,
+    EffectLedgerModel.provider,
+    EffectLedgerModel.units,
+    EffectLedgerModel.status,
+    EffectLedgerModel.request,
+    EffectLedgerModel.result,
+    EffectLedgerModel.error,
+)
 
 
 class PostgresEffectLedger:
@@ -60,21 +69,24 @@ class PostgresEffectLedger:
     async def set_quota(self, provider: str, *, limit_units: int) -> None:
         if limit_units < 0:
             raise ValueError("quota não pode ser negativa")
-        async with self._database.connection(self._tenant) as connection:
-            cursor = await connection.execute(
-                """
-                INSERT INTO provider_quotas (
-                    organization_id, provider, limit_units
-                )
-                VALUES (%s, %s, %s)
-                ON CONFLICT (organization_id, provider) DO UPDATE
-                SET limit_units = EXCLUDED.limit_units,
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE provider_quotas.used_units <= EXCLUDED.limit_units
-                RETURNING provider
-                """,
-                (self._tenant.organization_id, provider, limit_units),
+        stmt = (
+            pg_insert(ProviderQuota)
+            .values(
+                organization_id=self._tenant.organization_id,
+                provider=provider,
+                limit_units=limit_units,
             )
+            .on_conflict_do_update(
+                index_elements=["organization_id", "provider"],
+                set_={
+                    "limit_units": limit_units,
+                },
+                where=(ProviderQuota.used_units <= limit_units),
+            )
+            .returning(ProviderQuota.provider)
+        )
+        async with self._database.connection(self._tenant) as connection:
+            cursor = await self._database.execute(connection, stmt)
             if await cursor.fetchone() is None:
                 raise QuotaExceededError(
                     f"quota {limit_units} menor que o consumo atual de {provider}"
@@ -91,30 +103,30 @@ class PostgresEffectLedger:
     ) -> EffectReservation:
         if units <= 0:
             raise ValueError("units deve ser positivo")
-        async with self._database.connection(self._tenant) as connection:
-            quota_cursor = await connection.execute(
-                """
-                SELECT limit_units, used_units
-                FROM provider_quotas
-                WHERE organization_id = %s AND provider = %s
-                FOR UPDATE
-                """,
-                (self._tenant.organization_id, provider),
+        stmt_quota = (
+            select(ProviderQuota.limit_units, ProviderQuota.used_units)
+            .where(
+                ProviderQuota.organization_id == self._tenant.organization_id,
+                ProviderQuota.provider == provider,
             )
+            .with_for_update()
+        )
+        stmt_existing = (
+            select(*_EFFECT_COLUMNS)
+            .where(
+                EffectLedgerModel.organization_id == self._tenant.organization_id,
+                EffectLedgerModel.effect_key == effect_key,
+            )
+        )
+        async with self._database.connection(self._tenant) as connection:
+            quota_cursor = await self._database.execute(connection, stmt_quota)
             quota = await quota_cursor.fetchone()
             if quota is None:
                 raise QuotaExceededError(
                     f"quota não configurada para provider {provider!r}"
                 )
 
-            existing_cursor = await connection.execute(
-                f"""
-                SELECT {_EFFECT_COLUMNS}
-                FROM external_effects
-                WHERE organization_id = %s AND effect_key = %s
-                """,
-                (self._tenant.organization_id, effect_key),
-            )
+            existing_cursor = await self._database.execute(connection, stmt_existing)
             existing_row = await existing_cursor.fetchone()
             if existing_row is not None:
                 existing = _reservation(existing_row, created=False)
@@ -141,31 +153,29 @@ class PostgresEffectLedger:
                     f"quota de {provider!r} excedida: "
                     f"{used_units + units}/{limit_units}"
                 )
-            await connection.execute(
-                """
-                INSERT INTO external_effects (
-                    organization_id, effect_key, run_id, provider, units,
-                    status, request
+            stmt_insert_effect = (
+                pg_insert(EffectLedgerModel)
+                .values(
+                    organization_id=self._tenant.organization_id,
+                    effect_key=effect_key,
+                    run_id=run_id,
+                    provider=provider,
+                    units=units,
+                    status="reserved",
+                    request=request,
                 )
-                VALUES (%s, %s, %s, %s, %s, 'reserved', %s)
-                """,
-                (
-                    self._tenant.organization_id,
-                    effect_key,
-                    run_id,
-                    provider,
-                    units,
-                    Jsonb(request),
-                ),
             )
-            await connection.execute(
-                """
-                UPDATE provider_quotas
-                SET used_units = used_units + %s, updated_at = CURRENT_TIMESTAMP
-                WHERE organization_id = %s AND provider = %s
-                """,
-                (units, self._tenant.organization_id, provider),
+            stmt_update_quota = (
+                update(ProviderQuota)
+                .where(
+                    ProviderQuota.organization_id == self._tenant.organization_id,
+                    ProviderQuota.provider == provider,
+                )
+                .values(used_units=ProviderQuota.used_units + units)
             )
+            await self._database.execute(connection, stmt_insert_effect)
+            await self._database.execute(connection, stmt_update_quota)
+
         return EffectReservation(
             effect_key=effect_key,
             run_id=run_id,
@@ -182,17 +192,20 @@ class PostgresEffectLedger:
         *,
         error: str,
     ) -> EffectReservation:
-        async with self._database.connection(self._tenant) as connection:
-            cursor = await connection.execute(
-                f"""
-                UPDATE external_effects
-                SET status = 'uncertain', error = %s,
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE organization_id = %s AND effect_key = %s
-                RETURNING {_EFFECT_COLUMNS}
-                """,
-                (error[:2000], self._tenant.organization_id, effect_key),
+        stmt = (
+            update(EffectLedgerModel)
+            .where(
+                EffectLedgerModel.organization_id == self._tenant.organization_id,
+                EffectLedgerModel.effect_key == effect_key,
             )
+            .values(
+                status="uncertain",
+                error=error[:2000],
+            )
+            .returning(*_EFFECT_COLUMNS)
+        )
+        async with self._database.connection(self._tenant) as connection:
+            cursor = await self._database.execute(connection, stmt)
             row = await cursor.fetchone()
             if row is None:
                 raise ValueError(f"efeito {effect_key!r} inexistente")
@@ -204,28 +217,32 @@ class PostgresEffectLedger:
         *,
         result: dict[str, Any],
     ) -> EffectReservation:
-        async with self._database.connection(self._tenant) as connection:
-            cursor = await connection.execute(
-                f"""
-                UPDATE external_effects
-                SET status = 'succeeded', result = %s, error = NULL,
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE organization_id = %s AND effect_key = %s
-                  AND status = 'reserved'
-                RETURNING {_EFFECT_COLUMNS}
-                """,
-                (Jsonb(result), self._tenant.organization_id, effect_key),
+        stmt_update = (
+            update(EffectLedgerModel)
+            .where(
+                EffectLedgerModel.organization_id == self._tenant.organization_id,
+                EffectLedgerModel.effect_key == effect_key,
+                EffectLedgerModel.status == "reserved",
             )
+            .values(
+                status="succeeded",
+                result=result,
+                error=None,
+            )
+            .returning(*_EFFECT_COLUMNS)
+        )
+        stmt_existing = (
+            select(*_EFFECT_COLUMNS)
+            .where(
+                EffectLedgerModel.organization_id == self._tenant.organization_id,
+                EffectLedgerModel.effect_key == effect_key,
+            )
+        )
+        async with self._database.connection(self._tenant) as connection:
+            cursor = await self._database.execute(connection, stmt_update)
             row = await cursor.fetchone()
             if row is None:
-                existing_cursor = await connection.execute(
-                    f"""
-                    SELECT {_EFFECT_COLUMNS}
-                    FROM external_effects
-                    WHERE organization_id = %s AND effect_key = %s
-                    """,
-                    (self._tenant.organization_id, effect_key),
-                )
+                existing_cursor = await self._database.execute(connection, stmt_existing)
                 row = await existing_cursor.fetchone()
                 if row is None:
                     raise ValueError(f"efeito {effect_key!r} inexistente")
@@ -237,16 +254,17 @@ class PostgresEffectLedger:
         return _reservation(row, created=False)
 
     async def quota_usage(self, provider: str) -> tuple[int, int]:
-        async with self._database.connection(self._tenant) as connection:
-            cursor = await connection.execute(
-                """
-                SELECT used_units, limit_units
-                FROM provider_quotas
-                WHERE organization_id = %s AND provider = %s
-                """,
-                (self._tenant.organization_id, provider),
+        stmt = (
+            select(ProviderQuota.used_units, ProviderQuota.limit_units)
+            .where(
+                ProviderQuota.organization_id == self._tenant.organization_id,
+                ProviderQuota.provider == provider,
             )
+        )
+        async with self._database.connection(self._tenant) as connection:
+            cursor = await self._database.execute(connection, stmt)
             row = await cursor.fetchone()
         if row is None:
             raise ValueError(f"quota de {provider!r} inexistente")
         return row
+

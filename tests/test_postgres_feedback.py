@@ -31,9 +31,9 @@ def _runtime_url(postgresql) -> str:
         """
         DO $$
         BEGIN
-            CREATE ROLE feedback_app LOGIN;
+            CREATE ROLE feedback_app LOGIN PASSWORD 'feedback_app';
         EXCEPTION WHEN duplicate_object THEN
-            NULL;
+            ALTER ROLE feedback_app LOGIN PASSWORD 'feedback_app';
         END
         $$
         """
@@ -47,7 +47,7 @@ def _runtime_url(postgresql) -> str:
     )
     postgresql.commit()
     info = postgresql.info
-    return f"postgresql://feedback_app@{info.host}:{info.port}/{info.dbname}"
+    return f"postgresql://feedback_app:feedback_app@{info.host}:{info.port}/{info.dbname}"
 
 
 def _configure_runtime(monkeypatch, runtime_url: str, tmp_path) -> None:

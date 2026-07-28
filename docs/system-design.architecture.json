@@ -1,0 +1,401 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "System Design — UGC Orchestrator",
+    "subtitle": "Arquitetura da aplicação atual · componentes, dependências e persistência",
+    "output": "docs/system-design.html",
+    "viewBox": [1740, 930]
+  },
+  "components": [
+    {
+      "id": "spa",
+      "type": "frontend",
+      "label": "React SPA",
+      "sublabel": "Vite · dashboard",
+      "pos": [40, 290],
+      "size": [150, 68]
+    },
+    {
+      "id": "cli",
+      "type": "frontend",
+      "label": "CLI",
+      "sublabel": "Click · async commands",
+      "pos": [40, 430],
+      "size": [150, 68]
+    },
+    {
+      "id": "api",
+      "type": "backend",
+      "label": "FastAPI + SSE",
+      "sublabel": "REST · stream · static",
+      "pos": [260, 290],
+      "size": [155, 68]
+    },
+    {
+      "id": "runner",
+      "type": "backend",
+      "label": "Runner",
+      "sublabel": "run · resume · status",
+      "pos": [480, 290],
+      "size": [155, 68]
+    },
+    {
+      "id": "graph",
+      "type": "backend",
+      "label": "LangGraph",
+      "sublabel": "batch + item subgraph",
+      "pos": [700, 290],
+      "size": [160, 68],
+      "tag": "async"
+    },
+    {
+      "id": "executor",
+      "type": "messagebus",
+      "label": "Stage Executor + Tools",
+      "sublabel": "contracts · validation",
+      "pos": [930, 290],
+      "size": [170, 68]
+    },
+    {
+      "id": "adapters",
+      "type": "backend",
+      "label": "CompositeAdapter",
+      "sublabel": "role → provider",
+      "pos": [1170, 290],
+      "size": [170, 68]
+    },
+    {
+      "id": "config",
+      "type": "database",
+      "label": "Configuration",
+      "sublabel": "pipeline · providers · agents",
+      "pos": [480, 100],
+      "size": [180, 72],
+      "tag": "YAML"
+    },
+    {
+      "id": "prompts",
+      "type": "security",
+      "label": "Agent Catalog + Prompts",
+      "sublabel": "guardrails · allowlists",
+      "pos": [930, 100],
+      "size": [180, 72]
+    },
+    {
+      "id": "runtime_memory",
+      "type": "messagebus",
+      "label": "Runtime Memory",
+      "sublabel": "SSE queues · replay · gates",
+      "pos": [260, 590],
+      "size": [170, 72],
+      "tag": "process-local"
+    },
+    {
+      "id": "runs_sqlite",
+      "type": "database",
+      "label": "runs.sqlite",
+      "sublabel": "LangGraph checkpoints",
+      "pos": [500, 590],
+      "size": [170, 72],
+      "tag": "thread_id = run_id"
+    },
+    {
+      "id": "artifacts_sqlite",
+      "type": "database",
+      "label": "artifacts.sqlite",
+      "sublabel": "metadata · hash · retention",
+      "pos": [740, 590],
+      "size": [180, 72],
+      "tag": "canonical metadata"
+    },
+    {
+      "id": "json_stores",
+      "type": "database",
+      "label": "JSON Stores",
+      "sublabel": "creators · prompts · feedback",
+      "pos": [990, 590],
+      "size": [180, 72]
+    },
+    {
+      "id": "media_storage",
+      "type": "cloud",
+      "label": "MediaStorage",
+      "sublabel": "Local FS (mock) · R2/S3 (live)",
+      "pos": [1240, 590],
+      "size": [180, 72]
+    },
+    {
+      "id": "gateway",
+      "type": "cloud",
+      "label": "Vercel AI Gateway",
+      "sublabel": "LLM · image · assembly",
+      "pos": [1490, 100],
+      "size": [180, 72]
+    },
+    {
+      "id": "replicate",
+      "type": "cloud",
+      "label": "Replicate",
+      "sublabel": "creator · video · voice",
+      "pos": [1490, 280],
+      "size": [180, 72]
+    },
+    {
+      "id": "elevenlabs",
+      "type": "cloud",
+      "label": "ElevenLabs",
+      "sublabel": "voice synthesis",
+      "pos": [1490, 460],
+      "size": [180, 72]
+    },
+    {
+      "id": "langsmith",
+      "type": "cloud",
+      "label": "LangSmith",
+      "sublabel": "optional tracing",
+      "pos": [1490, 640],
+      "size": [180, 72]
+    },
+    {
+      "id": "postgres",
+      "type": "database",
+      "label": "PostgreSQL",
+      "sublabel": "docker-compose scaffold",
+      "pos": [1490, 790],
+      "size": [180, 72],
+      "tag": "not connected"
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "Runtime Python · mesma imagem OCI (estado atual)",
+      "wraps": [
+        "api",
+        "runner",
+        "graph",
+        "executor",
+        "adapters",
+        "config",
+        "prompts",
+        "runtime_memory",
+        "runs_sqlite",
+        "artifacts_sqlite",
+        "json_stores",
+        "media_storage"
+      ]
+    },
+    {
+      "kind": "security-group",
+      "label": "Serviços externos e infraestrutura futura",
+      "wraps": ["gateway", "replicate", "elevenlabs", "langsmith", "postgres"]
+    }
+  ],
+  "connections": [
+    {
+      "from": "spa",
+      "to": "api",
+      "label": "REST + SSE",
+      "variant": "emphasis"
+    },
+    {
+      "from": "cli",
+      "to": "runner",
+      "label": "in-process",
+      "variant": "default",
+      "fromSide": "right",
+      "toSide": "bottom",
+      "route": "orthogonal-h",
+      "via": [[220, 464], [440, 464], [440, 390], [558, 390]],
+      "labelAt": [320, 454]
+    },
+    {
+      "from": "api",
+      "to": "runner",
+      "label": "BackgroundTasks",
+      "variant": "emphasis",
+      "labelDy": -28
+    },
+    {
+      "from": "runner",
+      "to": "graph",
+      "label": "ainvoke / astream",
+      "variant": "emphasis",
+      "labelDy": -28
+    },
+    {
+      "from": "graph",
+      "to": "executor",
+      "label": "nodes",
+      "variant": "emphasis"
+    },
+    {
+      "from": "executor",
+      "to": "adapters",
+      "label": "typed calls",
+      "variant": "emphasis"
+    },
+    {
+      "from": "config",
+      "to": "runner",
+      "label": "load profile",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "route": "orthogonal-v",
+      "labelDy": -12
+    },
+    {
+      "from": "prompts",
+      "to": "executor",
+      "label": "system prompts",
+      "variant": "security",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "route": "orthogonal-v",
+      "labelDy": -12
+    },
+    {
+      "from": "api",
+      "to": "runtime_memory",
+      "label": "queues + buffer",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "route": "orthogonal-v",
+      "labelDy": 54
+    },
+    {
+      "from": "graph",
+      "to": "runs_sqlite",
+      "label": "checkpoints",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "route": "orthogonal-v",
+      "via": [[780, 510], [585, 510]],
+      "labelAt": [670, 500]
+    },
+    {
+      "from": "executor",
+      "to": "artifacts_sqlite",
+      "label": "artifact metadata",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "route": "orthogonal-v",
+      "via": [[1015, 535], [830, 535]],
+      "labelAt": [900, 525]
+    },
+    {
+      "from": "api",
+      "to": "json_stores",
+      "label": "CRUD",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "route": "orthogonal-v",
+      "via": [[338, 485], [1080, 485]],
+      "labelAt": [470, 475]
+    },
+    {
+      "from": "executor",
+      "to": "media_storage",
+      "label": "persist bytes",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "route": "orthogonal-v",
+      "via": [[1015, 455], [1330, 455]],
+      "labelAt": [1190, 445]
+    },
+    {
+      "from": "api",
+      "to": "media_storage",
+      "label": "static / signed URL",
+      "variant": "security",
+      "fromSide": "bottom",
+      "toSide": "left",
+      "route": "orthogonal-v",
+      "via": [[338, 550], [1200, 550], [1200, 626]],
+      "labelAt": [1060, 540]
+    },
+    {
+      "from": "adapters",
+      "to": "gateway",
+      "label": "HTTPS",
+      "variant": "emphasis",
+      "fromSide": "right",
+      "toSide": "left",
+      "route": "orthogonal-v",
+      "via": [[1435, 324], [1435, 136]],
+      "labelAt": [1445, 210]
+    },
+    {
+      "from": "adapters",
+      "to": "replicate",
+      "label": "HTTPS",
+      "variant": "emphasis"
+    },
+    {
+      "from": "adapters",
+      "to": "elevenlabs",
+      "label": "voice",
+      "variant": "default",
+      "fromSide": "right",
+      "toSide": "left",
+      "route": "orthogonal-v",
+      "via": [[1455, 324], [1455, 496]],
+      "labelAt": [1443, 425]
+    },
+    {
+      "from": "adapters",
+      "to": "langsmith",
+      "label": "trace if enabled",
+      "variant": "dashed",
+      "fromSide": "right",
+      "toSide": "left",
+      "route": "orthogonal-v",
+      "via": [[1470, 324], [1470, 676]],
+      "labelAt": [1432, 576]
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Application boundary",
+      "items": [
+        "React SPA talks to FastAPI over REST and SSE",
+        "CLI and API execute the Python runner in-process",
+        "There is no durable job queue in the current version"
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "Persistence contracts",
+      "items": [
+        "runs.sqlite stores LangGraph checkpoints for resume",
+        "artifacts.sqlite stores canonical media metadata",
+        "creator, prompt and feedback stores are JSON today"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "Media and providers",
+      "items": [
+        "Mock profile writes media to local filesystem",
+        "Live profile writes bytes to private R2 via S3 API",
+        "Signed URLs are derived at the API boundary"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Deployment truth",
+      "items": [
+        "PostgreSQL exists only as docker-compose scaffolding",
+        "Runtime state, approvals and SSE replay remain process-local",
+        "External providers and LangSmith are opt-in"
+      ]
+    }
+  ]
+}

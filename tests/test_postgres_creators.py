@@ -26,9 +26,9 @@ def _runtime_url(postgresql) -> str:
         """
         DO $$
         BEGIN
-            CREATE ROLE creator_app LOGIN;
+            CREATE ROLE creator_app LOGIN PASSWORD 'creator_app';
         EXCEPTION WHEN duplicate_object THEN
-            NULL;
+            ALTER ROLE creator_app LOGIN PASSWORD 'creator_app';
         END
         $$
         """
@@ -42,7 +42,7 @@ def _runtime_url(postgresql) -> str:
     )
     postgresql.commit()
     info = postgresql.info
-    return f"postgresql://creator_app@{info.host}:{info.port}/{info.dbname}"
+    return f"postgresql://creator_app:creator_app@{info.host}:{info.port}/{info.dbname}"
 
 
 async def test_recorded_creator_survives_repository_restart(postgresql):

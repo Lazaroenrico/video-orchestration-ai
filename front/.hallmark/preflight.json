@@ -1,0 +1,9 @@
+{
+  "scannedAt": "2026-07-18",
+  "framework": "React 18 + Vite 5",
+  "fonts": ["Hanken Grotesk", "Inter", "JetBrains Mono"],
+  "palette": "Kinetic Command light palette from Tailwind semantic colors",
+  "motion": "motion-cut",
+  "spacing": "4px scale",
+  "preserve": ["font stack", "light palette", "Tailwind spacing scale"]
+}

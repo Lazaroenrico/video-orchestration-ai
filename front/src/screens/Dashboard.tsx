@@ -37,21 +37,24 @@ export function Dashboard() {
   if (!data) return null;
 
   const { runsIdx, creators, summaries, agg } = data;
-  const activeRuns = runsIdx.active;
+  const activeRuns = new Set(runsIdx.active);
+  const activeSummaries = summaries.filter((summary) => summary.run_id && activeRuns.has(summary.run_id));
 
   return (
     <div>
       <div className="mb-gutter">
-        <h1 className="font-headline-lg text-headline-lg text-primary mb-2">Welcome back.</h1>
+        <h1 className="hm-page-title mb-2 text-primary">Production overview</h1>
         <p className="font-body-lg text-body-lg text-on-surface-variant flex items-center gap-2">
           <span
             className={`w-2 h-2 rounded-full ${
-              activeRuns.length ? "bg-ai-processing animate-pulse" : "bg-success-published"
+              activeRuns.size ? "bg-ai-processing animate-pulse" : runsIdx.errored.length ? "bg-error" : "bg-success-published"
             }`}
           />
-          {activeRuns.length
-            ? `${activeRuns.length} run${activeRuns.length === 1 ? "" : "s"} in progress.`
-            : "Your production pipeline is healthy."}
+          {activeRuns.size
+            ? `${activeRuns.size} run${activeRuns.size === 1 ? "" : "s"} in progress.`
+            : runsIdx.errored.length
+            ? `${runsIdx.errored.length} run${runsIdx.errored.length === 1 ? " requires" : "s require"} attention.`
+            : "No live runs right now."}
         </p>
       </div>
 
@@ -59,27 +62,24 @@ export function Dashboard() {
         <div className="col-span-12 xl:col-span-8 grid grid-cols-2 md:grid-cols-4 gap-4">
           <StatTile label="Videos Produced" value={num(agg.produced)} />
           <StatTile
-            label="Approved"
+            label="QC Approved"
             value={num(agg.approved)}
             hint={agg.produced ? `${pct(agg.approved, agg.produced)}%` : undefined}
           />
-          <StatTile label="Dropped" value={num(agg.dropped)} hint="QC" hintTone="error" />
+          <StatTile label="QC Dropped" value={num(agg.dropped)} hint="QC" hintTone="error" />
           <StatTile label="Total Cost" value={usd(agg.cost)} />
         </div>
 
         <div className="col-span-12 xl:col-span-4">
-          <Card className="h-full bg-ai-processing/5 border-ai-processing/20">
-            <div className="flex items-center gap-2 mb-3 text-ai-processing">
-              <Icon name="auto_awesome" />
-              <span className="font-headline-md text-headline-md">AI Insights</span>
+          <Card className="h-full">
+            <div className="flex items-center gap-2 mb-3 text-primary">
+              <Icon name="monitoring" />
+              <span className="font-headline-md text-headline-md">Run health</span>
             </div>
             <p className="font-body-md text-body-md text-on-surface-variant">
               {summaries.length
-                ? `Across ${summaries.length} tracked runs, approval rate is ${pct(
-                    agg.approved,
-                    agg.produced || 1
-                  )}%. Keep hooks tight to lift QC pass-through.`
-                : "Run a campaign to unlock performance insights."}
+                ? `${runsIdx.active.length} live · ${runsIdx.errored.length} errored · ${summaries.length} runs available for analysis.`
+                : "Start a campaign to populate this workspace with production data."}
             </p>
           </Card>
         </div>
@@ -97,13 +97,13 @@ export function Dashboard() {
                 </Link>
               }
             />
-            {runsIdx.runs.length === 0 && (
+            {activeSummaries.length === 0 && (
               <p className="font-body-md text-body-md text-on-surface-variant py-6 text-center">
-                No runs yet. Start your first campaign.
+                No live runs. Open Campaigns to inspect completed and paused work.
               </p>
             )}
             <div className="flex flex-col divide-y divide-surface-border">
-              {summaries.slice(0, 6).map((s) => {
+              {activeSummaries.slice(0, 6).map((s) => {
                 const total = s.produced || 1;
                 const done = s.approved + s.dropped;
                 return (

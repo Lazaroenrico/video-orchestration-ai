@@ -13,7 +13,7 @@ export function Card({
 }) {
   return (
     <div
-      className={`bg-surface-container-lowest border border-surface-border rounded-xl ${SHADOW} ${
+      className={`min-w-0 bg-surface-container-lowest border border-surface-border rounded-xl ${SHADOW} ${
         padded ? "p-6" : ""
       } ${className}`}
     >
@@ -30,7 +30,7 @@ export function SectionTitle({
   action?: ReactNode;
 }) {
   return (
-    <div className="flex items-center justify-between mb-4">
+    <div className="flex flex-col gap-2 mb-4 sm:flex-row sm:items-center sm:justify-between">
       <h2 className="font-label-sm text-label-sm uppercase tracking-wider text-on-surface-variant">
         {title}
       </h2>

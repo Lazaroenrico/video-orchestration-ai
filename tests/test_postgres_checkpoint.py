@@ -20,9 +20,9 @@ def _runtime_url(postgresql) -> str:
         """
         DO $$
         BEGIN
-            CREATE ROLE checkpoint_app LOGIN;
+            CREATE ROLE checkpoint_app LOGIN PASSWORD 'checkpoint_app';
         EXCEPTION WHEN duplicate_object THEN
-            NULL;
+            ALTER ROLE checkpoint_app LOGIN PASSWORD 'checkpoint_app';
         END
         $$
         """
@@ -34,7 +34,7 @@ def _runtime_url(postgresql) -> str:
     )
     postgresql.commit()
     info = postgresql.info
-    return f"postgresql://checkpoint_app@{info.host}:{info.port}/{info.dbname}"
+    return f"postgresql://checkpoint_app:checkpoint_app@{info.host}:{info.port}/{info.dbname}"
 
 
 async def test_postgres_checkpoint_survives_restart_without_local_file(

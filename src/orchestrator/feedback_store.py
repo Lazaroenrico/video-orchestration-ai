@@ -160,8 +160,9 @@ async def open_repository(path: str | Path) -> AsyncIterator[FeedbackRepository]
         yield JsonFeedbackRepository(path)
         return
 
-    from orchestrator.db import Database, PostgresFeedbackRepository, TenantIdentity
+    from orchestrator.db import PostgresFeedbackRepository, TenantIdentity, get_shared_database
 
-    async with Database.from_env() as database:
-        tenant = await database.resolve_tenant(TenantIdentity.from_env())
-        yield PostgresFeedbackRepository(database, tenant)
+    database = await get_shared_database()
+    tenant = await database.resolve_tenant(TenantIdentity.from_env())
+    yield PostgresFeedbackRepository(database, tenant)
+

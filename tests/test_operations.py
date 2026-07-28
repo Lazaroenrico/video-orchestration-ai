@@ -28,9 +28,9 @@ def _runtime_database_url(postgresql) -> str:
         """
         DO $$
         BEGIN
-            CREATE ROLE tenant_app LOGIN;
+            CREATE ROLE tenant_app LOGIN PASSWORD 'tenant_app';
         EXCEPTION WHEN duplicate_object THEN
-            NULL;
+            ALTER ROLE tenant_app LOGIN PASSWORD 'tenant_app';
         END
         $$
         """
@@ -41,7 +41,7 @@ def _runtime_database_url(postgresql) -> str:
     )
     postgresql.commit()
     info = postgresql.info
-    return f"postgresql://tenant_app@{info.host}:{info.port}/{info.dbname}"
+    return f"postgresql://tenant_app:tenant_app@{info.host}:{info.port}/{info.dbname}"
 
 
 async def test_inspect_run_reconstructs_durable_state_by_run_id(postgresql):

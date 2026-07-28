@@ -262,8 +262,9 @@ async def open_artifact_repository(
         yield repository
         return
 
-    from orchestrator.db import Database, PostgresArtifactRepository, TenantIdentity
+    from orchestrator.db import PostgresArtifactRepository, TenantIdentity, get_shared_database
 
-    async with Database.from_env() as database:
-        tenant = await database.resolve_tenant(TenantIdentity.from_env())
-        yield PostgresArtifactRepository(database, tenant)
+    database = await get_shared_database()
+    tenant = await database.resolve_tenant(TenantIdentity.from_env())
+    yield PostgresArtifactRepository(database, tenant)
+

@@ -1,6 +1,11 @@
 """Interface pública da persistência PostgreSQL multi-tenant."""
 
-from orchestrator.db.database import Database, TenantAuthorizationError
+from orchestrator.db.database import (
+    Database,
+    TenantAuthorizationError,
+    close_shared_database,
+    get_shared_database,
+)
 from orchestrator.db.artifacts import PostgresArtifactRepository
 from orchestrator.db.admin import (
     MEMBERSHIP_ROLES,
@@ -62,4 +67,7 @@ __all__ = [
     "create_organization",
     "grant_membership",
     "revoke_membership",
+    "get_shared_database",
+    "close_shared_database",
 ]
+

@@ -15,8 +15,14 @@ export function ProgressBar({
     warning: "bg-warning-review",
   }[tone];
   return (
-    <div className={`h-2 w-full rounded-full bg-surface-container-high overflow-hidden ${className}`}>
-      <div className={`h-full rounded-full ${fill} transition-[width] duration-500`} style={{ width: `${pct}%` }} />
+    <div
+      className={`h-2 w-full overflow-hidden rounded-full bg-surface-container-high ${className}`}
+      role="progressbar"
+      aria-valuemin={0}
+      aria-valuemax={100}
+      aria-valuenow={pct}
+    >
+      <div className={`h-full rounded-full ${fill}`} style={{ width: `${pct}%` }} />
     </div>
   );
 }

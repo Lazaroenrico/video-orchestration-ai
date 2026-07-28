@@ -1,6 +1,5 @@
 import { PageHeader } from "../components/PageHeader";
 import { Card } from "../components/Card";
-import { Button } from "../components/Button";
 import { Icon } from "../components/Icon";
 import { Loading, ErrorState, EmptyState } from "../components/States";
 import { useAsync } from "../api/useAsync";
@@ -12,6 +11,7 @@ const STAGE_META: Record<string, { label: string; icon: string; blurb: string }>
   video: { label: "Video", icon: "movie", blurb: "Talking-head video generation." },
   qc: { label: "Quality Control", icon: "verified", blurb: "Automated media integrity checks." },
   assembly: { label: "Assembly", icon: "auto_awesome_motion", blurb: "Final cut composition." },
+  upscale: { label: "Video Upscale", icon: "high_quality", blurb: "Final-video enhancement after assembly." },
   judge: { label: "Judge", icon: "gavel", blurb: "LLM evaluation gateway." },
 };
 
@@ -25,8 +25,7 @@ export function Integrations() {
     <div>
       <PageHeader
         title="Integrations"
-        subtitle="Connect external providers to enable AI synthesis and content distribution across your marketing stack."
-        actions={<Button variant="secondary" icon="description">View Logs</Button>}
+        subtitle="Read-only view of the adapters configured for each pipeline responsibility."
       />
 
       {loading && <Loading />}
@@ -42,7 +41,7 @@ export function Integrations() {
             const mock = isMock(adapter);
             return (
               <Card key={stage} className="flex flex-col">
-                <div className="h-1 -m-6 mb-4 rounded-t-xl" style={{ background: mock ? "#cfc4c5" : "#10b981" }} />
+                <div className={`-m-6 mb-4 h-1 rounded-t-xl ${mock ? "bg-surface-container-high" : "bg-success-published"}`} />
                 <div className="flex items-start justify-between mb-3">
                   <div className="flex items-center gap-3">
                     <div className="w-10 h-10 rounded-lg bg-surface-container flex items-center justify-center text-primary">
@@ -55,20 +54,17 @@ export function Integrations() {
                           mock ? "text-on-surface-variant" : "text-success-published"
                         }`}
                       >
-                        {mock ? "● Mock / Dry-run" : "● Connected"}
+                        {mock ? "Dry-run / mock" : "Configured"}
                       </div>
                     </div>
                   </div>
                 </div>
                 <p className="font-body-md text-body-md text-on-surface-variant flex-1">{meta.blurb}</p>
-                <div className="mt-4 flex items-center justify-between">
+                <div className="mt-4 flex items-center justify-between gap-3 border-t border-surface-border pt-3">
                   <span className="font-mono text-label-sm text-label-sm text-on-surface-variant">
                     {adapter}
                   </span>
-                  <div className="flex gap-2">
-                    <Button variant="secondary" className="!py-1.5">Settings</Button>
-                    <Button variant="secondary" icon="bolt" className="!py-1.5">Test</Button>
-                  </div>
+                  <span className="text-right font-label-sm text-label-sm text-on-surface-variant">Managed by config</span>
                 </div>
               </Card>
             );

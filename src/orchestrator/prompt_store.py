@@ -200,8 +200,9 @@ async def open_repository(path: str | Path) -> AsyncIterator[PromptRepository]:
         return
 
     # Imports tardios evitam carregar a stack PostgreSQL no modo mock/local.
-    from orchestrator.db import Database, PostgresPromptRepository, TenantIdentity
+    from orchestrator.db import PostgresPromptRepository, TenantIdentity, get_shared_database
 
-    async with Database.from_env() as database:
-        tenant = await database.resolve_tenant(TenantIdentity.from_env())
-        yield PostgresPromptRepository(database, tenant)
+    database = await get_shared_database()
+    tenant = await database.resolve_tenant(TenantIdentity.from_env())
+    yield PostgresPromptRepository(database, tenant)
+

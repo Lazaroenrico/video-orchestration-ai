@@ -28,9 +28,9 @@ def _runtime_url(postgresql) -> str:
         """
         DO $$
         BEGIN
-            CREATE ROLE artifact_app LOGIN;
+            CREATE ROLE artifact_app LOGIN PASSWORD 'artifact_app';
         EXCEPTION WHEN duplicate_object THEN
-            NULL;
+            ALTER ROLE artifact_app LOGIN PASSWORD 'artifact_app';
         END
         $$
         """
@@ -44,7 +44,7 @@ def _runtime_url(postgresql) -> str:
     )
     postgresql.commit()
     info = postgresql.info
-    return f"postgresql://artifact_app@{info.host}:{info.port}/{info.dbname}"
+    return f"postgresql://artifact_app:artifact_app@{info.host}:{info.port}/{info.dbname}"
 
 
 async def test_r2_artifact_metadata_survives_repository_restart(postgresql):
