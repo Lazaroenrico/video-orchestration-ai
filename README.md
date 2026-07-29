@@ -5,14 +5,14 @@ descrita em `Context.md`. O motor é construído via **TDD** sobre **LangGraph /
 LangChain / LangSmith** e permite misturar adapters reais e mock por papel.
 
 - `config-mock/` roda dry-run determinístico, sem chamadas externas e custo zero.
-- `config/` é o perfil live atual: LLM + creator + vídeo LTX 2.3 Fast + QC de
-  integridade + assembly final Seedance 2.0 via APIs reais, sem mock nos papéis runtime.
+- `config/` é o perfil live atual: LLM + creator + clips PrunaAI P-Video,
+  locução ElevenLabs e montagem FFmpeg + QC de integridade, sem mock nos papéis runtime.
 
 ## Pipeline (9 passos)
 
-1. Conceitos (Claude) · 2. Scripts (Claude) · 3. Creator reutilizável (GPT Image 2 + Topaz + ElevenLabs) ·
-4. Talking-head (LTX/Kling/Seedance) · 5. Product demo · 6. Execução paralela ·
-7. QC · 8. Montagem · 9. Loop de feedback.
+1. Conceitos (Claude) · 2. Scripts (Claude) · 3. Creator reutilizável (GPT Image 2 + ElevenLabs) ·
+4. Talking-head (PrunaAI P-Video) · 5. Product demo (PrunaAI P-Video) · 6. Execução paralela ·
+7. QC · 8. Locução (ElevenLabs Turbo v2.5) · 9. Montagem (FFmpeg) · 10. Loop de feedback.
 
 O motor termina em **montagem**: item aprovado é item que passou no QC e gerou
 `assembled`. Distribuição/postagem saiu do escopo do produto.
@@ -25,7 +25,7 @@ abstraídos por protocols e ligados por `config/providers.yaml`, sem mexer no gr
 ```bash
 uv venv --python 3.12
 uv pip install -e ".[dev]"
-npm install  # necessário só para o bridge live de vídeo final via Seedance
+npm install  # necessário apenas se habilitar o adapter de vídeo Vercel opt-in
 ```
 
 ## Uso
@@ -38,25 +38,54 @@ orchestrator list                                                   # lista runs
 orchestrator loop --cycles 3 --feedback-store fb.json --config-dir config-mock  # loop de feedback mock
 ```
 
-## Rodar o perfil live
+## Desenvolvimento local com um comando
 
 ```bash
 cp .env.example .env
-# preencha as chaves reais no .env:
-# AI_GATEWAY_API_KEY, REPLICATE_API_TOKEN, REPLICATE_ELEVENLABS_MODEL
-# e os campos/voice ids do modelo ElevenLabs hospedado no Replicate
+# preencha no .env:
+# AI_GATEWAY_API_KEY, REPLICATE_API_TOKEN, REPLICATE_ELEVENLABS_MODEL,
+# R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY e R2_BUCKET
+./scripts/dev-local up
 ```
 
-O perfil `config/` já ativa `llm: vercel_gateway_llm`, `creator:
-creator_real_replicate`, `video: replicate`, `qc: integrity_qc` e `assembly:
-vercel_seedance_assembly`. Os clips intermediários usam LTX 2.3 Fast sem áudio
-(`generate_audio: false`); o vídeo final é gerado pelo Seedance 2.0 via Vercel AI
-Gateway (`bytedance/seedance-2.0`). O fallback mock do vídeo fica desabilitado no
-perfil live.
+O comando detecta Docker Compose V2 ou V1, valida a configuração sem imprimir
+secrets e sobe PostgreSQL 16, migrações, API com runner embutido e Vite com hot
+reload. Acesse:
+
+- aplicação: `http://localhost:5173`
+- API/readiness: `http://localhost:8000/readyz`
+- PostgreSQL: `127.0.0.1:55432`
+
+Dentro dos containers, `DATABASE_URL` e `MIGRATION_DATABASE_URL` sempre apontam
+para o PostgreSQL local; qualquer URL de banco existente no `.env` é ignorada. O
+R2 é o storage padrão e continua externo ao ciclo de vida do Compose. Para parar
+preservando o banco ou zerar todos os volumes locais:
 
 ```bash
-orchestrator run --batch 3 --offer "serum X" --config-dir config
+./scripts/dev-local down
+./scripts/dev-local reset --yes  # não remove objetos do R2
 ```
+
+O default usa `config/`: Vercel AI Gateway para LLM e GPT Image 2; Replicate para
+ElevenLabs e os dois clips; FFmpeg local para concatenação e áudio; R2 para os
+bytes. Os clips usam `prunaai/p-video` em draft 1080p (`US$ 0,01/s`) durante a
+validação E2E. A montagem não faz uma terceira geração paga.
+Adapters pagos estão
+habilitados, mas só há custo quando uma campanha é iniciada. Para validar toda a
+infra sem geração paga, use o perfil staging; para trocar também o storage por
+filesystem local, use o override explícito:
+
+```bash
+ORCH_DEV_CONFIG_DIR=config-staging ./scripts/dev-local up
+ORCH_DEV_CONFIG_DIR=config-staging ORCH_DEV_STORAGE_BACKEND=local \
+  ./scripts/dev-local up
+```
+
+O roteiro live é limitado a 35 palavras/14 segundos. Após o QC, a voz aprovada
+gera `voiceover`, e o FFmpeg produz um MP4 vertical de 16 segundos com H.264/AAC.
+O primeiro run live deve usar batch 1. O banco persiste runs, jobs, gates,
+eventos, checkpoints e retries; ponteiros de mídia permanecem `r2://` no estado e
+as respostas REST/SSE geram URLs assinadas somente na saída.
 
 Passo a passo completo, com a saída esperada de cada comando e como lê-la:
 **[`docs/DEMO.md`](docs/DEMO.md)**.
@@ -103,5 +132,7 @@ código — nunca se afrouxa a asserção só para passar. Ver `CLAUDE.md`.
 
 - `CLAUDE.md` — guia para sessões do Claude Code (stack, convenções, regra dos testes).
 - `docs/DECISIONS.md` — log de todas as decisões + rationale.
+- `docs/PLAN-CREATOR-VOICE-DESIGN.md` — plano para derivar e aprovar a voz de cada
+  creator sem pools de IDs no `.env`.
 - `docs/PROGRESS.md` — handoff: o que está feito, o que falta, próximo passo.
 # video-orchestration-ai

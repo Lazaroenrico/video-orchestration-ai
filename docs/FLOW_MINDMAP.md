@@ -36,17 +36,17 @@ mindmap
     Subgrafo per-item Item
       route_after_script
         escolhe tier conforme attempts
-      gen tier Step4
-        ltx kling seedance
+      gen tier configurado Step4
+        pruna no perfil live
         generate_clip
         persist_item_media
       product_demo Step5
-        generate_clip tier ltx fixo
+        generate_clip tier video.product_demo_tier
       qc Step7
         qc_check
         route_after_qc
           pass to assembly
-          fail e attempts menor max regen no tier seguinte
+          fail e attempts menor max regen no tier configurado
           fail e attempts esgotado drop
       assembly Step8
         assemble
@@ -80,17 +80,16 @@ mindmap
         AnthropicLLMAdapter
         Claude Opus 4.8 via Vercel AI Gateway
         generate_concepts e write_script
-      creator creator_real_replicate
+      creator creator_vercel_replicate_voice
         OpenAIImageAdapter via Vercel Gateway GPT Image 2
-        ReplicateUpscaleAdapter real-esrgan
         ReplicateVoiceAdapter ElevenLabs TTS via Replicate
       video replicate
-        LTX 2.3 Fast sem audio
-        Kling e Seedance fallback mock
+        PrunaAI P-Video para talking-head
+        PrunaAI P-Video para product demo
       qc integrity_qc
         bloqueia midia mock ou fallback antes da montagem
-      assembly vercel_seedance_assembly
-        video final Seedance 2.0 via Vercel AI Gateway
+      assembly replicate
+        video final PrunaAI P-Video em draft 1080p
       judge gateway
         JudgePort via HTTP configurável judge.yaml
 ```
@@ -113,7 +112,8 @@ sequenceDiagram
     participant T as Tools tipadas
     participant LLM as Vercel Gateway (Claude Opus 4.8)
     participant IMG as Vercel Gateway (GPT Image 2)
-    participant REP as Replicate (upscale + ElevenLabs TTS + video)
+    participant REP as Replicate (ElevenLabs TTS)
+    participant VID as Vercel Gateway (Seedance)
     participant MEDIA as media_store (disco local)
 
     U->>G: run(offer, batch, platform, creator_prompt, video_prompt)
@@ -132,20 +132,19 @@ sequenceDiagram
     G->>T: build_creator_tool(index, system_prompt) [roster, N vezes em paralelo]
     T->>IMG: generate_face(index, system_prompt)
     IMG-->>G: primary (data URI) + angles
-    G->>REP: upscale(primary) [real-esrgan]
-    REP-->>G: upscaled_base URL
     G->>REP: create_voice(index) [ElevenLabs TTS]
     REP-->>G: voice_id
     G->>MEDIA: persist_creator_media (baixa bytes, reescreve URIs locais)
     par fan-out por item (max_concurrency)
         G->>T: generate_clip_tool(tier, item, prompt, reference)
-        T->>REP: generate_clip LTX 2.3 Fast (image-to-video, sem audio)
-        REP-->>G: clip mp4
+        T->>VID: Replicate PrunaAI P-Video (talking-head, sem audio)
+        T->>VID: Replicate PrunaAI P-Video (product demo, sem audio)
+        VID-->>G: clips mp4
         G->>T: qc_check_tool(item)
         T->>G: qc_check (integrity_qc: bloqueia mídia mock/fallback)
         G->>MEDIA: persist_item_media (clips, assembled)
         G->>T: assemble_video_tool(item, platform, prompt)
-        T->>LLM: assemble → Seedance 2.0 (vercel_seedance_assembly, vídeo final)
+        T->>VID: assemble → Replicate PrunaAI P-Video (draft, vídeo final)
     end
     G-->>U: feedback (summary agregando resultados do batch)
 ```
@@ -157,12 +156,12 @@ sequenceDiagram
 | 1 | `node_concepts` | `generate_concepts_tool` | `vercel_gateway_llm` | Sim — Claude Opus 4.8 via Vercel AI Gateway |
 | 2 | `node_scripts` | `write_script_tool` | `vercel_gateway_llm` | Sim — Claude Opus 4.8 via Vercel AI Gateway |
 | 2.5 | `node_concept_review` | — | — | `interrupt()` humano (opcional, `run.edit_concepts`) |
-| 3 | `node_roster` | `build_creator_tool` | `creator_real_replicate` | Sim — Vercel Gateway (GPT Image 2), Replicate (upscale + ElevenLabs TTS) |
+| 3 | `node_roster` | `build_creator_tool` | `creator_vercel_replicate_voice` | Sim — Vercel Gateway (GPT Image 2), Replicate (somente ElevenLabs TTS) |
 | 3.5 | `node_approval` | — | — | `interrupt()` humano (opcional, `run.approve_creators`) |
-| 4 | `make_gen_node(tier)` | `generate_clip_tool` | `replicate` | Sim para `ltx` — LTX 2.3 Fast image-to-video sem áudio; `kling`/`seedance` fallback mock |
-| 5 | `node_product_demo` | `generate_clip_tool` | `replicate` | Sim — LTX 2.3 Fast image-to-video sem áudio |
+| 4 | `make_gen_node(tier)` | `generate_clip_tool` | `replicate` | Sim — PrunaAI P-Video sem áudio via Replicate |
+| 5 | `node_product_demo` | `generate_clip_tool` | `replicate` | Sim — PrunaAI P-Video sem áudio via Replicate |
 | 7 | `node_qc` | `qc_check_tool` | `integrity_qc` | Não — valida mídia real e bloqueia URIs mock/fallback antes da montagem |
-| 8 | `node_assembly` | `assemble_video_tool` | `vercel_seedance_assembly` | Sim — vídeo final Seedance 2.0 (`bytedance/seedance-2.0`) via Vercel AI Gateway |
+| 8 | `node_assembly` | `assemble_video_tool` | `replicate` | Sim — vídeo final PrunaAI P-Video em draft 1080p via Replicate |
 | 8 | `node_upscale` | `upscale_video_tool` | `passthrough_upscale` | Não no perfil atual — role existe para plugar upscale real depois |
 | — | `JudgePort` (gateway) | — | `gateway` | Sim, quando usado — HTTP configurável (`config/judge.yaml`) |
 

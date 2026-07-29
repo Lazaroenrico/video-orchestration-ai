@@ -122,7 +122,7 @@ Registre toda falha investigada (sintoma → causa → correção) em `docs/PROG
 
 1. Implemente os Protocols de `adapters/base.py` num novo adapter.
 2. Registre em `registry.py` (`register_adapter("replicate", factory)`).
-3. Troque o nome em `config/providers.yaml` (ex.: `video: replicate`).
+3. Troque o nome em `config/providers.yaml` (ex.: `video: vercel_gateway_video`).
 4. O grafo não muda. Em execução durável com adapters pagos, só habilite
    `ORCH_ENABLE_PAID_ADAPTERS=true` quando a reserva/idempotência de efeitos estiver
    validada para o caminho que será rodado.

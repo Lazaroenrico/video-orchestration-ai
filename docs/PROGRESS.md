@@ -2701,3 +2701,440 @@ ficou `LOGIN`, `NOSUPERUSER`, `NOBYPASSRLS`, `NOCREATEDB`, `NOCREATEROLE` e
 - **Documentação:** `docs/PIPELINE_V2.md`,
   `docs/ADR-D38-pipeline-v2-agent-contracts.md`, D38 em `docs/DECISIONS.md` e regras
   canônicas atualizadas em `AGENTS.md`.
+
+---
+
+## Correção — imagens dos creators na revisão criativa
+
+- **Sintoma:** a revisão V2 mostrava os dois players de voz, mas os containers de
+  imagem dos creators ficavam vazios.
+- **Reprodução real:** o run `web-e4f748bd` chegou ao gate com dois previews; os
+  objetos `creator-0/image.png` e `creator-1/image.png` existiam no R2, enquanto o DOM
+  não continha nenhum `<img>` e continha os dois áudios assinados.
+- **Causa:** o roster interno usa `upscaled_base`. No caminho local,
+  `_execute_run()` convertia esse alias para `image_uri`, mas o worker durável abria
+  `review_creative_plan` com o interrupt bruto. `/api/state` e o replay SSE também
+  devolviam gates antigos sem normalizar os creators. A voz aparecia porque a
+  persistência já materializava `voice_preview_uri`.
+- **Correção:** `normalize_creator_payload()` virou a projeção pública comum.
+  Novos gates duráveis são persistidos com `image_uri`/`image`; gates e eventos
+  antigos são normalizados durante leitura/replay. Campos internos como
+  `upscaled_base` não fazem parte do payload público.
+- **RED → GREEN:** três regressões cobrem gate persistido, evento SSE persistido e
+  payload aberto pelo worker. `tests/test_web_endpoints.py`: **65 passed**; conjunto
+  focado web/API/store: **112 passed**.
+- **Infra de teste:** os sete testes de `test_postgres_creators.py` não chegaram às
+  asserções porque não há PostgreSQL em `127.0.0.1:5432` neste ambiente
+  (`Connection refused`). Nenhuma asserção foi alterada ou ignorada.
+
+---
+
+## Correção — esgotamento do pool ao regenerar creators
+
+- **Sintoma:** durante a regeneração, `/api/runs`, `/api/creators`, `/api/state` e
+  `/api/stream` passavam a responder `500` após 30 segundos com
+  `psycopg_pool.PoolTimeout`. O processo também registrava rollback recusado dentro de
+  `Transaction`, fechava conexões `ACTIVE` e as devolvia ao pool como `BAD`.
+- **Causa transacional:** `AsyncConnectionPool.connection()` já controla
+  commit/rollback, mas `Database.connection()` abria uma segunda `Transaction`
+  manual. Se uma query era cancelada, a saída da transação interna podia falhar; a
+  saída externa tentava um segundo rollback ainda dentro da primeira transação,
+  produzindo `Explicit rollback() forbidden within a Transaction context`.
+- **Amplificação:** cada abertura de repository chamava `resolve_tenant()`, que
+  repetia três writes idempotentes para materializar organização, usuário e membership.
+  Requests concorrentes da UI disputavam a mesma linha do tenant; uma limpeza de
+  conexão interrompida deixava as quatro vagas do pool ocupadas por trabalho
+  serializado ou por reposição de conexões.
+- **Correção:** removida a transação manual; o contexto do pool voltou a ser o único
+  dono da transação. Em `CancelledError`, a conexão ainda é fechada antes da saída para
+  impedir rollback sobre uma query `ACTIVE`, e o pool a repõe. No modo local, tenants
+  resolvidos são armazenados por identidade com lock e double-check, então o bootstrap
+  ocorre uma vez por processo. No modo `cloudflare_access` não há cache: toda request
+  revalida a membership.
+- **RED → GREEN:** o teste de cancelamento primeiro falhou porque
+  `connection.transaction()` ainda era chamado; oito resoluções concorrentes fizeram
+  oito bootstraps. Após a correção, as três regressões de transação, bootstrap único e
+  reautorização Access passaram.
+- **Verificação:** conjunto focado web + item updates + regressões PostgreSQL:
+  **92 passed**. Contra o Neon, uma query `pg_sleep` cancelada foi descartada e a
+  próxima `SELECT 1` concluiu no mesmo pool. Em carga real, 48 requests concorrentes
+  retornaram `200`; depois de cancelar seis streams SSE, outras 12 requests concorrentes
+  também retornaram `200`, sem novos avisos de rollback ou `PoolTimeout`.
+- **Run afetado:** `web-e4f748bd` voltou para `review`, sem erro, com os dois creators.
+  As duas URLs assinadas de imagem responderam `200 image/png`.
+
+---
+
+## Correção — envio duplicado da revisão criativa
+
+- **Sintoma:** ao aprovar ou pedir regeneração na revisão, o primeiro
+  `POST /api/v2/runs/{run_id}/review` concluía com `200`, mas um segundo envio imediato
+  reutilizava o mesmo `gate_id`/`version` e recebia `409 Conflict`. A tela permanecia
+  visualmente acionável enquanto aguardava a atualização do estado da campanha.
+- **Causa:** o painel dependia apenas do estado assíncrono da mutation para bloquear a
+  ação. Cliques próximos podiam atravessar antes do próximo render, somente o botão
+  selecionado indicava envio e, após o `200`, o painel antigo continuava montado até o
+  polling/SSE refletir a resolução do gate. O cliente HTTP também descartava o status
+  estruturado, impedindo tratar `409` como estado concorrente esperado.
+- **Correção:** o painel ganhou lock síncrono por instância, desabilita todas as ações
+  durante o envio e substitui os controles por confirmação local após sucesso. O cliente
+  agora lança `HttpError` com `status`/`detail`; um `409` mostra mensagem neutra de revisão
+  já processada e força a revalidação do run, sem apresentar falha genérica. A mutation
+  invalida as queries também no caminho de erro e o painel é remontado somente quando
+  muda o par `gate_id:version`, liberando um gate realmente novo.
+- **RED → GREEN:** os testes inicialmente reproduziram duas mutations para clique
+  duplicado, ausência de confirmação, perda do status HTTP e falta de invalidação no
+  conflito. Foram adicionadas regressões para lock global, retry após erro comum,
+  tratamento do `409`, remount por nova versão do gate e preservação de `status/detail`.
+- **Verificação:** frontend com **10 testes Vitest verdes**, `tsc --noEmit`,
+  `check:boundaries` e build Vite concluídos. O `402 Payment Required` observado depois
+  da aprovação pertence ao saldo do provider de geração e não ao contrato de revisão.
+
+---
+
+## Correção — cotas externas durante produção live
+
+- **Sintoma:** após várias gerações de vídeo concluídas, a Replicate respondeu
+  `402 Payment Required`. Na sequência, o Neon encerrou conexões com
+  `Your project has exceeded the data transfer quota`; SSE e `/api/state` passaram a
+  expor `AdminShutdown`, `PoolTimeout` e `500`.
+- **Causa externa:** Replicate e Neon atingiram limites independentes. O `402` não é
+  retentável sem adicionar saldo. O PostgreSQL indisponível impediu inclusive que o
+  worker persistisse imediatamente a falha do job.
+- **Amplificação interna:** cada `progress_event` recebido por SSE agendava um novo
+  `GET /api/state`. Esse endpoint lê checkpoint e timeline persistida; durante fan-out
+  de vídeo, a UI repetia transferências que não eram necessárias porque o próprio SSE
+  já contém o progresso e o reducer atualiza a tela.
+- **Correção do worker:** falhas HTTP permanentes `4xx` de provider, incluindo `402`,
+  encerram o job sem retry automático. `ReadError`/`ReadTimeout` e
+  `WriteError`/`WriteTimeout` também não são retentados no nível do job, pois a chamada
+  paga pode ter sido aceita antes da falha de resposta. `429` e `5xx` continuam
+  retentáveis.
+- **Correção da API:** erros psycopg/pool antes da resposta viram `503` sanitizado com
+  `Retry-After: 30`; o SSE em andamento emite `service_unavailable` e reconecta após
+  30 segundos sem traceback ASGI. `/readyz` agora verifica o PostgreSQL com timeout
+  curto e retorna `not-ready` quando a persistência está indisponível.
+- **Correção do front:** eventos de progresso e atualização de item são reduzidos
+  localmente sem refetch integral do run. Fetch completo permanece na hidratação e em
+  transições que realmente exigem revalidação.
+- **RED → GREEN:** regressões reproduziram retry indevido de `402`/timeout pós-envio,
+  exceção dentro do stream, readiness falsamente verde e o segundo `getRunState` após
+  um único evento de progresso.
+- **Verificação:** backend web/retry com **102 testes verdes** e worker focado com
+  **3 testes verdes**; frontend com **11 testes Vitest verdes**, TypeScript,
+  boundaries e build Vite verdes; `compileall` concluído.
+- **Ação operacional obrigatória:** adicionar crédito na Replicate e liberar/resetar
+  a transferência do projeto Neon antes de reiniciar a API live. Código não consegue
+  contornar cotas impostas pelos providers.
+
+---
+
+## Mudança — Kling/Seedance via Vercel; Replicate somente para voz
+
+- **Objetivo:** remover geração de vídeo do Replicate sem alterar o contrato
+  `VideoPort` nem os nodes do LangGraph.
+- **Problema encontrado:** `config/providers.yaml` apontava `video: replicate`; o
+  adapter real só implementava o tier `ltx`, e `node_product_demo` ainda enviava
+  `tier="ltx"` literalmente. Portanto, trocar apenas o YAML não habilitaria Kling ou
+  Seedance.
+- **Correção:** criado `VercelGatewayVideoAdapter`, que escolhe o model id pelo tier e
+  reutiliza o bridge AI SDK 6. O live usa Kling 3.0 I2V para talking-head, Seedance 2.0
+  para product demo e Seedance 2.0 para montagem. O tier de product demo passou a ser
+  configurável. O alias live `creator_vercel_replicate_voice` explicita que Replicate
+  ficou somente no sub-adapter de voz ElevenLabs do creator.
+- **RED → GREEN:** os testes falharam inicialmente por ausência do módulo
+  `orchestrator.adapters.vercel_gateway_video`; após adapter, registry, config e
+  roteamento, o conjunto focado passou.
+- **Operação:** exige `npm install`, `AI_GATEWAY_API_KEY` (ou `VERCEL_OIDC_TOKEN`) e
+  acesso pago a vídeo no Vercel AI Gateway. `REPLICATE_API_TOKEN` e
+  `REPLICATE_ELEVENLABS_MODEL` continuam necessários somente para voz.
+- **Verificação:** **111 testes focados passaram**, incluindo graph/nodes/tools,
+  registry, config live, tracing e ambos os adapters Vercel; o módulo novo ficou com
+  **100% de cobertura**. `node --check`, `compileall` e `git diff --check` passaram.
+  Na suíte completa, **1061 testes passaram e 2 foram pulados**; 114 testes PostgreSQL
+  falharam no setup porque não há servidor em `127.0.0.1:5432`, a limitação de
+  infraestrutura local já documentada no projeto. Não houve falha funcional adicional.
+
+---
+
+## 2026-07-29 — modo dev local com PostgreSQL 16 e R2
+
+- **Entrega:** `./scripts/dev-local up|down|reset --yes` agora controla PostgreSQL,
+  migração, API com runner embutido e Vite com HMR. O Compose fixa as URLs internas em
+  `postgres:5432`, publica o banco somente em `127.0.0.1:55432`, carrega secrets do
+  `.env` sem permitir que uma URL Neon sobrescreva o banco local e preserva o volume do
+  PostgreSQL em `down`. `reset --yes` remove apenas volumes locais; R2 não faz parte do
+  conjunto de volumes.
+- **Storage:** a resolução foi centralizada em
+  `ORCH_DEV_STORAGE_BACKEND` → `STORAGE_BACKEND` → `providers.yaml`. API, adapters e
+  `/readyz` usam a mesma função. R2 é o padrão do comando dev; filesystem continua
+  disponível com `ORCH_DEV_STORAGE_BACKEND=local`.
+- **Imagem:** o `Dockerfile` inclui `alembic.ini` e `migrations/`; o serviço `migrate`
+  precisa concluir antes da API. O perfil live usa Vercel AI Gateway para
+  LLM/imagem/Kling/Seedance, Replicate somente para voz e R2 para mídia.
+- **Preflight:** o wrapper detecta Compose V2 ou V1, valida Docker, config e apenas as
+  credenciais exigidas pelo perfil/backend selecionado. Mensagens listam nomes de
+  variáveis ausentes, nunca seus valores.
+
+### Falhas investigadas
+
+- **Sintoma:** os primeiros testes encontraram `app`/MinIO e nenhuma ordem de migração.
+  **Causa:** o Compose ainda representava o ambiente legado. **Correção:** serviços
+  reestruturados para `postgres`, `migrate`, `api` e `front`, com healthcheck,
+  dependências e volumes explícitos.
+- **Sintoma:** override local ainda construía S3/R2 e `/readyz` validava o backend
+  errado. **Causa:** factory e readiness implementavam precedências diferentes.
+  **Correção:** `resolve_storage_backend()` virou a fonte única e ganhou regressões de
+  precedência.
+- **Sintoma:** o preflight falhou no `mawk`. **Causa:** o parser usava uma forma de
+  `if` multilinha não portátil. **Correção:** leitura do `.env` reescrita em sintaxe
+  POSIX aceita pelo awk disponível, mantendo secrets fora da saída.
+- **Sintoma:** Compose V1 retornou `KeyError: ContainerConfig`, inclusive ao repetir
+  `up` depois de reconstruir a imagem. **Causa:** `docker-compose 1.29.2` tenta ler o
+  campo removido de metadata de containers criados pela imagem anterior.
+  **Correção:** no V1, `up` executa primeiro `down --remove-orphans`; containers são
+  efêmeros e os named volumes permanecem intactos. A regressão simulada ficou
+  RED antes da mudança e o segundo `up` real passou depois dela.
+- **Sintoma:** PostgreSQL registrou incompatibilidade de collation após trocar a
+  imagem. **Causa:** `postgres:16-bookworm` usava glibc 2.36 sobre um volume criado por
+  glibc 2.41. **Correção:** imagem `postgres:16`, compatível com o volume existente.
+- **Sintoma:** 99 testes PostgreSQL falharam por SCRAM. **Causa:** helpers de teste
+  omitem senha, enquanto o servidor local exige autenticação. **Correção operacional:**
+  suíte executada com `PGPASSWORD=postgres`; nenhuma asserção ou política de segurança
+  foi afrouxada.
+- **Sintoma:** `orchestrator migrate --database-url ...` escolheu a URL remota do
+  `.env`. **Causa:** `MIGRATION_DATABASE_URL` carregada depois tinha precedência sobre
+  a flag explícita. **Correção:** a opção CLI explícita agora vence o ambiente.
+- **Sintoma:** quatro testes de gate esperavam os dois gates V1. **Causa:** ficaram
+  obsoletos após D38, que define exatamente um `review_creative_plan`.
+  **Correção:** testes migrados para gate combinado, edição versionada, conflito stale
+  e retomada V2; código inalcançável dos gates antigos foi removido do runner.
+- **Sintoma:** a suíte comportamental ficou verde, mas o gate de cobertura parou em
+  97,81% e depois 98,49%. **Causa:** novos ramos defensivos e um método duplicado
+  sombreado em `db/admin.py`. **Correção:** duplicata e branches inalcançáveis
+  removidos; validações, cancelamento, heartbeat, contratos criativos e erros
+  versionados receberam testes específicos.
+- **Sintoma:** cinco regressões novas falharam no primeiro passe. **Causas:** formato
+  real do logger usa largura de campo; `prompt` é sempre removido antes da redação;
+  Pydantic aplica `str_strip_whitespace` antes do `min_length`; e dois testes do runner
+  não configuravam a identidade tenant. **Correções:** expectativas alinhadas ao
+  contrato real, validador redundante removido e identidade de teste explicitada.
+
+### Aceite durável
+
+- Compose V1 real construiu a imagem, aplicou Alembic até `20260728_0009`, deixou o
+  PostgreSQL healthy, respondeu `/readyz` com `storage=r2` e serviu Vite em `:5173`.
+- Smoke `config-staging`, batch 1: run `web-72d047ee` abriu o único gate combinado;
+  SSE registrou a sequência até `awaiting_review`; reiniciar a API preservou
+  `gate_id`/`version`; aprovação retomou e concluiu `done` com 1/1.
+- O banco persistiu apenas ponteiros `r2://` — nenhuma assinatura `X-Amz-*` apareceu
+  em state/eventos. Cinco objetos do run permaneceram no R2 após `down` e nova subida,
+  confirmando que o ciclo local não toca no bucket.
+- **Live batch 1:** o run `web-8fcf4d65` usou somente
+  `ai-gateway.vercel.sh`, `api.replicate.com`, `replicate.delivery` e o endpoint S3 do
+  R2. Conceitos, roteiro, dois perfis e duas imagens retornaram `200` pelo Vercel;
+  duas vozes ElevenLabs retornaram `201` pelo Replicate e foram baixadas; quatro
+  objetos canônicos apareceram no R2. A leitura pelo repository confirmou
+  `r2_pointer=True` e `signed_url=False` no PostgreSQL.
+- **Bloqueio externo do live:** depois da aprovação, a primeira geração Kling foi
+  recusada pelo Vercel com `Video generation requires a minimum balance of $1`.
+  O run terminou corretamente em `error`, sem retry ambíguo ou fallback mock. É
+  necessário adicionar saldo no Vercel AI Gateway para concluir vídeo/QC/montagem;
+  não houve defeito de roteamento local a corrigir. Ao fim do aceite, o Compose voltou
+  para `config-staging`, `/readyz` respondeu `ready/r2` e o PostgreSQL continuou
+  healthy.
+- **Verificação final:** `1246 passed, 2 skipped`, cobertura obrigatória de
+  **100,00%** (`7614` statements, zero ausentes). `docker-compose config -q`,
+  `bash -n scripts/dev-local`, build da imagem/frontend e `git diff --check`
+  concluíram sem erro. Os quatro warnings restantes são depreciação do wrapper
+  LangSmith e coroutines internas do LangGraph em testes já verdes.
+
+---
+
+## Mudança — clips live no Seedance 2.0 Fast (2026-07-29)
+
+- **Objetivo:** gerar todos os clips intermediários live com
+  `bytedance/seedance-2.0-fast`, preservando a montagem final no
+  `bytedance/seedance-2.0` Standard.
+- **RED:** `test_live_config_uses_seedance_fast_for_all_clips` esperou um único tier
+  `seedance` Fast e falhou porque o perfil ainda continha Kling 3.0 I2V para
+  talking-head e Seedance 2.0 Standard para product demo.
+- **Correção:** `config/pipeline.yaml` passou a expor somente o tier `seedance`, com
+  modelo Fast, `cost_per_second=0.1344` e concorrência 4. Como o roteador escolhe o
+  primeiro tier e `video.product_demo_tier=seedance`, talking-head, regenerações de
+  QC e product demo compartilham obrigatoriamente o mesmo modelo. O adapter e o
+  grafo não precisaram mudar.
+- **Preço estimado:** o catálogo Vercel publica 5,60 por milhão de tokens para Fast
+  contra 7,00 para Standard; a estimativa por segundo preserva a mesma proporção de
+  80% aplicada ao valor Standard anterior de 0,168 USD/s.
+- **Falha de verificação investigada:** o primeiro comando focado referenciou
+  `tests/test_graph_routing.py`, arquivo inexistente. O teste correto é
+  `tests/test_routing.py`; o comando corrigido executou normalmente.
+- **GREEN focado:** live config, adapter Vercel e routing concluíram com
+  **17 passed**. `load_pipeline("config")` confirmou clips Fast e assembly Standard;
+  `git diff --check` passou.
+- **Falha da suíte completa investigada:** a primeira execução acumulou 115 erros de
+  fixture antes das asserções e cobertura parcial de 87,89%. A causa foi a ausência
+  do PostgreSQL esperado pelos testes em `127.0.0.1:5432`; o banco dev fica em
+  `55432` e usa um papel runtime sem privilégios para criar os bancos/roles isolados
+  da suíte. A verificação foi repetida contra um container PostgreSQL 16 efêmero em
+  `5432`, com credenciais apenas de teste, sem alterar asserções ou usar
+  `skip`/`xfail`. O container foi removido imediatamente depois.
+- **GREEN completo:** toda a suíte concluiu com código 0 e cobertura obrigatória de
+  **100,00%** (`7614` statements, zero ausentes). Permaneceram apenas os quatro
+  warnings já conhecidos de depreciação do LangSmith e coroutines internas do
+  LangGraph em testes verdes.
+
+---
+
+## Mudança — clips live retornam ao Replicate com PrunaAI (2026-07-29)
+
+- **Diagnóstico do run:** `web-e68546b9` terminou em `phase=error` depois de cinco
+  tentativas. A causa terminal foi o Vercel AI Gateway exigir saldo mínimo de 10 USD
+  para vídeo. Um `429` anterior do Replicate/ElevenLabs foi transitório e recuperou
+  para `201`; os warnings `psycopg ... connection not in pipeline mode` ocorreram na
+  limpeza das tentativas, mas não causaram a falha.
+- **RED 1:** o contrato live passou a esperar `video: replicate` e falhou porque
+  `providers.yaml` ainda selecionava `vercel_gateway_video`.
+- **GREEN 1:** o papel `video` voltou ao adapter Replicate, mantendo LLM/imagem e
+  montagem nos adapters Vercel já existentes.
+- **Tracer intermediário:** a volta inicial foi validada com LTX 2.3 Fast; live
+  config, adapter Replicate, composite e routing concluíram com **38 passed**.
+- **RED 2:** o contrato público do `prunaai/p-video` falhou porque o adapter Replicate
+  ainda tratava todo modelo diferente do LTX como fallback não configurado.
+- **GREEN 2:** o adapter ganhou input explícito para P-Video, usando `save_audio`
+  em vez de `generate_audio`, draft desligado, prompt upsampling desligado e imagem
+  de referência preservada.
+- **RED 3:** o contrato live passou a exigir `product_demo_tier=pruna` e falhou
+  porque a configuração ainda selecionava `ltx`.
+- **GREEN 3:** talking-head, regenerações de QC e product demo usam o único tier
+  `pruna`, modelo `prunaai/p-video`, custo oficial de 0,04 USD/s em 1080p, 24 FPS
+  e concorrência 1. O throttle Replicate continua global e compartilhado com a voz.
+- **Verificação final:** os testes focados concluíram com **39 passed**. A suíte
+  completa passou com código 0 e cobertura obrigatória de **100,00%** (`7619`
+  statements, zero ausentes) contra PostgreSQL 16 efêmero, removido ao final.
+- **Runtime local:** Compose V1 foi recriado preservando os volumes PostgreSQL e sem
+  tocar no R2. `/readyz` respondeu `ready/r2`; a configuração carregada dentro da
+  API confirmou `video=replicate`, `tier=pruna`, `model=prunaai/p-video` e 24 FPS.
+  Nenhum novo run pago foi disparado durante a verificação.
+
+---
+
+## Mudança — montagem PrunaAI para validação E2E de baixo custo (2026-07-29)
+
+- **Objetivo:** remover a última dependência de vídeo do Vercel e validar clips,
+  QC, montagem e persistência usando Replicate/PrunaAI.
+- **RED 1:** o teste público de `assemble()` falhou porque
+  `ReplicateVideoAdapter` ainda não aceitava configuração de montagem.
+- **GREEN 1:** o adapter passou a implementar `AssemblyPort` com o contrato
+  `prunaai/p-video`, imagem do creator, prompt final, 1080p, 24 FPS, sem áudio e
+  draft. Output nulo/vazio continua falhando antes de criar artifact.
+- **RED 2:** o contrato live esperou `assembly: replicate` e falhou porque
+  `providers.yaml` ainda selecionava `vercel_seedance_assembly`.
+- **GREEN 2:** clips e montagem compartilham a mesma instância Replicate e o throttle
+  global, evitando concorrência adicional com ElevenLabs.
+- **RED 3:** o perfil live esperou draft a 0,01 USD/s e falhou enquanto o tier ainda
+  estava em 0,04 USD/s sem draft.
+- **GREEN 3:** talking-head, product demo e montagem custam 0,08 USD cada para 8s;
+  o piso de vídeo por item sem retries é 0,24 USD.
+- **RED 4:** o teste de custo da montagem falhou com `KeyError: cost_usd` porque o
+  artifact registrava o custo, mas `node_assembly` não o somava ao item.
+- **GREEN 4:** a montagem agora incrementa `Item.cost_usd`, então o custo aparece no
+  resumo do run. A suíte focada concluiu com **123 passed**.
+- **Verificação completa:** toda a suíte passou com código 0 e cobertura obrigatória
+  de **100,00%** (`7645` statements, zero ausentes) contra PostgreSQL 16 efêmero,
+  removido ao final.
+- **Runtime local:** Compose V1 foi reconstruído preservando PostgreSQL/R2.
+  `/readyz` respondeu `ready/r2`, os logs de startup não registraram erro e a API
+  carregou `video=replicate`, `assembly=replicate`, `prunaai/p-video`, draft 1080p
+  e custo de 0,01 USD/s. Nenhum run pago foi iniciado automaticamente.
+
+---
+
+## Correção — QC aceita ponteiros canônicos de vídeo R2/S3 (2026-07-29)
+
+- **Sintoma:** o run `web-4f1f7fcf` gerou e persistiu seis clips por item com
+  PrunaAI, mas todas as tentativas de QC terminaram em
+  `clip_N_invalid_video_uri`; os dois itens foram descartados, a montagem não
+  executou e o run acumulou 0,96 USD.
+- **Causa:** `persist_item_media()` substitui a URL temporária do provider pelo
+  ponteiro canônico `r2://bucket/key.mp4`. O `IntegrityQCAdapter` aceitava
+  HTTP(S), data URI e paths locais, mas rejeitava qualquer outro esquema antes
+  da camada de saída derivar a URL assinada.
+- **RED → GREEN:** a primeira regressão pública reproduziu a reprovação de um
+  `r2://...mp4`. O QC passou a aceitar ponteiros `r2://` e `s3://` somente quando
+  bucket, objeto e extensão de vídeo são válidos. Imagens, objetos sem extensão,
+  ponteiros incompletos, provider mock e `fallback_reason` continuam reprovados.
+- **Regressão de integração:** um clip `data:video/mp4` foi persistido pelo backend
+  R2 real com client S3 em memória, convertido em `r2://...mp4` e aprovado pelo
+  QC, preservando `source_uri` e `storage_backend`.
+- **Verificação:** QC/media store/R2 concluíram com **54 passed**. A suíte completa
+  terminou com **1259 passed, 2 skipped**, cobertura obrigatória de **100,00%**
+  (`7650` statements, zero ausentes) contra PostgreSQL 16 efêmero, removido ao
+  final. Nenhum run pago foi iniciado.
+- **Falha de rebuild investigada:** o Compose V1 concluiu o build, mas falhou ao
+  recriar os containers antigos de migrate/API com `KeyError: ContainerConfig`,
+  incompatibilidade conhecida do Compose V1 durante a convergência de containers.
+  Foram removidos somente esses containers parados, sem apagar volumes, PostgreSQL
+  ou objetos R2; a recriação seguinte concluiu normalmente.
+- **Runtime local:** a nova API respondeu `/readyz` com `ready/r2`, iniciou o runner
+  embutido sem erros e confirmou dentro do container: R2 MP4 e S3 WebM válidos,
+  R2 JPG inválido. Nenhuma campanha ou chamada paga foi disparada.
+
+---
+
+## Correção — vídeo final com locução ElevenLabs e montagem FFmpeg (2026-07-29)
+
+- **Sintoma:** o artifact `assembled` do run live continha somente stream H.264; o
+  `ffprobe` não encontrou áudio. A “montagem” de D42 era uma terceira geração
+  `prunaai/p-video` com `save_audio=false`, não concatenação dos dois clips.
+- **Contrato de roteiro (RED → GREEN):** `write_script_tool` passou a rejeitar
+  locução acima dos limites server-owned de 14 segundos ou 35 palavras.
+  `node_scripts` injeta esses tetos e o agent de scripts pode fazer uma única
+  correção limitada. O estimador legado inicialmente marcou CTA curta como oito
+  segundos e quebrou quatro smokes CLI com `narration exceeds 14 seconds`; a causa
+  foi corrigida calculando segundos pela quantidade real de palavras, sem remover
+  a validação.
+- **Identidade da voz (RED → GREEN):** a URL temporária do preview e a voz estável
+  do provider foram separadas. `voice_ref`/`voice_model_ref` preservam a voz
+  aprovada (por exemplo `Rachel`), enquanto `voice_preview_uri` aponta para o áudio
+  persistido no R2. O fan-out leva a referência estável ao `Item`.
+- **Locução (RED → GREEN):** o novo `node_voiceover`, executado somente após QC
+  aprovado, envia o texto falado completo para `elevenlabs/turbo-v2.5` no
+  Replicate (`prompt` + `voice`), persiste `voiceover` e soma o preço de
+  `0,05 USD/1.000 caracteres` a `Item.cost_usd`. Falha ou ausência de voz/roteiro
+  termina o item com erro explícito e nunca produz final silencioso.
+- **Montagem (RED → GREEN):** `ffmpeg_assembly` recebe signed URLs somente numa
+  cópia transitória, seleciona os dois clips da última tentativa, concatena
+  talking-head + product demo, descarta áudio de origem, aplica loudness,
+  silêncio final e aceleração máxima de 10%. O output é 16 s, H.264/AAC e só vira
+  `assembled` após validação do `ffprobe`. Bytes transitórios não entram no
+  checkpoint; local/R2 guardam apenas o artifact canônico.
+- **Custo e API:** a montagem local custa zero e elimina a terceira geração Pruna.
+  `summarize()` agora expõe `cost_by_stage` (`video`, `voiceover`, `assembly`).
+  REST/SSE inclui o artifact de locução e deriva signed URL somente na saída.
+- **Infra:** FFmpeg/ffprobe foram adicionados à imagem e ao readiness quando
+  `assembly=ffmpeg_assembly`. A API reconstruída confirmou ambos os binários,
+  `video=replicate`, `assembly=ffmpeg_assembly`, duração 16/14 s e `/readyz`
+  `ready/r2`; logs de startup ficaram sem erro. Nenhuma campanha paga foi iniciada.
+- **Falhas de verificação investigadas:** um comando intermediário citou
+  `tests/test_config.py`, que não existe; ele foi corrigido para a lista real de
+  testes. A primeira suíte funcional encontrou os quatro smokes CLI descritos
+  acima e 99,33% de cobertura; após a causa ser corrigida, a segunda ficou verde
+  mas revelou um único ramo sem cobertura na propagação de `StageExecutionError`.
+  A regressão correspondente foi adicionada. No rebuild, Compose V1 repetiu
+  `KeyError: ContainerConfig`; foram removidos somente os containers antigos de
+  migrate/API, preservando PostgreSQL, volumes e R2, e a recriação concluiu.
+- **Verificação final:** `1299 passed, 2 skipped`, cobertura obrigatória de
+  **100,00%** (`7928` statements, zero ausentes). `docker-compose config -q`,
+  `bash -n scripts/dev-local`, `compileall` e `git diff --check` também passaram.
+- **Regressão visual final (RED → GREEN):** a integração extraiu um frame na
+  segunda metade do MP4 e ainda encontrou o primeiro clip. O filtro aplicava
+  `trim` antes de `tpad=stop_duration=<duração>`, anexando uma duração inteira
+  mesmo quando o clip já estava completo; por isso o `-t` global encerrava o
+  output antes da transição. O padding agora ocorre antes do `trim` final de cada
+  trecho. O teste passou a exigir o frame do segundo clip e a suíte completa foi
+  repetida: `1299 passed, 2 skipped`, cobertura de **100,00%**. A imagem da API
+  foi reconstruída; o Compose V1 repetiu o `ContainerConfig`, resolvido removendo
+  somente os containers antigos de migrate/API, sem volumes. `/readyz` voltou
+  `ready/r2`, FFmpeg/ffprobe estão presentes e os logs do runner estão limpos.

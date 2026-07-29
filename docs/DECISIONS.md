@@ -634,3 +634,102 @@ Datas absolutas. Apendar novas decisões ao final.
 - **Consequência:** uma coleta de briefing, uma decisão humana e produção automática.
   Detalhes e critérios em `docs/ADR-D38-pipeline-v2-agent-contracts.md` e
   `docs/PIPELINE_V2.md`.
+
+### D39 — Vídeo live no Vercel Gateway; Replicate restrito à voz
+- **Contexto:** o perfil live gerava os dois clips em LTX pelo Replicate e usava o
+  Vercel AI Gateway apenas na montagem. Isso duplicava provedores de vídeo, consumia
+  crédito Replicate antes do TTS e deixava `node_product_demo` acoplado ao tier
+  literal `ltx`.
+- **Decisão:** `video` passa a `vercel_gateway_video`, implementando `VideoPort` pelo
+  mesmo bridge Node/AI SDK 6 da montagem. Talking-head usa
+  `klingai/kling-v3.0-i2v`; product demo usa `bytedance/seedance-2.0`, escolhido por
+  `video.product_demo_tier`; montagem permanece em Seedance 2.0. Todos os vídeos são
+  silenciosos (`generate_audio=false`). O Replicate permanece apenas dentro de
+  `creator_vercel_replicate_voice`, como transporte do modelo ElevenLabs de voz;
+  `creator_real_replicate` continua como alias legado.
+- **Compatibilidade:** o grafo continua data-driven para os tiers. Perfis mock e
+  staging não mudam, e o adapter legado `replicate` continua registrado para uso
+  explícito fora do perfil live. Runs live falhados devem ser repetidos como nova
+  campanha, pois checkpoints antigos podem conter o node `ltx`.
+- **Consequência:** o perfil live precisa de saldo Vercel AI Gateway para Kling e
+  Seedance e de saldo Replicate somente para TTS. O provider real e o model id
+  continuam registrados nos metadados de cada artifact.
+
+### D40 — Seedance 2.0 Fast para todos os clips intermediários live
+- **Contexto:** D39 dividia os clips entre Kling 3.0 I2V no talking-head e Seedance
+  2.0 Standard no product demo. O perfil live agora prioriza menor latência e custo
+  uniforme na produção intermediária.
+- **Decisão:** o único tier live de clips chama-se `seedance` e usa
+  `bytedance/seedance-2.0-fast` para talking-head, regenerações após QC e product
+  demo. `video.product_demo_tier` continua explícito em `seedance`. A estimativa
+  passa a `0.1344` USD/s, proporcional ao preço oficial Fast de 5,60 por milhão de
+  tokens contra 7,00 do Standard. A montagem final permanece no adapter separado
+  `vercel_seedance_assembly`, com `bytedance/seedance-2.0`.
+- **Compatibilidade:** perfis mock/staging e o contrato `VideoPort` não mudam; apenas
+  a configuração live seleciona o novo modelo. Runs antigos continuam vinculados ao
+  grafo/configuração com que foram iniciados e não devem ser retomados para trocar
+  provider.
+- **Consequência:** todos os artifacts `clip` live registram
+  `model=bytedance/seedance-2.0-fast`; artifacts de montagem registram
+  `model=bytedance/seedance-2.0`.
+
+### D41 — Clips live retornam ao Replicate com PrunaAI P-Video
+- **Contexto:** o run live `web-e68546b9` chegou à produção, mas as cinco tentativas
+  de talking-head foram recusadas pelo Vercel AI Gateway porque a conta não atingia
+  o saldo mínimo de 10 USD exigido para geração de vídeo. D40 fica substituída para
+  novos runs.
+- **Decisão:** o papel `video` volta ao adapter `replicate`. O único tier live de
+  clips chama-se `pruna` e usa `prunaai/p-video` para talking-head, regenerações
+  após QC e product demo; `video.product_demo_tier=pruna`. O custo configurado passa
+  a 0,04 USD/s, preço publicado pelo Replicate para P-Video 1080p sem draft.
+  O adapter envia o contrato próprio do modelo: 24 FPS, `save_audio=false`,
+  `draft=false` e `prompt_upsampling=false`.
+  A concorrência declarada do tier fica em 1 e todas as chamadas Replicate continuam
+  protegidas pelo throttle global compartilhado com a voz.
+- **Limite:** a montagem final é outro papel e continua em
+  `vercel_seedance_assembly` com `bytedance/seedance-2.0`; ela ainda exige saldo de
+  vídeo no Vercel quando for alcançada.
+- **Compatibilidade:** o grafo e os contratos de adapter não mudam. Runs falhados não
+  são retomados para trocar provider; o retry manual cria uma campanha nova.
+- **Consequência:** novos artifacts `clip` live registram
+  `provider=replicate` e `model=prunaai/p-video`.
+
+### D42 — Montagem live também usa PrunaAI P-Video em draft
+- **Contexto:** D41 removeu o bloqueio de saldo Vercel dos clips, mas manteve a
+  montagem no Seedance/Vercel, que continuaria exigindo saldo mínimo de vídeo e
+  impediria a validação ponta a ponta.
+- **Decisão:** `assembly` também aponta para `replicate`. O mesmo
+  `ReplicateVideoAdapter` implementa `VideoPort` e `AssemblyPort`, é compartilhado
+  pelos dois papéis e usa o throttle global da conta. Clips e montagem selecionam
+  `prunaai/p-video`, 1080p, 24 FPS, sem áudio e `draft=true`. O custo configurado é
+  0,01 USD/s; cada saída de 8 segundos custa 0,08 USD.
+- **Semântica:** assim como o assembler Seedance anterior, a montagem não concatena
+  bytes dos dois clips. Ela gera um vídeo final novo a partir da imagem do creator,
+  roteiro, conceito e prompt aprovado; os clips continuam sendo pré-condição de QC
+  e aparecem em `source_clips`.
+- **Contabilização:** `node_assembly` soma `artifact.meta.cost_usd` ao `Item.cost_usd`,
+  fazendo o resumo do run incluir a montagem. Sem retries de QC, o piso de geração
+  de vídeo é 0,24 USD por item: talking-head, product demo e montagem, cada um com
+  8 segundos em draft.
+- **Consequência:** o perfil live não usa mais o Vercel AI Gateway para geração de
+  vídeo. O adapter Seedance permanece registrado apenas para opt-in/compatibilidade.
+
+### D43 — Locução aprovada e montagem final determinística com FFmpeg
+- **Contexto:** D42 chamava “montagem” a uma terceira geração P-Video silenciosa.
+  Ela não consumia os dois clips aprovados, não continha stream de áudio e elevava
+  o piso de vídeo de 0,16 para 0,24 USD por item.
+- **Decisão:** depois do QC, `node_voiceover` sintetiza o roteiro completo com a voz
+  estável aprovada do creator usando `elevenlabs/turbo-v2.5` no Replicate. O artifact
+  `voiceover` é persistido no R2 e seu custo de caracteres entra em
+  `Item.cost_usd`. `assembly` passa a `ffmpeg_assembly`: concatena os dois clips de
+  8 segundos, remove áudio de origem, normaliza a locução e entrega 16 segundos.
+- **Sincronismo:** roteiros têm teto server-owned de 14 segundos e 35 palavras. O
+  áudio pode acelerar no máximo 10%; acima disso a montagem falha sem cortar palavras.
+  Áudio curto recebe silêncio ao final.
+- **Validação:** o renderer exige H.264 + AAC via `ffprobe` antes de publicar
+  `assembled`. Bytes transitórios não entram no checkpoint; somente o ponteiro
+  canônico local/R2 é persistido. Signed URLs de R2 existem apenas na cópia entregue
+  ao FFmpeg.
+- **Consequência:** o piso de vídeo volta a 0,16 USD por item (dois clips Pruna),
+  acrescido apenas do TTS. FFmpeg/ffprobe tornam-se dependências de readiness e da
+  imagem runtime.

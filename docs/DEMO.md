@@ -10,6 +10,41 @@ montagem e loop de feedback.
 > e os custos são calculados a partir das tabelas de tier do `config-mock/pipeline.yaml`.
 > O diretório `config/` é live/híbrido e pode chamar APIs reais.
 
+## Ambiente dev durável pela UI
+
+O fluxo recomendado para testar API, runner, PostgreSQL e frontend juntos é:
+
+```bash
+cp .env.example .env
+# preencha as credenciais de R2 no .env
+ORCH_DEV_CONFIG_DIR=config-staging ./scripts/dev-local up
+```
+
+Isso sobe a aplicação em `http://localhost:5173`, a API em
+`http://localhost:8000` e o PostgreSQL local em `127.0.0.1:55432`. O staging usa
+adapters de geração mock, mas grava runs, jobs, o gate `review_creative_plan`,
+eventos SSE e checkpoints na mesma infraestrutura durável do perfil live.
+
+Para o smoke de retomada:
+
+1. Confirme `GET http://localhost:8000/readyz`.
+2. Crie uma campanha pela UI e aguarde a fase **Revisão**.
+3. Abra o detalhe da campanha em outra aba para confirmar o replay SSE.
+4. Reinicie somente o serviço `api` com Docker Compose e recarregue a página.
+5. Aprove o plano criativo; o runner embutido retoma o job a partir do PostgreSQL.
+
+`./scripts/dev-local down` preserva o banco. `./scripts/dev-local reset --yes`
+remove banco e volumes locais, mas nunca toca no bucket R2. Para testar sem R2:
+
+```bash
+ORCH_DEV_CONFIG_DIR=config-staging ORCH_DEV_STORAGE_BACKEND=local \
+  ./scripts/dev-local up
+```
+
+O teste live usa o mesmo comando sem `ORCH_DEV_CONFIG_DIR`, cria uma campanha com
+batch 1 e chama somente Vercel AI Gateway, Replicate (clips + voz) e Cloudflare
+R2. A montagem roda localmente com FFmpeg.
+
 ## 1. Setup
 
 ```bash
@@ -44,7 +79,7 @@ run demo-run
   descartados: 0
   em andamento: 0
   tentativas : 2
-  custo mock : $3.68  {'ltx': 2.08, 'kling': 1.6}
+  custo total: $3.6800  {'video': 3.68, 'voiceover': 0.0, 'assembly': 0.0}
   hooks top  : ['bold_claim', 'problem', 'emotional', 'social_proof']
 ```
 
@@ -57,18 +92,21 @@ run demo-run
 | `descartados`  | esgotaram as tentativas de QC e nunca chegaram ao vídeo final |
 | `em andamento` | não terminados (>0 só num run interrompido, antes de `resume`) |
 | `tentativas`   | total de regenerações de QC somadas no batch (Step 7 loop) |
-| `custo mock`   | custo total + quebra por tier (`cost_by_tier`) — Step 4 / "The Cost at Scale" |
+| `custo total`  | custo total + quebra por etapa (`cost_by_stage`), incluindo locução |
 | `hooks top`    | estilos de hook dos aprovados, ordenados por frequência — é isto que realimenta o Step 1 |
 
-O custo por tier reflete o **roteamento LTX-only atual**: a 1ª tentativa e as reprovas
-de QC rodam no LTX barato ($0.01/s). Tiers premium seguem modelados no config para uso
-futuro/explicito, mas o loop automático não sobe para Kling ou Seedance.
+No `config-mock`, o custo por tier reflete o roteamento LTX-only do dry-run: a primeira
+tentativa e as reprovas de QC permanecem no primeiro tier. No perfil live `config/`,
+talking-head, regenerações de QC e product demo usam `prunaai/p-video` via
+Replicate em draft 1080p. Depois do QC, ElevenLabs gera a locução aprovada e o
+FFmpeg concatena os dois clips, descarta o áudio de origem e entrega H.264/AAC.
 
 ### Mapa dos 9 passos → nodes
 
 `concepts` (1) → `script` (2) → `roster`/creator (3) → talking-head `gen_<tier>` (4) →
-`product_demo` (5) → fan-out paralelo via `Send` (6) → `qc` (7) → `assembly` (8) →
-`feedback` (9). Tudo em `src/orchestrator/nodes/stages.py`.
+`product_demo` (5) → fan-out paralelo via `Send` (6) → `qc` (7) →
+`voiceover` (8) → `assembly` (9) → `feedback` (10). Tudo em
+`src/orchestrator/nodes/stages.py`.
 
 ## 3. Inspecionar, listar e retomar
 
@@ -104,7 +142,7 @@ run demo-c1
   descartados: 0
   em andamento: 0
   tentativas : 6
-  custo mock : $7.65  {'ltx': 1.76, 'kling': 3.2, 'seedance': 2.688}
+  custo total: $7.6480  {'video': 7.648, 'voiceover': 0.0, 'assembly': 0.0}
   hooks top  : ['emotional', 'bold_claim', 'curiosity', 'problem']
 === ciclo 2/3 ===
 run demo-c2
@@ -113,7 +151,7 @@ run demo-c2
   descartados: 0
   em andamento: 0
   tentativas : 1
-  custo mock : $2.16  {'ltx': 1.36, 'kling': 0.8}
+  custo total: $2.1600  {'video': 2.16, 'voiceover': 0.0, 'assembly': 0.0}
   hooks top  : ['bold_claim', 'emotional', 'curiosity', 'social_proof']
 === ciclo 3/3 ===
 run demo-c3
@@ -122,7 +160,7 @@ run demo-c3
   descartados: 0
   em andamento: 0
   tentativas : 5
-  custo mock : $6.22  {'ltx': 1.68, 'kling': 3.2, 'seedance': 1.344}
+  custo total: $6.2240  {'video': 6.224, 'voiceover': 0.0, 'assembly': 0.0}
   hooks top  : ['emotional', 'curiosity', 'bold_claim', 'problem']
 ```
 
