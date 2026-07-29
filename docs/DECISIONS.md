@@ -620,3 +620,17 @@ Datas absolutas. Apendar novas decisões ao final.
 - **Compilador e Dumper JSONB:** O assistente estático `Database.execute()` compila declarações especificamente para o dialecto PostgreSQL, serializa dicionários/listas Python para JSONB via `json.dumps()` e expande variáveis post-compile para cláusulas `IN (...)` / `NOT IN (...)`.
 - **Consequência:** 100% das consultas SQL inline foram substituídas sem alterar os contratos dos repositórios ou violar o isolamento RLS multi-tenant. Todos os 1093 testes da aplicação passam 100% verde. A ADR detalhada está em `docs/ADR-D37-sqlalchemy-2.0-async-orm-migration.md`.
 
+### D38 — Pipeline V2: uma revisão e três agents criativos com contratos estritos
+- **Contexto:** dois gates, persona agentic, vídeo agentic e activity técnica deixavam
+  o usuário sem saber o que estava executando e ampliavam a superfície de prompt
+  injection/custo.
+- **Decisão:** expor cinco fases, manter um único gate `review_creative_plan` e limitar
+  agents a `concepts`, `scripts` e `creator_profiles`, cada um com prompt próprio e
+  schema terminal `creative-v2`. Exatamente dois creators são materializados.
+- **Segurança:** dados do usuário são `UNTRUSTED_STAGE_DATA`; prompt bodies/paths e
+  creative copy nunca entram em API, SSE ou tracing. Somente versão/hash são públicos.
+- **Operação:** `20260728_0009` cancela gates V1 pendentes e runs/jobs associados.
+  Progresso REST/SSE usa cinco fases e contadores granulares.
+- **Consequência:** uma coleta de briefing, uma decisão humana e produção automática.
+  Detalhes e critérios em `docs/ADR-D38-pipeline-v2-agent-contracts.md` e
+  `docs/PIPELINE_V2.md`.

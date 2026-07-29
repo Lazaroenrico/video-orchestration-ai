@@ -1,34 +1,54 @@
 ## Projeto
 
-Motor de orquestração para a pipeline de **AI UGC em escala** descrita em `Context.md`
-(9 passos: conceitos → scripts → creator → talking-head → product demo → execução
-paralela → QC → montagem → feedback). **v1 = só o motor**, em modo
-**mock/dry-run** (sem chamadas externas reais, custo zero). Integrações reais (Claude,
-GPT Image 2, Topaz, ElevenLabs, Replicate/fal/AtlasCloud) entram depois, adapter a adapter.
-Distribuição/postagem está fora do escopo: o estado terminal aprovado é `assembled`.
+Motor de orquestração para a pipeline de **AI UGC em escala** descrita em `Context.md`.
+A API/UI V2 expõe cinco fases: **Configuração → Plano criativo → Revisão → Produção e
+QC → Montagem**. Os nodes internos continuam detalhados, mas não vazam a complexidade
+operacional ao usuário. Distribuição/postagem está fora do escopo e o estado terminal
+aprovado é `assembled`.
+
+Perfis atuais:
+
+- `config-mock/` — dry-run determinístico, sem chamadas externas e custo zero.
+- `config-staging/` — geração mock, mas infraestrutura real de PostgreSQL/R2/fila/Runner.
+- `config/` — perfil live com adapters reais de LLM, creator, vídeo, QC e assembly. Em
+  execução durável, adapters pagos só rodam com `ORCH_ENABLE_PAID_ADAPTERS=true`.
 
 ## Stack e papéis
 
 - **LangGraph** — motor de orquestração. `StateGraph` (cada stage é um node), fan-out
   paralelo via `Send`, conditional edges para **tier routing** e **QC gate/loop**,
-  **checkpointer** (AsyncSqliteSaver) para resumibilidade (`thread_id` = run id).
-- **LangChain** — adapters/LLM abstraídos. No v1 só o `MockAdapter`.
+  um único interrupt `review_creative_plan` e **checkpointer** para resumibilidade
+  (`thread_id` = run id). Local usa SQLite; com `DATABASE_URL`, usa
+  `AsyncPostgresSaver` tenant-scoped.
+- **LangChain/adapters** — adapters abstraídos por papel (`llm`, `creator`, `video`,
+  `qc`, `assembly`, `upscale`). O `CompositeAdapter` permite misturar mock e real por
+  perfil de config.
 - **LangSmith** — tracing e avaliação do LLM Judge. Tracing é automático quando
   `LANGSMITH_TRACING=true` e `LANGSMITH_API_KEY` estão setados (nada a codar — vem de
   usar LangChain/LangGraph). Sem as envs, roda offline.
+- **PostgreSQL/R2/fila** — no caminho durável, runs, checkpoints, gates, eventos, jobs,
+  artifacts e quotas vivem em PostgreSQL/R2. Cloudflare Queue/SQS é só wake-up; a fonte
+  canônica do job é PostgreSQL.
 
 ## Layout
 
 ```
-config/         pipeline.yaml (knobs), providers.yaml (provider->adapter), judge.yaml (gateway)
+config*/        pipeline.yaml, providers.yaml, agents.yaml, prompts/, judge.yaml
 src/orchestrator/
   graph/        state.py, routing.py, builder.py, checkpoint.py
-  nodes/        base.py, stages.py  (os stages da pipeline como nodes; mocks no v1)
-  adapters/     base.py (Protocols), mock.py, judge.py (gateway + cassette)
+  nodes/        base.py, stages.py  (os stages da pipeline como nodes)
+  adapters/     base.py (Protocols), mock.py, adapters reais, judge.py
+  db/           PostgreSQL, RLS, jobs, gates, runs, effects, Alembic
+  storage/      local/R2/S3/dual, signed URLs, retenção e migração
+  web/          FastAPI/dashboard API/SSE
+  tools/        typed tools chamadas por stages/agents
   registry.py   resolve provider->adapter
   config.py     carga dos YAMLs
   runner.py     run/resume/status/list + relatório
   cli.py        entrypoint click
+front/          SPA React/Vite/Tailwind
+infra/          Cloudflare/Neon e AWS staging (OpenTofu)
+deploy/         Worker/Container deployment assets
 tests/          test_*.py + cassettes/ (goldens do judge)
 docs/           DECISIONS.md, PROGRESS.md
 ```
@@ -37,30 +57,57 @@ docs/           DECISIONS.md, PROGRESS.md
 
 ```bash
 uv venv --python 3.12 && uv pip install -e ".[dev]"
-orchestrator run --batch 12 --offer "serum X" --config-dir config   # pipeline mock
-orchestrator loop --cycles 3 --feedback-store fb.json --config-dir config  # N ciclos encadeados
-orchestrator status <run_id> --config-dir config
-orchestrator resume <run_id> --config-dir config
+orchestrator run --batch 12 --offer "serum X" --config-dir config-mock   # dry-run sem rede
+orchestrator loop --cycles 3 --feedback-store fb.json --config-dir config-mock
+orchestrator status <run_id> --config-dir config-mock
+orchestrator resume <run_id> --config-dir config-mock
 orchestrator list
+orchestrator api
+orchestrator runner --once
 
-pytest                                 # suíte (determinística, offline)
+pytest                                 # suíte; testes PostgreSQL exigem servidor local/externo
 pytest tests/test_judge_eval.py        # LLM Judge via cassette
 pytest tests/test_judge_eval.py --live # LLM Judge contra o gateway real (regrava cassette)
 ```
 
 Nota sobre testes: o hook do `rtk` colapsa a saída do pytest para "No tests collected".
-Para ver o resultado real, rode `rtk proxy python -m pytest ...`.
+Para ver o resultado real, rode `rtk proxy python -m pytest ...`. Neste sandbox, os testes
+PostgreSQL falham se não houver servidor em `127.0.0.1:5432`; isso é limitação de
+infraestrutura local, não autorização para afrouxar asserções.
 
 ## Convenções
 
 - **TDD estrito**: teste primeiro (red), implementação mínima (green), refactor. A
   ordem está em `docs/PROGRESS.md`.
 - **Async**: nodes e adapters são `async`; o grafo roda via `ainvoke`. Por isso o
-  checkpointer é `AsyncSqliteSaver` (não o `SqliteSaver` sync).
+  checkpointer precisa ser async (`AsyncSqliteCompatSaver` local ou `AsyncPostgresSaver`
+  com `DATABASE_URL`).
 - **Determinismo**: nada de `random`. Mocks derivam tudo de hash dos inputs; ids de
   item vêm do id do conceito. Isso é o que torna os testes e o `--dry-run` reproduzíveis.
 - **Nodes que precisam de `config`**: o parâmetro precisa ser tipado como
   `RunnableConfig`, senão o LangGraph não injeta o config.
+- **Agents criativos e prompts**:
+  - Só `concepts`, `scripts` e `creator_profiles` podem usar `executor: agent`.
+  - Cada fase tem system prompt próprio, composto com `_shared.md`, e saída terminal
+    validada por schema `creative-v2`.
+  - Dados do usuário são serializados como `UNTRUSTED_STAGE_DATA`; nunca são
+    concatenados ao system prompt.
+  - API, SSE, traces e logs podem expor `prompt_version`/`prompt_hash`, nunca o corpo
+    ou o caminho do prompt. Conteúdo de oferta/script também não entra em tracing.
+  - IDs, contagens, routing, budgets, provider e regras de segurança são server-owned.
+- **Contrato do gate humano V2**:
+  - Existe exatamente um gate, `review_creative_plan`, após conceitos, roteiros, dois
+    perfis e previews dos creators.
+  - Sem `DATABASE_URL`, usa `_runs[run_id]["review"]`; `/api/state` retorna
+    `phase: review`, `review` e `gate: null`.
+  - Com `DATABASE_URL`, vive em `run_gates` e expõe `gate_id`, `version` e `gate_type`
+    no estado/SSE `awaiting_review`.
+  - O front resolve por `POST /api/v2/runs/{run_id}/review`, reenviando `gate_id` e
+    `version`; stale falha com 409 e gate cancelado com 410.
+  - A migração `20260728_0009` cancela gates V1 pendentes e seus runs/jobs de teste.
+- **Retry manual de campanha falhada**: sempre cria uma nova campanha (`run_id`
+  novo no padrão `web-...`) a partir do payload original do job `execute_run`.
+  Nunca reutilize o `run_id` antigo; ele permanece em `error` como histórico/auditoria.
 
 ## Regra de integridade dos testes (inegociável)
 
@@ -71,12 +118,14 @@ esperado só para ficar verde. Um teste verde tem que significar comportamento c
 Registre toda falha investigada (sintoma → causa → correção) em `docs/PROGRESS.md`.
 (Skips legítimos: testes `--live` que exigem infra externa — opt-in, documentados.)
 
-## Como plugar um adapter real (depois)
+## Como plugar ou trocar um adapter real
 
 1. Implemente os Protocols de `adapters/base.py` num novo adapter.
 2. Registre em `registry.py` (`register_adapter("replicate", factory)`).
 3. Troque o nome em `config/providers.yaml` (ex.: `video: replicate`).
-4. O grafo não muda. Rode com `--no-dry-run` quando os adapters reais estiverem ligados.
+4. O grafo não muda. Em execução durável com adapters pagos, só habilite
+   `ORCH_ENABLE_PAID_ADAPTERS=true` quando a reserva/idempotência de efeitos estiver
+   validada para o caminho que será rodado.
 
 <!-- rtk-instructions v2 -->
 # RTK (Rust Token Killer) - Token-Optimized Commands

@@ -19,6 +19,7 @@ _PNG_BYTES = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
 )
 _PNG_DATA_URI = "data:image/png;base64," + base64.b64encode(_PNG_BYTES).decode()
+_WAV_DATA_URI = "data:audio/wav;base64," + base64.b64encode(b"RIFF....WAVEfmt ").decode()
 _MP4_DATA_URI = "data:video/mp4;base64," + base64.b64encode(b"\x00mp4").decode()
 
 
@@ -117,6 +118,20 @@ async def test_persisting_a_creator_records_image_and_voice_with_their_kinds(tmp
     assert {r.kind for r in rows} == {"image", "voice"}
     assert all(r.creator_id == "creator-0" for r in rows)
     assert all(r.item_id is None for r in rows)
+
+
+async def test_downloadable_creator_voice_becomes_playable_preview(tmp_path, db):
+    creator = {"id": "creator-0", "upscaled_base": _PNG_DATA_URI, "voice_id": _WAV_DATA_URI}
+
+    persisted = await media_store.persist_creator_media(
+        creator, run_id="run-1", media_root=tmp_path, db=db,
+    )
+
+    assert persisted["voice_id"] == "/media/run-1/creator-0/voice.wav"
+    assert persisted["voice_ref"] == "/media/run-1/creator-0/voice.wav"
+    assert persisted["voice"] == "/media/run-1/creator-0/voice.wav"
+    assert persisted["voice_preview_uri"] == "/media/run-1/creator-0/voice.wav"
+    assert persisted["voice_source_uri"] == _WAV_DATA_URI
 
 
 async def test_a_creator_voice_that_is_only_an_id_is_not_recorded(tmp_path, db):

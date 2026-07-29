@@ -17,6 +17,7 @@ from typing import Any, Optional
 
 _log = logging.getLogger(__name__)
 
+from langchain_core.callbacks.manager import adispatch_custom_event
 from langchain_core.runnables import RunnableConfig
 from langgraph.types import interrupt
 
@@ -25,6 +26,12 @@ from orchestrator import media_store, stream_bus
 from orchestrator.adapters._agent_loop import AgentRunResult
 from orchestrator.adapters.base import VoiceProfile, assign_voice_profile
 from orchestrator.config import default_media_path, default_videos_path
+from orchestrator.creative_contracts import (
+    CampaignInput,
+    CreatorRoster,
+    ScriptResult,
+    script_result_from_text,
+)
 from orchestrator.graph.state import Artifact, Item, new_item
 from orchestrator.nodes.base import as_item, get_pipeline
 from orchestrator.stage_executor import StageExecutionError, execute_stage_tool
@@ -37,11 +44,34 @@ from orchestrator.tools.assembly import assemble_video_tool, upscale_video_tool
 from orchestrator.tools.base import tool_context_from_config
 from orchestrator.tools.concepts import generate_concepts_tool
 from orchestrator.tools.creators import build_creator_tool
+from orchestrator.tools.creator_profiles import design_creator_roster_tool
 from orchestrator.tools.persona import write_persona_tool
 from orchestrator.tools.qc import qc_check_tool
 from orchestrator.tools.scripts import write_script_tool
 from orchestrator.tools.video import generate_clip_tool
 from orchestrator.tracing import add_trace_metadata, traced
+
+
+async def _report_creative_progress(
+    config: RunnableConfig,
+    *,
+    stage_id: str,
+    completed_units: int,
+    total_units: int,
+) -> None:
+    try:
+        await adispatch_custom_event(
+            "creative_progress",
+            {
+                "stage_id": stage_id,
+                "completed_units": completed_units,
+                "total_units": total_units,
+            },
+            config=config,
+        )
+    except RuntimeError as exc:
+        if "without a parent run id" not in str(exc):
+            raise
 
 async def _build_voice_preview(
     adapter: Any, creator: dict[str, Any], *, run_id: str, media_root: Any,
@@ -238,6 +268,125 @@ def apply_roster_updates(
     return merged
 
 
+_REVIEW_CONCEPT_FIELDS = frozenset({
+    "id",
+    "offer",
+    "hook",
+    "angle",
+    "audience_problem",
+    "product_mechanism",
+    "evidence_basis",
+    "format",
+    "hook_style",
+    "script",
+    "script_draft",
+})
+_EDITABLE_CONCEPT_FIELDS = _REVIEW_CONCEPT_FIELDS - {
+    "id",
+    "offer",
+    "script_draft",
+}
+_REVIEW_CREATOR_FIELDS = frozenset({
+    "id",
+    "archetype",
+    "visual_brief",
+    "voice_brief",
+    "performance_style",
+    "exclusions",
+    "image_uri",
+    "voice_ref",
+    "voice_preview_uri",
+    "image",
+    "voice",
+    "angles",
+    "run_id",
+    "offer",
+    "status",
+})
+_EDITABLE_CREATOR_FIELDS = frozenset({
+    "archetype",
+    "visual_brief",
+    "voice_brief",
+    "performance_style",
+    "exclusions",
+})
+
+
+def apply_review_concept_updates(
+    concepts: list[dict[str, Any]],
+    updates: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Apply user-editable copy while preserving server-owned identity and shape."""
+    existing_ids = [str(concept.get("id") or "") for concept in concepts]
+    update_ids = [str(update.get("id") or "") for update in updates]
+    if (
+        not all(existing_ids)
+        or len(update_ids) != len(set(update_ids))
+        or set(update_ids) != set(existing_ids)
+    ):
+        raise ValueError("review must preserve the same concept IDs")
+
+    by_id: dict[str, dict[str, Any]] = {}
+    for update in updates:
+        unknown = set(update) - _REVIEW_CONCEPT_FIELDS
+        if unknown:
+            raise ValueError(
+                "unsupported concept review fields: "
+                + ", ".join(sorted(unknown))
+            )
+        by_id[str(update["id"])] = update
+
+    return [
+        {
+            **concept,
+            **{
+                key: value
+                for key, value in by_id[str(concept["id"])].items()
+                if key in _EDITABLE_CONCEPT_FIELDS
+            },
+        }
+        for concept in concepts
+    ]
+
+
+def apply_review_creator_updates(
+    roster: list[dict[str, Any]],
+    updates: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Apply casting direction only; media pointers and IDs remain server-owned."""
+    existing_ids = [str(creator.get("id") or "") for creator in roster]
+    update_ids = [str(update.get("id") or "") for update in updates]
+    if (
+        len(existing_ids) != 2
+        or not all(existing_ids)
+        or len(update_ids) != len(set(update_ids))
+        or set(update_ids) != set(existing_ids)
+    ):
+        raise ValueError("review must preserve exactly two creator IDs")
+
+    by_id: dict[str, dict[str, Any]] = {}
+    for update in updates:
+        unknown = set(update) - _REVIEW_CREATOR_FIELDS
+        if unknown:
+            raise ValueError(
+                "unsupported creator review fields: "
+                + ", ".join(sorted(unknown))
+            )
+        by_id[str(update["id"])] = update
+
+    return [
+        {
+            **creator,
+            **{
+                key: value
+                for key, value in by_id[str(creator["id"])].items()
+                if key in _EDITABLE_CREATOR_FIELDS
+            },
+        }
+        for creator in roster
+    ]
+
+
 def _normalize_seed_creator(creator: dict[str, Any]) -> dict[str, Any] | None:
     """Normaliza um creator escolhido anteriormente para o contrato do fan-out."""
     creator_id = creator.get("id") or creator.get("creator_id")
@@ -360,6 +509,35 @@ def _prompt_with_persona(persona: Any, prompt: Any) -> str | None:
     return None
 
 
+def _campaign_input(
+    state: dict[str, Any],
+    config: RunnableConfig,
+) -> CampaignInput:
+    raw = state.get("campaign")
+    if isinstance(raw, dict):
+        return CampaignInput.model_validate(raw)
+    state_config = state.get("config") if isinstance(state.get("config"), dict) else {}
+    run_config = config["configurable"].get("run", {})
+    return CampaignInput(
+        offer=str(state_config.get("offer") or "demo offer"),
+        audience=str(run_config.get("audience") or "General adult audience"),
+        facts_restrictions=run_config.get("facts_restrictions"),
+        creator_direction=run_config.get("creator_direction")
+        or run_config.get("creator_prompt"),
+        video_direction=run_config.get("video_direction")
+        or run_config.get("video_prompt"),
+        platform=run_config.get("platform", "tiktok"),
+        objective=run_config.get("objective", "conversion"),
+        batch_size=int(
+            state_config.get("batch_size")
+            or config["configurable"].get("pipeline", {}).get("batch", {}).get(
+                "default_size", 12
+            )
+        ),
+        performance=run_config.get("performance"),
+    )
+
+
 @traced("node.persona", run_type="chain", step=0)
 async def node_persona(state: dict[str, Any], config: RunnableConfig) -> dict[str, Any]:
     """Step 0 — gera a persona batch-level antes dos conceitos."""
@@ -386,8 +564,8 @@ async def node_roster(state: dict[str, Any], config: RunnableConfig) -> dict[str
     tool_ctx = tool_context_from_config(config)
     pipeline = get_pipeline(config)
     run_cfg = config["configurable"].get("run", {})
-    n = int(pipeline.get("roster", {}).get("creators", 5))
-    creator_prompt = _prompt_with_persona(state.get("persona"), run_cfg.get("creator_prompt"))
+    profiles = state.get("creator_profiles") or []
+    n = len(profiles) if profiles else int(pipeline.get("roster", {}).get("creators", 2))
     run_id = config["configurable"].get("thread_id", "run")
     media_root = default_media_path()
     add_trace_metadata(step=3, stage="roster", creators=n)
@@ -400,6 +578,9 @@ async def node_roster(state: dict[str, Any], config: RunnableConfig) -> dict[str
             add_trace_metadata(step=3, stage="roster", creators=1, seeded=True)
             return {"roster": [normalized_seed]}
 
+    preview_completed = 0
+    preview_progress_lock = asyncio.Lock()
+
     async def _build(i: int) -> dict[str, Any]:
         stream_bus.emit_token({
             "type": "creator_start",
@@ -407,15 +588,27 @@ async def node_roster(state: dict[str, Any], config: RunnableConfig) -> dict[str
         })
         # Perfil concreto por índice: garante paridade imagem↔voz e variedade de
         # gênero no roster mesmo quando o briefing não cita gênero.
-        profile = assign_voice_profile(creator_prompt, None, index=i)
+        creative_profile = profiles[i] if i < len(profiles) else {}
+        profile_prompt = "\n".join(
+            value
+            for value in (
+                creative_profile.get("visual_brief"),
+                creative_profile.get("voice_brief"),
+                creative_profile.get("performance_style"),
+            )
+            if isinstance(value, str) and value.strip()
+        ) or _prompt_with_persona(state.get("persona"), run_cfg.get("creator_prompt"))
+        profile = assign_voice_profile(profile_prompt, None, index=i)
         creator = await execute_stage_tool(
             config,
             tool_ctx,
             catalog_stage="roster",
             tool_name="build_creator",
             tool_fn=build_creator_tool,
-            index=i, system_prompt=creator_prompt, voice_profile=profile,
+            index=i, system_prompt=profile_prompt, voice_profile=profile,
         )
+        if creative_profile:
+            creator = {**creator, **creative_profile, "id": creative_profile["id"]}
         # Baixa e persiste os bytes (imagem/voz) e reescreve as URIs para caminhos
         # locais servíveis. No-op para mock:// / voice_id (sem rede, sem disco).
         creator = await media_store.persist_creator_media(
@@ -436,6 +629,15 @@ async def node_roster(state: dict[str, Any], config: RunnableConfig) -> dict[str
                 "voice_preview_uri": creator.get("voice_preview_uri"),
             },
         })
+        nonlocal preview_completed
+        async with preview_progress_lock:
+            preview_completed += 1
+            await _report_creative_progress(
+                config,
+                stage_id="creator_previews",
+                completed_units=preview_completed,
+                total_units=n,
+            )
         return creator
 
     # return_exceptions=True evita que a falha de 1 creator cancele os siblings.
@@ -492,13 +694,14 @@ async def node_approval(state: dict[str, Any], config: RunnableConfig) -> dict[s
 async def node_concepts(state: dict[str, Any], config: RunnableConfig) -> dict[str, Any]:
     """Step 1 — gera o batch de conceitos (data-driven, spread de hooks)."""
     tool_ctx = tool_context_from_config(config)
-    pipeline = get_pipeline(config)
-    run_cfg = state.get("config", {})
-    offer = run_cfg.get("offer", "demo offer")
-    n = int(run_cfg.get("batch_size") or pipeline.get("batch", {}).get("default_size", 12))
+    campaign = _campaign_input(state, config)
+    offer = campaign.offer
+    n = campaign.batch_size
     seed = state.get("run_id", "run")
     # Step 10 -> 1: vés pelos hooks vencedores do ciclo anterior (fecha o loop).
+    run_cfg = state.get("config", {})
     bias = run_cfg.get("prior_winning_styles") or None
+    revision = state.get("revision_request") or {}
     add_trace_metadata(step=1, stage="concepts", batch_size=n, offer=offer)
     concepts = await execute_stage_tool(
         config,
@@ -510,9 +713,13 @@ async def node_concepts(state: dict[str, Any], config: RunnableConfig) -> dict[s
         n=n,
         seed=seed,
         bias=bias,
-        persona=state.get("persona"),
+        campaign=campaign.model_dump(mode="json"),
+        revision_feedback=revision.get("feedback"),
     )
-    return {"concepts": concepts}
+    return {
+        "campaign": campaign.model_dump(mode="json"),
+        "concepts": concepts,
+    }
 
 
 @traced("node.scripts", run_type="chain", step=2)
@@ -524,26 +731,134 @@ async def node_scripts(state: dict[str, Any], config: RunnableConfig) -> dict[st
     cada item e move o script (``concept["script"]`` -> ``Item.script``) depois.
     """
     tool_ctx = tool_context_from_config(config)
-    run_cfg = config["configurable"].get("run", {})
-    platform = run_cfg.get("platform", "tiktok")
+    campaign = _campaign_input(state, config)
+    platform = campaign.platform
     concepts = state.get("concepts") or []
+    completed = 0
+    progress_lock = asyncio.Lock()
     add_trace_metadata(step=2, stage="scripts", batch_size=len(concepts), platform=platform)
 
     async def _write(concept: dict[str, Any]) -> dict[str, Any]:
-        script = await execute_stage_tool(
+        result = await execute_stage_tool(
             config,
             tool_ctx,
             catalog_stage="scripts",
             tool_name="write_script",
             tool_fn=write_script_tool,
             concept=concept, creator_ref="creator", platform=platform,
-            persona=state.get("persona"),
+            campaign=campaign.model_dump(mode="json"),
+            revision_feedback=(state.get("revision_request") or {}).get("feedback"),
+            return_contract=True,
         )
-        return {**concept, "script": script}
+        if not isinstance(result, ScriptResult):
+            if isinstance(result, str):
+                result = script_result_from_text(
+                    result,
+                    run_id=str(state.get("run_id") or "run"),
+                    concept_id=str(concept["id"]),
+                )
+            else:
+                result = ScriptResult.model_validate(result)
+        scripted = {
+            **concept,
+            "script": result.script,
+            "script_draft": result.script_draft.model_dump(mode="json"),
+        }
+        nonlocal completed
+        async with progress_lock:
+            completed += 1
+            await _report_creative_progress(
+                config,
+                stage_id="scripts",
+                completed_units=completed,
+                total_units=len(concepts),
+            )
+        return scripted
 
     # gather preserva a ordem dos conceitos; determinístico no mock.
     scripted = await asyncio.gather(*(_write(c) for c in concepts))
     return {"concepts": list(scripted)}
+
+
+@traced("node.creator_profiles", run_type="chain", step=3)
+async def node_creator_profiles(
+    state: dict[str, Any],
+    config: RunnableConfig,
+) -> dict[str, Any]:
+    """Create two typed casting profiles before rendering their media previews."""
+    tool_ctx = tool_context_from_config(config)
+    campaign = _campaign_input(state, config)
+    concepts = state.get("concepts") or []
+    add_trace_metadata(step=3, stage="creator_profiles", creators=2)
+    result = await execute_stage_tool(
+        config,
+        tool_ctx,
+        catalog_stage="creator_profiles",
+        tool_name="design_creator_roster",
+        tool_fn=design_creator_roster_tool,
+        campaign=campaign.model_dump(mode="json"),
+        concept_ids=[str(concept["id"]) for concept in concepts],
+        creative_packages=concepts,
+        revision_feedback=(state.get("revision_request") or {}).get("feedback"),
+    )
+    if not isinstance(result, CreatorRoster):
+        result = CreatorRoster.model_validate(result)
+    return {
+        "creator_profiles": [
+            profile.model_dump(mode="json")
+            for profile in result.creators
+        ],
+        "creator_assignments": [
+            assignment.model_dump(mode="json")
+            for assignment in result.assignments
+        ],
+    }
+
+
+@traced("node.review", run_type="chain", step=3)
+async def node_review(state: dict[str, Any], config: RunnableConfig) -> dict[str, Any]:
+    """Single human gate for creative packages and rendered creator previews."""
+    run_cfg = config["configurable"].get("run", {})
+    if not run_cfg.get("review_plan", False):
+        return {"review_approved": True, "revision_request": {}}
+    decision = interrupt(
+        {
+            "type": "review_creative_plan",
+            "concepts": state.get("concepts") or [],
+            "creators": state.get("roster") or [],
+        }
+    ) or {}
+    action = decision.get("action", "approve")
+    if action == "regenerate":
+        target = decision.get("target")
+        if target not in {"concepts", "scripts", "creators"}:
+            raise ValueError("regenerate target must be concepts, scripts, or creators")
+        return {
+            "review_approved": False,
+            "revision_request": {
+                "target": target,
+                "ids": list(decision.get("ids") or []),
+                "feedback": str(decision.get("feedback") or ""),
+            },
+        }
+    if action != "approve":
+        raise ValueError("review action must be approve or regenerate")
+    concepts = decision.get("concepts")
+    creators = decision.get("creators")
+    return {
+        "concepts": (
+            apply_review_concept_updates(state.get("concepts") or [], concepts)
+            if isinstance(concepts, list)
+            else state.get("concepts", [])
+        ),
+        "roster": (
+            apply_review_creator_updates(state.get("roster") or [], creators)
+            if isinstance(creators, list)
+            else state.get("roster", [])
+        ),
+        "review_approved": True,
+        "revision_request": {},
+    }
 
 
 @traced("node.concept_review", run_type="chain", step=2)

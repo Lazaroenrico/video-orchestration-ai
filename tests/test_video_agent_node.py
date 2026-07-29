@@ -1,20 +1,11 @@
-"""Nodes de vídeo em modo agent (D33): contabilidade de custo por take.
-
-O agent pode gerar várias takes para um mesmo clip, e **cada take é dinheiro** (Replicate
-cobra por geração). O node só anexa a take final ao item — mas precisa cobrar por todas,
-senão o custo do run mente. Estes testes travam essa contabilidade e a proveniência das
-takes descartadas.
-
-Offline e determinístico: um adapter fake implementa ``run_stage_agent`` chamando o
-``run_tool`` recebido N vezes, sem rede.
-"""
+"""Video nodes stay deterministic adapter calls outside agent authority."""
 from __future__ import annotations
 
 from typing import Any
 
 import pytest
 
-from orchestrator.adapters._agent_loop import AgentRunResult, ToolAttempt, ToolCall
+from orchestrator.adapters._agent_loop import AgentRunResult
 from orchestrator.adapters.mock import MockAdapter
 from orchestrator.agent_catalog import AgentCatalog, StageExecutionSpec
 from orchestrator.graph.state import Item
@@ -36,11 +27,7 @@ def _catalog(executor: str) -> AgentCatalog:
 
 
 class _MultiTakeAdapter(MockAdapter):
-    """Adapter agentic que pede ``takes`` gerações, cada uma com uma revision distinta.
-
-    Simula o agent refinando a take: a última é a vencedora, as anteriores são custo
-    pago e descartado.
-    """
+    """A trap adapter: its agent entrypoint must never be reached by video nodes."""
 
     def __init__(self, takes: int = 3) -> None:
         super().__init__(tiers=TIERS)
@@ -58,18 +45,7 @@ class _MultiTakeAdapter(MockAdapter):
         max_steps: int = 4,
         max_tool_calls: int | None = None,
     ) -> AgentRunResult:
-        attempts: list[ToolAttempt] = []
-        for i in range(self.takes):
-            revision = f"take-{i}" if i else None
-            kwargs = {"revision": revision} if revision else {}
-            result = await run_tool("generate_clip", **kwargs)
-            attempts.append(
-                ToolAttempt(
-                    call=ToolCall(id=str(i), name="generate_clip", arguments=dict(kwargs)),
-                    result=result,
-                )
-            )
-        return AgentRunResult(result=attempts[-1].result, attempts=tuple(attempts))
+        raise AssertionError("video must not enter the agent loop")
 
 
 def _item() -> Item:
@@ -93,48 +69,40 @@ def _config(adapter: Any, pipeline_cfg: dict[str, Any], executor: str) -> dict[s
 
 
 @pytest.mark.parametrize("node_name", ["gen", "product_demo"])
-async def test_video_node_charges_every_agent_take(pipeline_cfg, node_name):
-    """O custo do item soma TODAS as takes — não só a que sobreviveu."""
+async def test_video_node_charges_the_single_adapter_take(pipeline_cfg, node_name):
     from orchestrator.nodes.stages import make_gen_node, node_product_demo
 
     adapter = _MultiTakeAdapter(takes=3)
     node = make_gen_node("ltx") if node_name == "gen" else node_product_demo
-    out = await node(_item().model_dump(), _config(adapter, pipeline_cfg, "agent"))
+    out = await node(_item().model_dump(), _config(adapter, pipeline_cfg, "tool"))
 
-    # 3 takes de mesmo custo unitário; o node cobra as 3, não 1.
     single = out["clips"][-1].meta["cost_usd"]
-    assert out["cost_usd"] == pytest.approx(round(single * 3, 4))
+    assert out["cost_usd"] == pytest.approx(single)
 
 
 @pytest.mark.parametrize("node_name", ["gen", "product_demo"])
-async def test_video_node_appends_only_the_final_take(pipeline_cfg, node_name):
-    """Só a take final vira clip do item.
-
-    Empurrar as descartadas para ``clips`` reprovaria o item no IntegrityQC (que valida
-    cada clip) e quebraria ``qc.required_clip_count``.
-    """
+async def test_video_node_appends_one_adapter_result(pipeline_cfg, node_name):
     from orchestrator.nodes.stages import make_gen_node, node_product_demo
 
     adapter = _MultiTakeAdapter(takes=3)
     node = make_gen_node("ltx") if node_name == "gen" else node_product_demo
-    out = await node(_item().model_dump(), _config(adapter, pipeline_cfg, "agent"))
+    out = await node(_item().model_dump(), _config(adapter, pipeline_cfg, "tool"))
 
     assert len(out["clips"]) == 1
 
 
-async def test_video_node_records_superseded_takes_as_provenance(pipeline_cfg):
-    """As takes descartadas ficam no meta do clip final: custo e revision auditáveis."""
+async def test_video_node_does_not_create_agent_take_provenance(pipeline_cfg):
     from orchestrator.nodes.stages import make_gen_node
 
     adapter = _MultiTakeAdapter(takes=3)
-    out = await make_gen_node("ltx")(_item().model_dump(), _config(adapter, pipeline_cfg, "agent"))
+    out = await make_gen_node("ltx")(
+        _item().model_dump(),
+        _config(adapter, pipeline_cfg, "tool"),
+    )
 
     meta = out["clips"][-1].meta
-    assert meta["agent_takes"] == 3
-    superseded = meta["superseded_takes"]
-    assert len(superseded) == 2
-    assert [t["revision"] for t in superseded] == [None, "take-1"]
-    assert all(isinstance(t["cost_usd"], float) for t in superseded)
+    assert "agent_takes" not in meta
+    assert "superseded_takes" not in meta
 
 
 async def test_video_node_single_take_has_no_superseded_metadata(pipeline_cfg):
@@ -142,7 +110,10 @@ async def test_video_node_single_take_has_no_superseded_metadata(pipeline_cfg):
     from orchestrator.nodes.stages import make_gen_node
 
     adapter = _MultiTakeAdapter(takes=1)
-    out = await make_gen_node("ltx")(_item().model_dump(), _config(adapter, pipeline_cfg, "agent"))
+    out = await make_gen_node("ltx")(
+        _item().model_dump(),
+        _config(adapter, pipeline_cfg, "tool"),
+    )
 
     meta = out["clips"][-1].meta
     assert "superseded_takes" not in meta
@@ -161,14 +132,16 @@ async def test_video_node_in_tool_mode_keeps_single_take_accounting(pipeline_cfg
     assert "superseded_takes" not in out["clips"][-1].meta
 
 
-async def test_video_node_propagates_a_failed_agent_run(pipeline_cfg):
-    """Agent que falha derruba o node — o item não pode ficar inconsistente."""
+async def test_video_node_propagates_a_failed_adapter_call(pipeline_cfg):
     from orchestrator.nodes.stages import make_gen_node
 
     class _FailingAdapter(MockAdapter):
-        async def run_stage_agent(self, **kwargs: Any) -> AgentRunResult:
+        async def generate_clip(self, **kwargs: Any):
             raise RuntimeError("tier has no real adapter")
 
     adapter = _FailingAdapter(tiers=TIERS)
     with pytest.raises(RuntimeError, match="tier has no real adapter"):
-        await make_gen_node("ltx")(_item().model_dump(), _config(adapter, pipeline_cfg, "agent"))
+        await make_gen_node("ltx")(
+            _item().model_dump(),
+            _config(adapter, pipeline_cfg, "tool"),
+        )

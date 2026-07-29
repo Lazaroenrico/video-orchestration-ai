@@ -2,8 +2,7 @@ import { PageHeader } from "../components/PageHeader";
 import { Card } from "../components/Card";
 import { Icon } from "../components/Icon";
 import { Loading, ErrorState, EmptyState } from "../components/States";
-import { useAsync } from "../api/useAsync";
-import { api } from "../api/client";
+import { errorMessage, useIntegrations } from "../api/queries";
 
 const STAGE_META: Record<string, { label: string; icon: string; blurb: string }> = {
   llm: { label: "LLM", icon: "smart_toy", blurb: "Concept & script generation." },
@@ -18,7 +17,10 @@ const STAGE_META: Record<string, { label: string; icon: string; blurb: string }>
 const isMock = (adapter: string) => adapter === "mock";
 
 export function Integrations() {
-  const { data, loading, error } = useAsync(() => api.getIntegrations(), []);
+  const integrations = useIntegrations();
+  const data = integrations.data ?? null;
+  const loading = integrations.isLoading;
+  const error = errorMessage(integrations.error);
   const stages = data ? Object.entries(data.stages) : [];
 
   return (

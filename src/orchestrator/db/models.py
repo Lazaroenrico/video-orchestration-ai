@@ -196,7 +196,7 @@ class Run(Base):
     __table_args__ = (
         PrimaryKeyConstraint("organization_id", "id"),
         CheckConstraint(
-            "phase IN ('running', 'editing', 'awaiting', 'done', 'error')",
+            "phase IN ('running', 'editing', 'awaiting', 'review', 'done', 'error', 'cancelled')",
             name="ck_runs_phase",
         ),
         CheckConstraint(
@@ -263,7 +263,7 @@ class Job(Base):
             ondelete="CASCADE",
         ),
         CheckConstraint(
-            "status IN ('queued', 'running', 'retry', 'succeeded', 'failed')",
+            "status IN ('queued', 'running', 'retry', 'succeeded', 'failed', 'cancelled')",
             name="ck_jobs_status",
         ),
         CheckConstraint("attempt >= 0", name="ck_jobs_attempt"),
@@ -311,7 +311,7 @@ class RunGate(Base):
             name="uq_run_gates_version",
         ),
         CheckConstraint(
-            "status IN ('pending', 'resolved')",
+            "status IN ('pending', 'resolved', 'cancelled')",
             name="ck_run_gates_status",
         ),
         CheckConstraint("version > 0", name="ck_run_gates_version"),

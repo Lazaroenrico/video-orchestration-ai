@@ -117,15 +117,28 @@ async def _execute_agentic_tool(
     tool_fn: ToolFn,
     kwargs: dict[str, Any],
 ) -> AgentRunResult:
+    tool_spec = get_tool_spec(tool_name)
+    terminal_submission = (
+        tool_spec.terminal_submission and spec.schema_version == "creative-v2"
+    )
+    trace_metadata = {
+        "executor": "agent",
+        "stage": spec.stage,
+        "tool_name": tool_name,
+        "target_model": spec.target_model,
+        "target_agent": spec.target_agent,
+        "has_system_prompt": bool(spec.system_prompt and spec.system_prompt.strip()),
+        "allowed_tools": list(spec.tools),
+        "run_id": ctx.run_id,
+    }
+    if spec.prompt_version is not None:
+        trace_metadata["prompt_version"] = spec.prompt_version
+    if spec.prompt_hash is not None:
+        trace_metadata["prompt_hash"] = spec.prompt_hash
+    if spec.schema_version is not None:
+        trace_metadata["schema_version"] = spec.schema_version
     add_trace_metadata(
-        executor="agent",
-        stage=spec.stage,
-        tool_name=tool_name,
-        target_model=spec.target_model,
-        target_agent=spec.target_agent,
-        has_system_prompt=bool(spec.system_prompt and spec.system_prompt.strip()),
-        allowed_tools=list(spec.tools),
-        run_id=ctx.run_id,
+        **trace_metadata,
     )
     # O agent brain é um port opcional do adapter llm (Fase 7). Ausente → passthrough
     # puro (a tool roda uma vez), preservando o comportamento offline sem custo.
@@ -146,17 +159,26 @@ async def _execute_agentic_tool(
         # da tool (ex.: ``revision``); offer/n/seed/etc. vêm dos inputs confiáveis.
         allowed_params = get_tool_spec(called_tool).parameters.get("properties", {})
         safe_inputs = {k: v for k, v in tool_inputs.items() if k in allowed_params}
-        return await tool_fn(ctx, **{**kwargs, **safe_inputs})
+        trusted = {"agent_submission": True} if terminal_submission else {}
+        return await tool_fn(ctx, **{**kwargs, **trusted, **safe_inputs})
 
+    agent_kwargs = {
+        "stage": spec.stage,
+        "allowed_tools": spec.tools,
+        "run_tool": run_tool,
+        "inputs": kwargs,
+        "target_model": spec.target_model,
+        "system_prompt": spec.system_prompt,
+        "max_steps": _agent_max_steps(ctx.pipeline, spec.stage),
+        "max_tool_calls": _agent_max_tool_calls(ctx.pipeline, spec.stage),
+    }
+    if terminal_submission:
+        agent_kwargs.update(
+            require_tool_call=True,
+            stop_after_success=True,
+        )
     return await run_stage_agent(
-        stage=spec.stage,
-        allowed_tools=spec.tools,
-        run_tool=run_tool,
-        inputs=kwargs,
-        target_model=spec.target_model,
-        system_prompt=spec.system_prompt,
-        max_steps=_agent_max_steps(ctx.pipeline, spec.stage),
-        max_tool_calls=_agent_max_tool_calls(ctx.pipeline, spec.stage),
+        **agent_kwargs,
     )
 
 

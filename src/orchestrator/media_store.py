@@ -270,6 +270,9 @@ async def persist_creator_media(
         stored = await backend.put_from_url(voice_uri, key_base=f"{key_prefix}/voice", client=client)
         if stored:
             out["voice_id"] = stored.uri
+            out["voice_ref"] = stored.uri
+            out["voice"] = stored.uri
+            out["voice_preview_uri"] = stored.uri
             out["voice_source_uri"] = voice_uri
             await _record(
                 db, stored, run_id=run_id, kind="voice", source_uri=voice_uri, creator_id=creator_id,

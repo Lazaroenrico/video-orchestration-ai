@@ -24,12 +24,14 @@ from orchestrator.nodes.stages import (
     node_assembly,
     node_concept_review,
     node_concepts,
+    node_creator_profiles,
     node_drop,
     node_feedback,
     node_persona,
     node_product_demo,
     node_qc,
     node_roster,
+    node_review,
     node_scripts,
     node_upscale,
 )
@@ -151,10 +153,21 @@ def make_fan_out_node():
     async def fan_out(state: dict[str, Any]) -> list[Send]:
         concepts = state.get("concepts", [])
         roster = state.get("roster") or [{}]
+        assignments = {
+            str(assignment.get("concept_id")): str(assignment.get("creator_id"))
+            for assignment in state.get("creator_assignments") or []
+        }
+        creators_by_id = {
+            str(creator.get("id")): creator
+            for creator in roster
+            if creator.get("id") is not None
+        }
         add_trace_metadata(step=6, stage="fan_out", items=len(concepts), roster_size=len(roster))
         sends: list[Send] = []
         for i, concept in enumerate(concepts):
-            creator = roster[i % len(roster)]
+            creator = creators_by_id.get(str(assignments.get(str(concept.get("id")))))
+            if creator is None:
+                creator = roster[i % len(roster)]
             creator_image_uri = creator.get("image_source_uri") or creator.get("upscaled_base")
             # O script foi gerado em nível de batch (antes do creator) e vive em
             # concept["script"]; move-o para Item.script e mantém o concept limpo.
@@ -176,30 +189,43 @@ def make_fan_out_node():
     return fan_out
 
 
+async def route_after_review(state: dict[str, Any]) -> str | list[Send]:
+    if state.get("review_approved"):
+        return await make_fan_out_node()(state)
+    target = (state.get("revision_request") or {}).get("target")
+    return {
+        "concepts": "concepts",
+        "scripts": "scripts",
+        "creators": "creator_profiles",
+    }.get(target, "review")
+
+
 def build_graph(pipeline: dict[str, Any], checkpointer: Optional[Any] = None):
     """Grafo de topo, com fan-out paralelo e (opcional) checkpointer p/ resume."""
     item_app = build_item_graph(pipeline)
 
     g = StateGraph(BatchState)
-    g.add_node("persona", node_persona)
     g.add_node("concepts", node_concepts)
     g.add_node("scripts", node_scripts)
-    g.add_node("concept_review", node_concept_review)
+    g.add_node("creator_profiles", node_creator_profiles)
     g.add_node("roster", node_roster)
-    g.add_node("approval", node_approval)
+    g.add_node("review", node_review)
 
     g.add_node("process_item", make_process_item_node(item_app))
     g.add_node("feedback", node_feedback)
 
-    # persona -> concepts -> scripts -> [gate de edição] -> creator -> [gate de aprovação] -> fan-out
-    g.add_edge(START, "persona")
-    g.add_edge("persona", "concepts")
+    # Setup -> creative agents -> previews -> one human review -> production fan-out.
+    g.add_edge(START, "concepts")
     g.add_edge("concepts", "scripts")
-    g.add_edge("scripts", "concept_review")
-    g.add_edge("concept_review", "roster")
-    g.add_edge("roster", "approval")
+    g.add_edge("scripts", "creator_profiles")
+    g.add_edge("creator_profiles", "roster")
+    g.add_edge("roster", "review")
 
-    g.add_conditional_edges("approval", make_fan_out_node(), ["process_item"])
+    g.add_conditional_edges(
+        "review",
+        route_after_review,
+        ["concepts", "scripts", "creator_profiles", "review", "process_item"],
+    )
     g.add_edge("process_item", "feedback")
     g.add_edge("feedback", END)
     return g.compile(checkpointer=checkpointer)

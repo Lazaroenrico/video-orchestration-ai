@@ -41,6 +41,80 @@ async def test_run_pipeline_end_to_end(tmp_path, pipeline_cfg):
     assert "ltx" in s["cost_by_tier"]  # bulk barato sempre presente
 
 
+async def test_run_pipeline_streams_item_aware_progress_events(tmp_path, pipeline_cfg):
+    events = []
+
+    async def collect(event):
+        events.append(event)
+
+    _, out = await runner.run_pipeline(
+        pipeline_cfg,
+        PROVIDERS,
+        db_path=tmp_path / "progress.sqlite",
+        batch=2,
+        offer="serum",
+        run_id="progress-e2e",
+        event_sink=collect,
+    )
+
+    assert len(out["results"]) == 2
+    assert any(
+        event["stage_id"] == "concepts" and event["status"] == "completed"
+        for event in events
+    )
+    assert [
+        (event["completed_units"], event["total_units"])
+        for event in events
+        if event["stage_id"] == "scripts" and event["status"] == "progress"
+    ] == [(1, 2), (2, 2)]
+    assert [
+        (event["completed_units"], event["total_units"])
+        for event in events
+        if event["stage_id"] == "creator_previews"
+        and event["status"] == "progress"
+    ] == [(1, 2), (2, 2)]
+    item_events = [
+        event
+        for event in events
+        if event["stage_id"] == "talking_head" and event.get("item_id")
+    ]
+    assert {event["item_id"] for event in item_events} == {
+        item.id for item in runner.as_items(out["results"])
+    }
+    assert all(event["operation_id"] for event in item_events)
+
+
+async def test_progress_stream_falls_back_to_root_output_without_snapshot():
+    class _App:
+        async def astream_events(self, input_value, config, version):
+            assert input_value == {"run_id": "fallback"}
+            assert config == {"configurable": {"thread_id": "fallback"}}
+            assert version == "v2"
+            yield {
+                "event": "on_chain_end",
+                "name": "LangGraph",
+                "data": {"output": {"run_id": "fallback", "results": []}},
+            }
+
+        async def aget_state(self, config):
+            return None
+
+    events = []
+
+    async def collect(event):
+        events.append(event)
+
+    output = await runner._invoke_with_progress(
+        _App(),
+        {"run_id": "fallback"},
+        {"configurable": {"thread_id": "fallback"}},
+        collect,
+    )
+
+    assert output == {"run_id": "fallback", "results": []}
+    assert events == []
+
+
 async def test_final_video_is_upscaled_not_the_image(tmp_path, pipeline_cfg):
     """O vídeo final montado passa pelo upscale; a imagem do creator fica crua."""
     db = tmp_path / "runs.sqlite"

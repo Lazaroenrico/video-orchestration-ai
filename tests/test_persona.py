@@ -1,12 +1,4 @@
-"""Persona doc (D35) — o personagem no papel antes de qualquer pixel.
-
-A ordem real da pipeline é: **persona -> conceitos -> scripts -> imagem do creator**.
-A persona é batch-level (uma por run/marca), não por script: o roster tem N creators
-reutilizáveis para um batch de M itens (``roster[i % len(roster)]``), então uma persona
-por script não teria como ser expressa por um creator compartilhado.
-
-Estes testes travam o contrato da tool e o determinismo offline.
-"""
+"""Legacy persona tool compatibility outside the public V2 graph."""
 from __future__ import annotations
 
 from typing import Any
@@ -135,7 +127,7 @@ async def test_composite_adapter_routes_write_persona_to_the_llm_role():
     assert llm.calls[0][0] == "write_persona"
 
 
-def test_top_graph_orders_persona_before_concepts():
+def test_top_graph_replaces_persona_with_typed_creator_profiles():
     from orchestrator.graph.builder import build_graph
 
     pipeline = {"tiers": TIERS, "batch": {"default_size": 1}, "roster": {"creators": 1}}
@@ -143,12 +135,13 @@ def test_top_graph_orders_persona_before_concepts():
     nodes = set(app.get_graph().nodes)
     edges = {(edge.source, edge.target) for edge in app.get_graph().edges}
 
-    assert "persona" in nodes
-    assert ("persona", "concepts") in edges
+    assert "persona" not in nodes
+    assert "creator_profiles" in nodes
     assert ("concepts", "scripts") in edges
+    assert ("scripts", "creator_profiles") in edges
 
 
-async def test_persona_is_saved_and_propagated_to_downstream_stages():
+async def test_legacy_persona_is_not_injected_into_creative_agent_inputs():
     from orchestrator.nodes import stages
 
     adapter = _PipelineSpyAdapter()
@@ -180,32 +173,33 @@ async def test_persona_is_saved_and_propagated_to_downstream_stages():
     concepts_call = adapter.calls[1][1]
     scripts_call = adapter.calls[2][1]
     creator_call = adapter.calls[3][1]
-    assert concepts_call["persona"] == state["persona"]
-    assert scripts_call["persona"] == state["persona"]
+    assert "persona" not in concepts_call
+    assert "persona" not in scripts_call
     assert creator_call["system_prompt"].startswith(state["persona"])
     assert "CREATOR PROMPT: natural light." in creator_call["system_prompt"]
     assert roster_update["roster"][0]["id"] == "creator-0"
 
 
-def test_persona_stage_is_allowed_and_configured_for_live_and_mock():
+def test_persona_stage_is_tool_only_for_live_and_mock():
     from orchestrator.agent_catalog import is_agent_stage_allowed
     from orchestrator.config import load_agent_catalog
 
-    assert is_agent_stage_allowed("persona") is True
+    assert is_agent_stage_allowed("persona") is False
 
     live = load_agent_catalog("config").stage("persona")
     mock = load_agent_catalog("config-mock").stage("persona")
 
     assert live.tools == ("write_persona",)
-    assert live.executor == "agent"
-    assert live.agent_enabled is True
+    assert live.executor == "tool"
+    assert live.agent_enabled is False
     assert mock.tools == ("write_persona",)
     assert mock.executor == "tool"
     assert mock.agent_enabled is False
 
 
-def test_backend_node_labels_include_persona():
+def test_backend_node_labels_expose_the_v2_creative_stages():
     from orchestrator.web.server import NODE_LABELS, PIPELINE_NODES
 
-    assert "persona" in PIPELINE_NODES
-    assert NODE_LABELS["persona"] == "Persona"
+    assert "persona" not in PIPELINE_NODES
+    assert NODE_LABELS["creator_profiles"] == "Perfis de creators"
+    assert NODE_LABELS["review"] == "Revisão do plano criativo"

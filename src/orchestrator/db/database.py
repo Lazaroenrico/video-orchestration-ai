@@ -5,7 +5,7 @@ import asyncio
 import json
 import os
 from contextlib import asynccontextmanager
-from typing import AsyncIterator
+from typing import Any, AsyncIterator
 
 from psycopg import AsyncConnection, AsyncCursor
 from psycopg_pool import AsyncConnectionPool
@@ -127,7 +127,9 @@ class Database:
         tenant: TenantContext | None = None,
     ) -> AsyncIterator[AsyncConnection]:
         async with self._pool.connection() as connection:
-            async with connection.transaction():
+            transaction = connection.transaction()
+            await transaction.__aenter__()
+            try:
                 if tenant is not None:
                     await connection.execute(
                         "SELECT set_config('app.organization_id', %s, true)",
@@ -138,6 +140,32 @@ class Database:
                         (str(tenant.user_id),),
                     )
                 yield connection
+            except asyncio.CancelledError as exc:
+                try:
+                    await asyncio.shield(
+                        transaction.__aexit__(
+                            type(exc),
+                            exc,
+                            exc.__traceback__,
+                        )
+                    )
+                except BaseException:
+                    pass
+                try:
+                    await asyncio.shield(connection.close())
+                except Exception:
+                    pass
+                raise
+            except BaseException as exc:
+                suppress = await transaction.__aexit__(
+                    type(exc),
+                    exc,
+                    exc.__traceback__,
+                )
+                if not suppress:
+                    raise
+            else:
+                await transaction.__aexit__(None, None, None)
 
     async def ensure_tenant(self, identity: TenantIdentity) -> TenantContext:
         """Materializa organização, usuário e membership de modo idempotente."""

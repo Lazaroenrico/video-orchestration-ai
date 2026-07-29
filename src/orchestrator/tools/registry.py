@@ -6,22 +6,131 @@ from importlib import import_module
 from typing import Any
 
 
-# Schema agent-facing dos stages LLM-only: a única alavanca do modelo é ``revision``
-# (uma diretiva de refino). offer/n/seed (concepts) e concept/creator_ref/platform
-# (scripts) ficam server-authoritative — injetados pelo run_tool no stage_executor,
-# nunca controlados pelo modelo. ``revision`` opcional: sem ela = draft inicial.
-_REVISION_PARAM_SCHEMA: dict[str, Any] = {
+_CONCEPT_SUBMISSION_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
-        "revision": {
-            "type": "string",
-            "description": (
-                "Optional one-line revision directive to improve the previous draft. "
-                "Omit on the first call to produce the initial draft."
-            ),
-        }
+        "proposals": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "hook": {"type": "string"},
+                    "angle": {"type": "string"},
+                    "audience_problem": {"type": "string"},
+                    "product_mechanism": {"type": "string"},
+                    "evidence_basis": {
+                        "type": "string",
+                        "enum": ["provided_fact", "performance", "cold_test"],
+                    },
+                    "format": {"type": "string"},
+                    "hook_style": {"type": "string"},
+                },
+                "required": [
+                    "hook",
+                    "angle",
+                    "audience_problem",
+                    "product_mechanism",
+                    "evidence_basis",
+                    "format",
+                    "hook_style",
+                ],
+                "additionalProperties": False,
+            },
+        },
     },
-    "required": [],
+    "required": ["proposals"],
+    "additionalProperties": False,
+}
+
+_SCRIPT_SUBMISSION_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "draft": {
+            "type": "object",
+            "properties": {
+                "spoken_beats": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "section": {
+                                "type": "string",
+                                "enum": ["hook", "body", "cta"],
+                            },
+                            "text": {"type": "string"},
+                            "seconds": {"type": "integer", "minimum": 1, "maximum": 120},
+                        },
+                        "required": ["section", "text", "seconds"],
+                        "additionalProperties": False,
+                    },
+                },
+                "visual_beats": {"type": "array", "items": {"type": "string"}},
+                "on_screen_text": {"type": "array", "items": {"type": "string"}},
+                "call_to_action": {"type": "string"},
+                "estimated_duration": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 180,
+                },
+            },
+            "required": [
+                "spoken_beats",
+                "visual_beats",
+                "on_screen_text",
+                "call_to_action",
+                "estimated_duration",
+            ],
+            "additionalProperties": False,
+        },
+    },
+    "required": ["draft"],
+    "additionalProperties": False,
+}
+
+_CREATOR_ROSTER_SUBMISSION_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "creators": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 2,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "archetype": {"type": "string"},
+                    "visual_brief": {"type": "string"},
+                    "voice_brief": {"type": "string"},
+                    "performance_style": {"type": "string"},
+                    "exclusions": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": [
+                    "archetype",
+                    "visual_brief",
+                    "voice_brief",
+                    "performance_style",
+                    "exclusions",
+                ],
+                "additionalProperties": False,
+            },
+        },
+        "assignments": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "concept_id": {"type": "string"},
+                    "creator_index": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 1,
+                    },
+                },
+                "required": ["concept_id", "creator_index"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["creators", "assignments"],
     "additionalProperties": False,
 }
 
@@ -31,29 +140,6 @@ _EMPTY_PARAM_SCHEMA: dict[str, Any] = {
     "required": [],
     "additionalProperties": False,
 }
-
-# Schema agent-facing do stage video (D33). Mesma alavanca única dos stages de texto —
-# ``revision`` —, reusando o nome que os brains já ensinam no system prompt. A diretiva é
-# apendada ao brief server-authored (que sempre vence). Fora do schema, e portanto
-# impossíveis de o modelo tocar: ``tier`` (vem do tier routing e define o custo — seedance
-# é ~17x ltx), ``attempt`` (vem do loop de QC), ``item_id`` (identidade), ``seconds``,
-# ``system_prompt`` e ``reference_image_uri``.
-_VIDEO_REVISION_PARAM_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "revision": {
-            "type": "string",
-            "description": (
-                "Optional one-line directive appended to the shot brief to improve the "
-                "previous take (e.g. framing, pacing, energy). The existing brief and "
-                "its constraints always win. Omit on the first call to produce the base take."
-            ),
-        }
-    },
-    "required": [],
-    "additionalProperties": False,
-}
-
 
 @dataclass(frozen=True)
 class ToolSpec:
@@ -66,6 +152,7 @@ class ToolSpec:
     target_agent: str | None = None
     agent_enabled: bool = False
     capabilities: tuple[str, ...] = ()
+    terminal_submission: bool = False
     # JSON schema dos params que o agent pode controlar ao chamar a tool (Fase 1).
     parameters: dict[str, Any] = field(default_factory=lambda: dict(_EMPTY_PARAM_SCHEMA))
 
@@ -78,7 +165,7 @@ TOOL_REGISTRY: tuple[ToolSpec, ...] = (
         stage="persona",
         function_path="orchestrator.tools.persona.write_persona_tool",
         capabilities=("llm", "persona_generation", "brand_context"),
-        parameters=dict(_REVISION_PARAM_SCHEMA),
+        parameters=dict(_EMPTY_PARAM_SCHEMA),
     ),
     ToolSpec(
         name="generate_concepts",
@@ -87,7 +174,8 @@ TOOL_REGISTRY: tuple[ToolSpec, ...] = (
         stage="concepts",
         function_path="orchestrator.tools.concepts.generate_concepts_tool",
         capabilities=("llm", "batch_generation", "concept_generation"),
-        parameters=dict(_REVISION_PARAM_SCHEMA),
+        parameters=dict(_CONCEPT_SUBMISSION_SCHEMA),
+        terminal_submission=True,
     ),
     ToolSpec(
         name="write_script",
@@ -96,7 +184,18 @@ TOOL_REGISTRY: tuple[ToolSpec, ...] = (
         stage="scripts",
         function_path="orchestrator.tools.scripts.write_script_tool",
         capabilities=("llm", "copywriting", "script_generation"),
-        parameters=dict(_REVISION_PARAM_SCHEMA),
+        parameters=dict(_SCRIPT_SUBMISSION_SCHEMA),
+        terminal_submission=True,
+    ),
+    ToolSpec(
+        name="design_creator_roster",
+        description="Submit exactly two creator profiles and assign every concept.",
+        role="llm",
+        stage="creator_profiles",
+        function_path="orchestrator.tools.creator_profiles.design_creator_roster_tool",
+        capabilities=("llm", "creator_strategy", "casting"),
+        parameters=dict(_CREATOR_ROSTER_SUBMISSION_SCHEMA),
+        terminal_submission=True,
     ),
     ToolSpec(
         name="build_creator",
@@ -113,7 +212,7 @@ TOOL_REGISTRY: tuple[ToolSpec, ...] = (
         stage="video",
         function_path="orchestrator.tools.video.generate_clip_tool",
         capabilities=("video_generation", "artifact_generation"),
-        parameters=dict(_VIDEO_REVISION_PARAM_SCHEMA),
+        parameters=dict(_EMPTY_PARAM_SCHEMA),
     ),
     ToolSpec(
         name="qc_check",

@@ -4,35 +4,19 @@ import { Card } from "../components/Card";
 import { Button } from "../components/Button";
 import { ProgressBar } from "../components/ProgressBar";
 import { StatusPill, type Status } from "../components/StatusPill";
+import { RetryCampaignButton } from "../components/RetryCampaignButton";
 import { EmptyState, ErrorState, Loading } from "../components/States";
-import { useAsync } from "../api/useAsync";
-import { api } from "../api/client";
+import { useCampaignRows } from "../api/queries";
 import type { RunSummary } from "../types";
 import { usd, num, pct, shortRun } from "../lib/format";
-
-async function loadCampaigns() {
-  const idx = await api.getRuns();
-  const activeSet = new Set(idx.active);
-  const erroredSet = new Set(idx.errored);
-  const rows = await Promise.all(
-    idx.runs.map(async (id) => {
-      const s = await api.getStatus(id).catch(() => null);
-      return { id, active: activeSet.has(id), errored: erroredSet.has(id), summary: s };
-    })
-  );
-  // Include active/errored runs that have no checkpointed status yet.
-  for (const id of [...idx.active, ...idx.errored]) {
-    if (!rows.some((r) => r.id === id))
-      rows.push({ id, active: activeSet.has(id), errored: erroredSet.has(id), summary: null });
-  }
-  return rows;
-}
 
 function rowStatus(
   active: boolean,
   errored: boolean,
+  cancelled: boolean,
   s: RunSummary | null,
 ): { status: Status; label: string } {
+  if (cancelled) return { status: "cancelled", label: "Cancelled" };
   if (errored) return { status: "failed", label: "Failed" };
   if (active) return { status: "generating", label: "Generating" };
   if (!s) return { status: "draft", label: "Draft" };
@@ -44,7 +28,7 @@ function rowStatus(
 
 export function Campaigns() {
   const navigate = useNavigate();
-  const { data, loading, error } = useAsync(loadCampaigns, []);
+  const { data, loading, error } = useCampaignRows();
 
   return (
     <div>
@@ -86,7 +70,7 @@ export function Campaigns() {
                 const s = r.summary;
                 const total = s?.produced ?? 0;
                 const done = s ? s.approved + s.dropped : 0;
-                const st = rowStatus(r.active, r.errored, s);
+                const st = rowStatus(r.active, r.errored, r.cancelled, s);
                 return (
                   <tr
                     key={r.id}
@@ -115,8 +99,15 @@ export function Campaigns() {
                     <td className="px-6 py-4 font-body-md text-body-md text-primary">
                       {s ? usd(s.total_cost_usd) : "—"}
                     </td>
-                    <td className="px-6 py-4 text-right text-on-surface-variant">
-                      <span className="material-symbols-outlined">chevron_right</span>
+                    <td
+                      className="px-6 py-4 text-right text-on-surface-variant"
+                      onClick={(event) => event.stopPropagation()}
+                    >
+                      {r.errored ? (
+                        <RetryCampaignButton runId={r.id} variant="secondary" />
+                      ) : (
+                        <span className="material-symbols-outlined">chevron_right</span>
+                      )}
                     </td>
                   </tr>
                 );
@@ -129,29 +120,36 @@ export function Campaigns() {
               const s = r.summary;
               const total = s?.produced ?? 0;
               const done = s ? s.approved + s.dropped : 0;
-              const st = rowStatus(r.active, r.errored, s);
+              const st = rowStatus(r.active, r.errored, r.cancelled, s);
               return (
-                <button
+                <div
                   key={r.id}
-                  type="button"
-                  onClick={() => navigate(`/campaigns/${r.id}`)}
                   className="rounded-lg border border-surface-border bg-surface-container-lowest p-4 text-left focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
                 >
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="min-w-0">
-                      <div className="truncate font-body-md text-body-md font-medium text-primary">Campaign {shortRun(r.id)}</div>
-                      <div className="mt-1 truncate font-mono text-label-sm text-on-surface-variant">{r.id}</div>
+                  <button
+                    type="button"
+                    onClick={() => navigate(`/campaigns/${r.id}`)}
+                    className="block w-full text-left"
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="truncate font-body-md text-body-md font-medium text-primary">Campaign {shortRun(r.id)}</div>
+                        <div className="mt-1 truncate font-mono text-label-sm text-on-surface-variant">{r.id}</div>
+                      </div>
+                      <StatusPill status={st.status} label={st.label} />
                     </div>
-                    <StatusPill status={st.status} label={st.label} />
-                  </div>
-                  <div className="mt-4 flex items-center gap-3">
-                    <ProgressBar value={pct(done, total || 1)} tone={r.active ? "processing" : "success"} />
-                    <span className="w-14 shrink-0 text-right font-label-sm text-label-sm text-on-surface-variant">
-                      {total ? `${done}/${total}` : "—"}
-                    </span>
-                  </div>
-                  <div className="mt-3 font-body-md text-body-md text-on-surface-variant">{s ? usd(s.total_cost_usd) : "Cost pending"}</div>
-                </button>
+                    <div className="mt-4 flex items-center gap-3">
+                      <ProgressBar value={pct(done, total || 1)} tone={r.active ? "processing" : "success"} />
+                      <span className="w-14 shrink-0 text-right font-label-sm text-label-sm text-on-surface-variant">
+                        {total ? `${done}/${total}` : "—"}
+                      </span>
+                    </div>
+                    <div className="mt-3 font-body-md text-body-md text-on-surface-variant">{s ? usd(s.total_cost_usd) : "Cost pending"}</div>
+                  </button>
+                  {r.errored && (
+                    <RetryCampaignButton runId={r.id} variant="secondary" className="mt-4" />
+                  )}
+                </div>
               );
             })}
           </div>

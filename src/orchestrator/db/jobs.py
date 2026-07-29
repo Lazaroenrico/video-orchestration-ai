@@ -80,6 +80,17 @@ class StaleGateError(RuntimeError):
     """O gate já foi resolvido ou a versão enviada não é a atual."""
 
 
+class CancelledGateError(RuntimeError):
+    """The requested gate was intentionally cancelled."""
+
+
+@dataclass(frozen=True)
+class CancellationSummary:
+    gates: int
+    runs: int
+    jobs: int
+
+
 def _job_id(organization_id: UUID, run_id: str, kind: str) -> UUID:
     return uuid5(
         NAMESPACE_URL,
@@ -449,6 +460,24 @@ class PostgresJobRepository:
             row = await cursor.fetchone()
         return _job(row) if row is not None else None
 
+    async def get_initial_run_payload(self, run_id: str) -> dict[str, Any] | None:
+        stmt = (
+            select(JobModel.payload)
+            .where(
+                JobModel.organization_id == self._tenant.organization_id,
+                JobModel.run_id == run_id,
+                JobModel.kind == "execute_run",
+            )
+            .order_by(JobModel.created_at)
+            .limit(1)
+        )
+        async with self._database.connection(self._tenant) as connection:
+            cursor = await self._database.execute(connection,stmt)
+            row = await cursor.fetchone()
+        if row is None or not isinstance(row[0], dict):
+            return None
+        return row[0]
+
     async def open_gate(
         self,
         run_id: str,
@@ -505,7 +534,13 @@ class PostgresJobRepository:
                     RunModel.id == run_id,
                 )
                 .values(
-                    phase="editing" if gate_type == "edit_concepts" else "awaiting",
+                    phase=(
+                        "editing"
+                        if gate_type == "edit_concepts"
+                        else "review"
+                        if gate_type == "review_creative_plan"
+                        else "awaiting"
+                    ),
                     updated_at=timestamp,
                 )
             )
@@ -523,13 +558,15 @@ class PostgresJobRepository:
                 },
                 timestamp,
             )
-            public_type = (
-                "awaiting_concept_edit"
-                if gate_type == "edit_concepts"
-                else "awaiting_approval"
-            )
+            public_type = {
+                "edit_concepts": "awaiting_concept_edit",
+                "review_creative_plan": "awaiting_review",
+            }.get(gate_type, "awaiting_approval")
             public_data = {
                 "run_id": run_id,
+                "gate_id": str(gate_id),
+                "version": version,
+                "gate_type": gate_type,
                 **{key: value for key, value in payload.items() if key != "type"},
             }
             await self._append_event(
@@ -605,6 +642,20 @@ class PostgresJobRepository:
             cursor = await self._database.execute(connection,stmt_gate)
             gate_row = await cursor.fetchone()
             if gate_row is None:
+                status_cursor = await self._database.execute(
+                    connection,
+                    select(RunGateModel.status).where(
+                        RunGateModel.organization_id
+                        == self._tenant.organization_id,
+                        RunGateModel.id == gate_id,
+                        RunGateModel.version == version,
+                    ),
+                )
+                status_row = await status_cursor.fetchone()
+                if status_row is not None and status_row[0] == "cancelled":
+                    raise CancelledGateError(
+                        f"gate {gate_id} versão {version} foi cancelado"
+                    )
                 raise StaleGateError(
                     f"gate {gate_id} versão {version} está stale"
                 )
@@ -894,6 +945,85 @@ class PostgresJobRepository:
         assert row is not None
         return OutboxEntry(*row)
 
+    async def cancel_pending_test_runs(
+        self,
+        *,
+        reason: str = "pipeline_v2_reset",
+        now: datetime | None = None,
+    ) -> CancellationSummary:
+        """Cancel every currently pending gate and its non-terminal run/jobs."""
+        timestamp = now or datetime.now(UTC)
+        async with self._database.connection(self._tenant) as connection:
+            gate_cursor = await self._database.execute(
+                connection,
+                update(RunGateModel)
+                .where(
+                    RunGateModel.organization_id
+                    == self._tenant.organization_id,
+                    RunGateModel.status == "pending",
+                )
+                .values(
+                    status="cancelled",
+                    resolution={"reason": reason},
+                    resolved_at=timestamp,
+                )
+                .returning(RunGateModel.run_id),
+            )
+            gate_rows = await gate_cursor.fetchall()
+            run_ids = sorted({str(row[0]) for row in gate_rows})
+            if not run_ids:
+                return CancellationSummary(gates=0, runs=0, jobs=0)
+
+            run_cursor = await self._database.execute(
+                connection,
+                update(RunModel)
+                .where(
+                    RunModel.organization_id == self._tenant.organization_id,
+                    RunModel.id.in_(run_ids),
+                    RunModel.phase.in_(
+                        ["running", "editing", "awaiting", "review"]
+                    ),
+                )
+                .values(
+                    phase="cancelled",
+                    error=reason,
+                    updated_at=timestamp,
+                )
+                .returning(RunModel.id),
+            )
+            run_rows = await run_cursor.fetchall()
+            job_cursor = await self._database.execute(
+                connection,
+                update(JobModel)
+                .where(
+                    JobModel.organization_id == self._tenant.organization_id,
+                    JobModel.run_id.in_(run_ids),
+                    JobModel.status.in_(["queued", "running", "retry"]),
+                )
+                .values(
+                    status="cancelled",
+                    error=reason,
+                    lease_expires_at=None,
+                    worker_id=None,
+                    updated_at=timestamp,
+                )
+                .returning(JobModel.id),
+            )
+            job_rows = await job_cursor.fetchall()
+            for run_id in run_ids:
+                await self._append_event(
+                    connection,
+                    run_id,
+                    "run_cancelled",
+                    {"reason": reason},
+                    timestamp,
+                )
+        return CancellationSummary(
+            gates=len(gate_rows),
+            runs=len(run_rows),
+            jobs=len(job_rows),
+        )
+
     async def append_event(
         self,
         run_id: str,
@@ -928,4 +1058,3 @@ class PostgresJobRepository:
             created_at=timestamp,
         )
         await self._database.execute(connection,stmt)
-

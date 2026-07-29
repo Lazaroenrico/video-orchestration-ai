@@ -3,18 +3,9 @@ import { Card, SectionTitle } from "../components/Card";
 import { StatTile } from "../components/ProgressBar";
 import { Icon } from "../components/Icon";
 import { Loading, ErrorState } from "../components/States";
-import { useAsync } from "../api/useAsync";
-import { api } from "../api/client";
+import { useAnalyticsData } from "../api/queries";
 import type { RunSummary } from "../types";
 import { usd, num, pct } from "../lib/format";
-
-async function loadAnalytics() {
-  const idx = await api.getRuns();
-  const statuses = await Promise.all(
-    idx.runs.slice(0, 40).map((id) => api.getStatus(id).catch(() => null))
-  );
-  return statuses.filter((s): s is RunSummary => s !== null);
-}
 
 // The design shows a bar chart of conversions over time. We have no time-series
 // backend, so we render a lightweight bars view of produced/approved per run.
@@ -49,7 +40,7 @@ function Bars({ summaries }: { summaries: RunSummary[] }) {
 }
 
 export function Analytics() {
-  const { data, loading, error } = useAsync(loadAnalytics, []);
+  const { data, loading, error } = useAnalyticsData();
   if (loading) return <Loading />;
   if (error) return <ErrorState message={error} />;
   const summaries = data ?? [];

@@ -4,12 +4,9 @@ Import-safe: no-op completo se ``langsmith`` estiver ausente ou
 ``LANGSMITH_TRACING`` estiver off. Zero mudança de comportamento offline.
 
 Segurança em camadas:
-- ``_DROP_KEYS`` (segredos: ``self``, ``config``, clients httpx, ``token``,
-  ``authorization``, ``api_key``, ...) são **sempre** removidos dos spans.
-- Strings ``data:``/base64 são **sempre** elididas (não poluem o trace).
-- ``_REDACT_KEYS`` (prompts, scripts, URLs de conteúdo) são visíveis por
-  padrão — para debugar *qual* prompt gerou uma imagem/vídeo. Ative
-  ``LANGSMITH_REDACT_PROMPTS=1`` para redigi-los (perfil sensível/produção).
+- Segredos, prompts, mensagens e dados criativos são sempre removidos dos spans.
+- Strings ``data:``/base64 são sempre elididas.
+- Observabilidade de prompts usa somente version/hash, nunca o corpo.
 """
 from __future__ import annotations
 
@@ -46,11 +43,6 @@ _DROP_KEYS = {
     "api_key",
     "password",
     "secret",
-}
-# Conteúdo (prompts/scripts/URLs) — visível por padrão para debug; redigido só se
-# LANGSMITH_REDACT_PROMPTS estiver ligado. NÃO inclui segredos (esses estão em
-# _DROP_KEYS e são sempre removidos).
-_REDACT_KEYS = {
     "offer",
     "concept",
     "script",
@@ -62,6 +54,8 @@ _REDACT_KEYS = {
     "creator_prompt",
     "image_prompt",
     "messages",
+}
+_REDACT_KEYS = {
     "image_url",
     "primary",
     "upscaled_base",
@@ -87,11 +81,7 @@ def is_tracing_enabled() -> bool:
 
 
 def redact_prompts_enabled() -> bool:
-    """Se ``True``, prompts/scripts/URLs de conteúdo viram ``<redacted>`` no trace.
-
-    Default ``False`` (visível): o objetivo primário do trace aqui é debugar qual
-    prompt gerou cada imagem/vídeo. Segredos e base64 seguem sempre protegidos.
-    """
+    """Optional redaction for media URLs; prompt bodies are always dropped."""
     return os.environ.get("LANGSMITH_REDACT_PROMPTS", "").strip().lower() in _TRUTHY
 
 

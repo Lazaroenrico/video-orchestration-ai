@@ -6,6 +6,7 @@ import { Icon } from "../components/Icon";
 import { MediaThumb } from "../components/MediaThumb";
 import { StatusPill, type Status } from "../components/StatusPill";
 import { RunSelect } from "../components/RunSelect";
+import { RetryCampaignButton } from "../components/RetryCampaignButton";
 import { EmptyState, ErrorState, Loading } from "../components/States";
 import { useRunSelection } from "../api/useRunSelection";
 import { useRunStream } from "../api/useRunStream";
@@ -50,6 +51,23 @@ export function VideoReview() {
       {error && <ErrorState message={error} />}
       {!loading && !error && runs.length === 0 && (
         <EmptyState icon="movie" title="No runs to review" hint="Generated videos land here after a campaign runs." />
+      )}
+
+      {!loading && !error && selected && run.phase === "error" && (
+        <Card className="mb-gutter border-error/40 bg-error/5">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+            <div className="flex min-w-0 gap-3">
+              <Icon name="error" className="mt-0.5 shrink-0 text-error" />
+              <div>
+                <h2 className="font-headline-md text-headline-md text-primary">This run stopped with an error</h2>
+                <p className="mt-1 break-words font-body-md text-body-md text-on-surface-variant">
+                  {run.error || "The runtime did not provide an error message."}
+                </p>
+              </div>
+            </div>
+            <RetryCampaignButton runId={selected} />
+          </div>
+        </Card>
       )}
 
       {!loading && !error && runs.length > 0 && (

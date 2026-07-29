@@ -3,34 +3,14 @@ import { Card, SectionTitle } from "../components/Card";
 import { StatTile, ProgressBar } from "../components/ProgressBar";
 import { Icon } from "../components/Icon";
 import { Button } from "../components/Button";
+import { RetryCampaignButton } from "../components/RetryCampaignButton";
 import { Loading, ErrorState } from "../components/States";
-import { useAsync } from "../api/useAsync";
-import { api } from "../api/client";
+import { useDashboardData } from "../api/queries";
 import { mediaUrl } from "../api/urls";
-import type { RunSummary } from "../types";
 import { usd, num, pct, shortRun } from "../lib/format";
 
-async function loadDashboard() {
-  const [runsIdx, creatorsIdx] = await Promise.all([api.getRuns(), api.getCreators()]);
-  const ids = runsIdx.runs.slice(0, 24);
-  const statuses = await Promise.all(
-    ids.map((id) => api.getStatus(id).catch(() => null))
-  );
-  const summaries = statuses.filter((s): s is RunSummary => s !== null);
-  const agg = summaries.reduce(
-    (a, s) => ({
-      produced: a.produced + s.produced,
-      approved: a.approved + s.approved,
-      dropped: a.dropped + s.dropped,
-      cost: a.cost + s.total_cost_usd,
-    }),
-    { produced: 0, approved: 0, dropped: 0, cost: 0 }
-  );
-  return { runsIdx, creators: creatorsIdx.creators, summaries, agg };
-}
-
 export function Dashboard() {
-  const { data, loading, error } = useAsync(loadDashboard, []);
+  const { data, loading, error } = useDashboardData();
 
   if (loading) return <Loading label="Loading production overview…" />;
   if (error) return <ErrorState message={error} />;
@@ -78,9 +58,19 @@ export function Dashboard() {
             </div>
             <p className="font-body-md text-body-md text-on-surface-variant">
               {summaries.length
-                ? `${runsIdx.active.length} live · ${runsIdx.errored.length} errored · ${summaries.length} runs available for analysis.`
+                ? `${runsIdx.active.length} live · ${runsIdx.errored.length} errored · ${runsIdx.cancelled.length} cancelled · ${summaries.length} runs available for analysis.`
                 : "Start a campaign to populate this workspace with production data."}
             </p>
+            {runsIdx.errored.length === 1 && (
+              <RetryCampaignButton runId={runsIdx.errored[0]} className="mt-4" />
+            )}
+            {runsIdx.errored.length > 1 && (
+              <Link to="/campaigns" className="mt-4 inline-flex">
+                <Button variant="secondary" icon="error">
+                  Review failed campaigns
+                </Button>
+              </Link>
+            )}
           </Card>
         </div>
       </div>

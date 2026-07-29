@@ -1,50 +1,82 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useNavigate } from "react-router";
 import { Icon } from "../components/Icon";
 import { Button } from "../components/Button";
 import { Card } from "../components/Card";
-import { api } from "../api/client";
+import { useStartRunV2Mutation } from "../api/queries";
+import type { PerformanceSnapshot } from "../types";
 
-const PLATFORMS = ["tiktok", "instagram", "youtube"] as const;
-const STEPS = ["Offer", "Direction", "Quality Gates", "Review"];
+const PLATFORMS = ["tiktok", "instagram", "youtube", "facebook"] as const;
+const OBJECTIVES = ["conversion", "awareness", "consideration"] as const;
+const STEPS = ["Briefing", "Direção", "Revisão"];
 
 const label =
-  "block font-label-sm text-label-sm uppercase tracking-wider text-on-surface-variant mb-1";
+  "mb-1 block font-label-sm text-label-sm uppercase text-on-surface-variant";
 const field = "hm-field";
+
+function optional(value: string): string | null {
+  return value.trim() || null;
+}
 
 export function CreateWizard() {
   const navigate = useNavigate();
+  const startRun = useStartRunV2Mutation();
   const [step, setStep] = useState(0);
-  const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const [offer, setOffer] = useState("");
-  const [creatorPrompt, setCreatorPrompt] = useState("");
-  const [videoPrompt, setVideoPrompt] = useState("");
+  const [audience, setAudience] = useState("");
+  const [factsRestrictions, setFactsRestrictions] = useState("");
+  const [creatorDirection, setCreatorDirection] = useState("");
+  const [videoDirection, setVideoDirection] = useState("");
+  const [performanceJson, setPerformanceJson] = useState("");
   const [batch, setBatch] = useState(6);
   const [platform, setPlatform] = useState<(typeof PLATFORMS)[number]>("tiktok");
-  const [editConcepts, setEditConcepts] = useState(true);
-  const [approveCreators, setApproveCreators] = useState(true);
+  const [objective, setObjective] =
+    useState<(typeof OBJECTIVES)[number]>("conversion");
 
-  const canContinue = step === 0 ? offer.trim().length > 0 : true;
+  const performance = useMemo(() => {
+    if (!performanceJson.trim()) return { value: null, error: null };
+    try {
+      return {
+        value: JSON.parse(performanceJson) as PerformanceSnapshot,
+        error: null,
+      };
+    } catch {
+      return { value: null, error: "O JSON de performance não é válido." };
+    }
+  }, [performanceJson]);
+
+  const canContinue =
+    step === 0
+      ? Boolean(offer.trim() && audience.trim())
+      : step === 1
+        ? performance.error === null
+        : true;
 
   async function launch() {
-    setSubmitting(true);
     setError(null);
+    if (performance.error) {
+      setError(performance.error);
+      return;
+    }
     try {
-      const { run_id } = await api.startRun({
-        offer: offer.trim(),
-        batch,
-        platform,
-        creator_prompt: creatorPrompt.trim() || null,
-        video_prompt: videoPrompt.trim() || null,
-        edit_concepts: editConcepts,
-        approve_creators: approveCreators,
+      const { run_id } = await startRun.mutateAsync({
+        campaign: {
+          offer: offer.trim(),
+          audience: audience.trim(),
+          facts_restrictions: optional(factsRestrictions),
+          creator_direction: optional(creatorDirection),
+          video_direction: optional(videoDirection),
+          platform,
+          objective,
+          batch_size: batch,
+          performance: performance.value,
+        },
       });
       navigate(`/campaigns/${run_id}`);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-      setSubmitting(false);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
     }
   }
 
@@ -53,38 +85,36 @@ export function CreateWizard() {
       <div className="mx-auto max-w-3xl">
         <div className="mb-gutter flex items-start justify-between gap-4">
           <div className="min-w-0">
-            <h1 className="hm-page-title mb-1 text-primary">
-              Create New Campaign
-            </h1>
+            <h1 className="hm-page-title mb-1 text-primary">Nova campanha</h1>
             <p className="font-body-md text-body-md text-on-surface-variant">
-              Set the production brief, then choose where people review the work.
+              Informe o contexto comercial. Conceitos, roteiros e dois creators serão preparados para uma única revisão.
             </p>
           </div>
           <button
             type="button"
             onClick={() => navigate("/")}
             className="inline-flex min-h-11 items-center gap-2 whitespace-nowrap rounded-lg px-2 font-label-md text-label-md text-on-surface-variant hover:text-primary"
+            aria-label="Sair da configuração"
           >
-            <Icon name="close" size={18} /> <span className="hidden sm:inline">Exit setup</span>
+            <Icon name="close" size={18} />
           </button>
         </div>
 
-        {/* Stepper */}
-        <ol className="mb-8 grid grid-cols-4 gap-2" aria-label="Campaign setup progress">
-          {STEPS.map((s, i) => (
-            <li key={s} className="min-w-0">
+        <ol className="mb-8 grid grid-cols-3 gap-2" aria-label="Etapas da configuração">
+          {STEPS.map((name, index) => (
+            <li key={name} className="min-w-0">
               <div
                 className={`flex min-h-11 items-center gap-2 rounded-lg px-2 font-label-sm text-label-sm font-bold ${
-                  i <= step
+                  index <= step
                     ? "bg-primary text-on-primary"
                     : "bg-surface-container-high text-on-surface-variant"
                 }`}
-                aria-current={i === step ? "step" : undefined}
+                aria-current={index === step ? "step" : undefined}
               >
-                <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-surface-container-lowest text-primary">
-                  {i < step ? <Icon name="check" size={16} /> : i + 1}
+                <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-surface-container-lowest text-primary">
+                  {index < step ? <Icon name="check" size={16} /> : index + 1}
                 </span>
-                <span className="hidden truncate sm:block">{s}</span>
+                <span className="truncate">{name}</span>
               </div>
             </li>
           ))}
@@ -94,156 +124,176 @@ export function CreateWizard() {
           {step === 0 && (
             <div className="flex flex-col gap-5">
               <div>
-                <label className={label} htmlFor="offer">Product / Offer *</label>
-                <input
+                <label className={label} htmlFor="offer">Produto e oferta *</label>
+                <textarea
                   id="offer"
                   className={field}
-                  placeholder="e.g., Serum X"
+                  rows={4}
+                  placeholder="O que está sendo vendido, preço ou condição da oferta e benefício principal comprovado."
                   value={offer}
-                  onChange={(e) => setOffer(e.target.value)}
+                  onChange={(event) => setOffer(event.target.value)}
                   aria-required="true"
-                  aria-invalid={Boolean(error && !offer.trim())}
                 />
-                <p className="mt-2 min-h-[1lh] font-label-sm text-label-sm text-on-surface-variant">
-                  This exact offer becomes the shared context for concepts, scripts, creators and video.
-                </p>
+              </div>
+              <div>
+                <label className={label} htmlFor="audience">Público *</label>
+                <textarea
+                  id="audience"
+                  className={field}
+                  rows={4}
+                  placeholder="Quem deve comprar, qual problema enfrenta e em qual situação usaria o produto."
+                  value={audience}
+                  onChange={(event) => setAudience(event.target.value)}
+                  aria-required="true"
+                />
+              </div>
+              <div>
+                <label className={label} htmlFor="facts">Fatos e restrições</label>
+                <textarea
+                  id="facts"
+                  className={field}
+                  rows={4}
+                  placeholder="Fatos comprovados, claims permitidos, requisitos legais e assuntos que não podem aparecer."
+                  value={factsRestrictions}
+                  onChange={(event) => setFactsRestrictions(event.target.value)}
+                />
               </div>
             </div>
           )}
 
           {step === 1 && (
             <div className="flex flex-col gap-5">
-              <div className="flex items-center gap-2 text-ai-processing">
-                <Icon name="auto_awesome" />
-                <span className="font-headline-md text-headline-md">Creative Direction</span>
-              </div>
               <div>
-                <label className={label} htmlFor="creator-prompt">Creator guidance</label>
+                <label className={label} htmlFor="creator-direction">Direção dos creators</label>
                 <textarea
-                  id="creator-prompt"
+                  id="creator-direction"
                   className={field}
                   rows={4}
-                  placeholder="Look, energy, wardrobe and setting…"
-                  value={creatorPrompt}
-                  onChange={(e) => setCreatorPrompt(e.target.value)}
+                  placeholder="Perfil, aparência, voz, energia, figurino ou cenário desejado."
+                  value={creatorDirection}
+                  onChange={(event) => setCreatorDirection(event.target.value)}
                 />
               </div>
               <div>
-                <label className={label} htmlFor="video-prompt">Video guidance</label>
+                <label className={label} htmlFor="video-direction">Direção dos vídeos</label>
                 <textarea
-                  id="video-prompt"
+                  id="video-direction"
                   className={field}
                   rows={4}
-                  placeholder="Framing, camera motion and mood…"
-                  value={videoPrompt}
-                  onChange={(e) => setVideoPrompt(e.target.value)}
+                  placeholder="Demonstração, enquadramento, ritmo, cenário e referências visuais."
+                  value={videoDirection}
+                  onChange={(event) => setVideoDirection(event.target.value)}
                 />
               </div>
-              <p className="font-label-sm text-label-sm text-on-surface-variant">
-                Both fields are optional. Leave them blank to let the engine derive direction from the offer.
-              </p>
+              <div>
+                <label className={label} htmlFor="performance">Performance anterior em JSON</label>
+                <textarea
+                  id="performance"
+                  className={field}
+                  rows={5}
+                  placeholder={'{"metrics":[{"creative_id":"ad-01","impressions":1000,"clicks":80,"conversions":9,"spend_usd":42}]}'}
+                  value={performanceJson}
+                  onChange={(event) => setPerformanceJson(event.target.value)}
+                  aria-invalid={Boolean(performance.error)}
+                />
+                {performance.error && (
+                  <p role="alert" className="mt-2 font-label-sm text-label-sm text-error">
+                    {performance.error}
+                  </p>
+                )}
+              </div>
+              <div className="grid gap-4 sm:grid-cols-3">
+                <div>
+                  <label className={label} htmlFor="platform">Plataforma</label>
+                  <select
+                    id="platform"
+                    className={field}
+                    value={platform}
+                    onChange={(event) =>
+                      setPlatform(event.target.value as (typeof PLATFORMS)[number])
+                    }
+                  >
+                    {PLATFORMS.map((value) => <option key={value}>{value}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label className={label} htmlFor="objective">Objetivo</label>
+                  <select
+                    id="objective"
+                    className={field}
+                    value={objective}
+                    onChange={(event) =>
+                      setObjective(event.target.value as (typeof OBJECTIVES)[number])
+                    }
+                  >
+                    {OBJECTIVES.map((value) => <option key={value}>{value}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label className={label} htmlFor="batch-size">Pacotes</label>
+                  <input
+                    id="batch-size"
+                    type="number"
+                    min={1}
+                    max={48}
+                    className={field}
+                    value={batch}
+                    onChange={(event) =>
+                      setBatch(Math.min(48, Math.max(1, Number(event.target.value) || 1)))
+                    }
+                  />
+                </div>
+              </div>
             </div>
           )}
 
           {step === 2 && (
-            <div className="flex flex-col gap-5">
-              <div>
-                <label className={label} htmlFor="batch-size">Batch size</label>
-                <input
-                  id="batch-size"
-                  type="number"
-                  min={1}
-                  max={48}
-                  className={field}
-                  value={batch}
-                  onChange={(e) => setBatch(Math.max(1, Number(e.target.value) || 1))}
-                />
-                <p className="mt-1 font-label-sm text-label-sm text-on-surface-variant">
-                  Number of concepts the pipeline will fan out in parallel.
-                </p>
-              </div>
-              <div>
-                <label className={label} htmlFor="platform">Platform</label>
-                <select
-                  id="platform"
-                  className={field}
-                  value={platform}
-                  onChange={(e) => setPlatform(e.target.value as (typeof PLATFORMS)[number])}
-                >
-                  {PLATFORMS.map((p) => (
-                    <option key={p} value={p}>
-                      {p}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <label className="flex min-h-11 items-start gap-3 rounded-lg border border-surface-border p-3 cursor-pointer">
-                <input
-                  type="checkbox"
-                  className="mt-0.5 rounded border-surface-border text-primary focus:ring-primary"
-                  checked={editConcepts}
-                  onChange={(e) => setEditConcepts(e.target.checked)}
-                />
-                <span>
-                  <span className="block font-body-md text-body-md text-primary">Review concepts before scripts</span>
-                  <span className="block font-label-sm text-label-sm text-on-surface-variant">Pause after concepts so a person can edit or exclude them.</span>
-                </span>
-              </label>
-              <label className="flex min-h-11 items-start gap-3 rounded-lg border border-surface-border p-3 cursor-pointer">
-                <input
-                  type="checkbox"
-                  className="mt-0.5 rounded border-surface-border text-primary focus:ring-primary"
-                  checked={approveCreators}
-                  onChange={(e) => setApproveCreators(e.target.checked)}
-                />
-                <span>
-                  <span className="block font-body-md text-body-md text-primary">Review creators before videos</span>
-                  <span className="block font-label-sm text-label-sm text-on-surface-variant">Pause at the roster gate before the video stage starts.</span>
-                </span>
-              </label>
-            </div>
-          )}
-
-          {step === 3 && (
             <div className="flex flex-col gap-3 font-body-md text-body-md">
-              <div className="flex items-center gap-2 text-primary mb-2">
+              <div className="mb-2 flex items-center gap-2 text-primary">
                 <Icon name="fact_check" />
-                <span className="font-headline-md text-headline-md">Review &amp; Launch</span>
+                <span className="font-headline-md text-headline-md">Confirmar execução</span>
               </div>
               {[
-                ["Product / Offer", offer || "—"],
-                ["Platform", platform],
-                ["Batch size", String(batch)],
-                ["Concept review", editConcepts ? "Yes (human gate)" : "No (continue automatically)"],
-                ["Creator approval", approveCreators ? "Yes (human gate)" : "No (continue automatically)"],
-                ["Creator guidance", creatorPrompt.trim() ? "Provided" : "Derived by engine"],
-                ["Video guidance", videoPrompt.trim() ? "Provided" : "Derived by engine"],
-              ].map(([k, v]) => (
-                <div key={k} className="flex justify-between border-b border-surface-border py-2">
-                  <span className="text-on-surface-variant">{k}</span>
-                  <span className="text-primary font-medium">{v}</span>
+                ["Produto e oferta", offer],
+                ["Público", audience],
+                ["Plataforma", platform],
+                ["Objetivo", objective],
+                ["Pacotes criativos", String(batch)],
+                ["Creators novos", "2"],
+                ["Próxima ação", "Revisar creators, conceitos e roteiros juntos"],
+              ].map(([name, value]) => (
+                <div key={name} className="flex gap-4 border-b border-surface-border py-2">
+                  <span className="min-w-36 text-on-surface-variant">{name}</span>
+                  <span className="min-w-0 break-words font-medium text-primary">{value}</span>
                 </div>
               ))}
-              {error && <p role="alert" className="mt-2 font-label-md text-label-md text-error">{error}</p>}
+              {error && (
+                <p role="alert" className="mt-2 font-label-md text-label-md text-error">
+                  {error}
+                </p>
+              )}
             </div>
           )}
         </Card>
 
-        {/* Nav */}
-        <div className="flex items-center justify-between mt-6">
+        <div className="mt-6 flex items-center justify-between">
           <Button
             variant="ghost"
-            onClick={() => (step === 0 ? navigate("/") : setStep((s) => s - 1))}
+            onClick={() => (step === 0 ? navigate("/") : setStep((value) => value - 1))}
           >
-            {step === 0 ? "Cancel" : "Back"}
+            {step === 0 ? "Cancelar" : "Voltar"}
           </Button>
           {step < STEPS.length - 1 ? (
-            <Button icon="arrow_forward" disabled={!canContinue} onClick={() => setStep((s) => s + 1)}>
-              Continue to {STEPS[step + 1]}
+            <Button
+              icon="arrow_forward"
+              disabled={!canContinue}
+              onClick={() => setStep((value) => value + 1)}
+            >
+              Continuar
             </Button>
           ) : (
-            <Button icon="rocket_launch" loading={submitting} onClick={launch}>
-              {submitting ? "Launching" : "Launch Campaign"}
+            <Button icon="rocket_launch" loading={startRun.isPending} onClick={launch}>
+              {startRun.isPending ? "Iniciando" : "Iniciar campanha"}
             </Button>
           )}
         </div>

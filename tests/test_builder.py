@@ -62,28 +62,31 @@ def test_top_graph_has_expected_nodes(pipeline_cfg):
     app = build_graph(pipeline_cfg)
     nodes = set(app.get_graph().nodes)
     for n in (
-        "concepts", "scripts", "concept_review", "roster", "approval",
+        "concepts", "scripts", "creator_profiles", "roster", "review",
         "process_item", "feedback",
     ):
         assert n in nodes
+    assert "persona" not in nodes
+    assert "concept_review" not in nodes
+    assert "approval" not in nodes
 
 
 def test_top_graph_orders_scripts_and_review_before_creator(pipeline_cfg):
     app = build_graph(pipeline_cfg)
     edges = {(e.source, e.target) for e in app.get_graph().edges}
-    # concepts -> scripts -> concept_review (gate) -> roster (creator) -> approval
+    # One creative-plan path, followed by one combined review.
     assert ("concepts", "scripts") in edges
-    assert ("scripts", "concept_review") in edges
-    assert ("concept_review", "roster") in edges
-    assert ("roster", "approval") in edges
+    assert ("scripts", "creator_profiles") in edges
+    assert ("creator_profiles", "roster") in edges
+    assert ("roster", "review") in edges
 
 
-def test_top_graph_routes_approval_via_conditional_send(pipeline_cfg):
+def test_top_graph_routes_review_via_conditional_send(pipeline_cfg):
     app = build_graph(pipeline_cfg)
     edges = app.get_graph().edges
     matching = [
         edge for edge in edges
-        if edge.source == "approval" and edge.target == "process_item"
+        if edge.source == "review" and edge.target == "process_item"
     ]
     assert len(matching) == 1
     assert matching[0].conditional is True

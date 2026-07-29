@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 from pathlib import Path
 from typing import Any
 
@@ -12,7 +13,7 @@ _EXECUTORS = {"tool", "agent"}
 # Stages que podem rodar em modo agent. ``video`` entrou no D33 (agent escolhe a diretiva
 # de refino da take; tier/attempt seguem server-authoritative). roster/assembly/upscale
 # continuam fora até terem contrato de artefato testado.
-_AGENT_STAGES = {"persona", "concepts", "scripts", "video"}
+_AGENT_STAGES = {"concepts", "scripts", "creator_profiles"}
 
 
 def is_agent_stage_allowed(stage: str) -> bool:
@@ -38,6 +39,9 @@ class StageExecutionSpec:
     target_agent: str | None = None
     system_prompt_path: str | None = None
     system_prompt: str | None = None
+    prompt_version: str | None = None
+    prompt_hash: str | None = None
+    schema_version: str | None = None
     agent_enabled: bool = False
 
 
@@ -59,8 +63,10 @@ class AgentCatalog:
                     "tools": list(spec.tools),
                     "target_model": spec.target_model,
                     "target_agent": spec.target_agent,
-                    "system_prompt_path": spec.system_prompt_path,
                     "has_system_prompt": bool(spec.system_prompt and spec.system_prompt.strip()),
+                    "prompt_version": spec.prompt_version,
+                    "prompt_hash": spec.prompt_hash,
+                    "schema_version": spec.schema_version,
                     "agent_enabled": spec.agent_enabled,
                 }
                 for spec in self.stages
@@ -165,6 +171,11 @@ def build_agent_catalog(
             prompt_base,
             override.get("system_prompt_path", base.system_prompt_path),
         )
+        prompt_hash = (
+            hashlib.sha256(system_prompt.encode()).hexdigest()
+            if system_prompt is not None
+            else None
+        )
 
         by_stage[stage_name] = StageExecutionSpec(
             stage=stage_name,
@@ -174,6 +185,9 @@ def build_agent_catalog(
             target_agent=override.get("target_agent", base.target_agent),
             system_prompt_path=system_prompt_path,
             system_prompt=system_prompt,
+            prompt_version=override.get("prompt_version"),
+            prompt_hash=prompt_hash,
+            schema_version=override.get("schema_version"),
             agent_enabled=agent_enabled,
         )
 

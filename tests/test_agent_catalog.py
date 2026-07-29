@@ -57,6 +57,8 @@ def test_agents_yaml_null_stages_uses_default_catalog(tmp_path):
 
 
 def test_agent_catalog_serializes_to_stable_mapping(tmp_path):
+    import hashlib
+
     from orchestrator.config import load_agent_catalog
 
     prompt = tmp_path / "prompts" / "agents"
@@ -77,15 +79,22 @@ def test_agent_catalog_serializes_to_stable_mapping(tmp_path):
 
     data = load_agent_catalog(str(tmp_path)).as_dict()
 
-    assert data["stages"]["concepts"] == {
+    stage = data["stages"]["concepts"]
+    assert stage == {
         "executor": "agent",
         "tools": ["generate_concepts"],
         "target_model": "claude-sonnet-4",
         "target_agent": "concept-agent",
-        "system_prompt_path": "prompts/agents/concepts.md",
         "has_system_prompt": True,
+        "prompt_version": None,
+        "prompt_hash": hashlib.sha256(
+            b"Shared guardrails.\n\nConcept guardrails."
+        ).hexdigest(),
+        "schema_version": None,
         "agent_enabled": True,
     }
+    assert "system_prompt" not in stage
+    assert "system_prompt_path" not in stage
 
 
 def test_agents_yaml_resolves_stage_system_prompt_from_files(tmp_path):
@@ -172,21 +181,34 @@ def test_project_config_dirs_ship_valid_agents_yaml(config_dir):
     assert (Path(config_dir) / "agents.yaml").exists()
     catalog = load_agent_catalog(config_dir)
 
-    # As tools por stage sao as mesmas nos dois perfis; o executor difere:
-    # o perfil live (`config`) ativa o loop agentic nos stages LLM-only (Fase 0),
-    # enquanto o perfil offline (`config-mock`) permanece em modo tool.
+    # Only the three bounded creative stages receive hidden phase prompts.
     assert catalog.stage("concepts").tools == ("generate_concepts",)
     assert catalog.stage("scripts").tools == ("write_script",)
+    assert catalog.stage("creator_profiles").tools == ("design_creator_roster",)
     assert catalog.stage("persona").tools == ("write_persona",)
     assert catalog.stage("video").tools == ("generate_clip",)
 
     expected_executor = "agent" if config_dir == "config" else "tool"
-    for stage in ("persona", "concepts", "scripts", "video"):
+    prompt_files = {
+        "concepts": "concepts.md",
+        "scripts": "scripts.md",
+        "creator_profiles": "creators.md",
+    }
+    for stage, filename in prompt_files.items():
         spec = catalog.stage(stage)
-        assert spec.system_prompt_path == f"prompts/agents/{stage}.md"
+        assert spec.system_prompt_path == f"prompts/agents/{filename}"
         assert spec.system_prompt
         assert spec.executor == expected_executor
         assert spec.agent_enabled is (expected_executor == "agent")
+        assert spec.prompt_version
+        assert spec.prompt_hash
+        assert spec.schema_version == "creative-v2"
+    for stage in ("persona", "video"):
+        spec = catalog.stage(stage)
+        assert spec.system_prompt_path is None
+        assert spec.system_prompt is None
+        assert spec.executor == "tool"
+        assert spec.agent_enabled is False
 
 
 def test_runner_config_includes_agent_catalog(pipeline_cfg):
@@ -382,14 +404,17 @@ def test_agent_catalog_stage_lookup_rejects_unknown_stage():
         default_agent_catalog().stage("unknown")
 
 
-def test_video_is_an_allowed_agent_stage():
-    """D33: video entra no gate de agent execution; a demais mídia segue fora."""
+def test_only_bounded_creative_stages_are_allowed_agents():
     from orchestrator.agent_catalog import (
         agent_stage_not_allowed_message,
         is_agent_stage_allowed,
     )
 
-    assert is_agent_stage_allowed("video") is True
-    for stage in ("roster", "assembly", "upscale", "qc"):
+    for stage in ("concepts", "scripts", "creator_profiles"):
+        assert is_agent_stage_allowed(stage) is True
+    for stage in ("persona", "video", "roster", "assembly", "upscale", "qc"):
         assert is_agent_stage_allowed(stage) is False
-    assert "video" in agent_stage_not_allowed_message()
+    message = agent_stage_not_allowed_message()
+    assert "concepts" in message
+    assert "creator_profiles" in message
+    assert "scripts" in message

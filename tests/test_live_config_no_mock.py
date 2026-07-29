@@ -25,32 +25,29 @@ def test_live_config_disables_replicate_mock_fallback():
     assert pipeline["video"]["allow_mock_fallback"] is False
 
 
-def test_live_config_activates_agent_mode_on_llm_and_video_stages():
-    """O perfil live roda agentic em concepts/scripts (Fase 0) e video (D33).
-
-    roster/qc/assembly/upscale seguem em modo tool: agentificá-los exige contrato de
-    artefato próprio, testado, e um ADR próprio.
-    """
+def test_live_config_activates_agent_mode_only_on_creative_stages():
+    """Media/QC/assembly remain deterministic adapters outside prompt authority."""
     catalog = load_agent_catalog("config")
 
-    for stage in ("concepts", "scripts", "video"):
+    for stage in ("concepts", "scripts", "creator_profiles"):
         spec = catalog.stage(stage)
         assert spec.executor == "agent", f"{stage} deveria rodar em modo agent"
         assert spec.agent_enabled is True, f"{stage} precisa de agent_enabled: true"
+        assert spec.system_prompt
+        assert spec.prompt_hash
+        assert spec.schema_version == "creative-v2"
 
-    for stage in ("roster", "qc", "assembly", "upscale"):
+    for stage in ("persona", "video", "roster", "qc", "assembly", "upscale"):
         spec = catalog.stage(stage)
         assert spec.executor == "tool", f"{stage} deve permanecer em modo tool"
         assert spec.agent_enabled is False
 
 
-def test_live_config_caps_the_video_agent_budget():
-    """Vídeo custa por take: budget e cap de calls menores que o global (D33).
-
-    Sem o cap de *calls*, ``max_steps`` não segura o custo — um step pode pedir N takes.
-    """
+def test_live_config_caps_each_creative_agent_to_one_submission():
     pipeline = load_pipeline("config")
     agent = pipeline["agent"]
 
-    assert agent["max_steps_by_stage"]["video"] < agent["max_steps"]
-    assert agent["max_tool_calls_by_stage"]["video"] == 2
+    assert agent["max_steps"] == 2
+    assert agent["max_tool_calls"] == 1
+    assert "max_steps_by_stage" not in agent
+    assert "max_tool_calls_by_stage" not in agent

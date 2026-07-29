@@ -27,6 +27,11 @@ export interface Creator {
   run_id?: string;
   offer?: string | null;
   status?: string;
+  archetype?: string;
+  visual_brief?: string;
+  voice_brief?: string;
+  performance_style?: string;
+  exclusions?: string[];
 }
 
 export interface Item {
@@ -56,12 +61,55 @@ export interface RunSummary {
   winning_styles: unknown[];
 }
 
-export type RunPhaseSnapshot = "idle" | "running" | "editing" | "awaiting" | "done" | "error";
+export type RunPhaseSnapshot = "idle" | "running" | "editing" | "awaiting" | "review" | "done" | "error" | "cancelled";
+export type RunExecutionStatus = "queued" | "running" | "waiting_for_user" | "completed" | "failed" | "cancelled";
+export type ProgressStatus = "pending" | "running" | "waiting" | "completed" | "failed";
+
+export interface StageProgress {
+  id: string;
+  label: string;
+  parent_id: string | null;
+  status: ProgressStatus;
+  completed_units: number;
+  active_units: number;
+  failed_units: number;
+  total_units: number;
+  updated_at: string | null;
+}
+
+export interface ItemProgress {
+  item_id: string;
+  stage_id: string;
+  status: "running" | "completed" | "dropped" | "failed";
+  attempt: number;
+  updated_at: string | null;
+}
+
+export interface RunProgress {
+  execution_status: RunExecutionStatus;
+  stages: StageProgress[];
+  items: ItemProgress[];
+  active_stage_ids: string[];
+  updated_at: string | null;
+}
+
+export interface RunActivity {
+  event_id: string;
+  kind: "run" | "stage" | "item" | "gate" | "error";
+  status: string;
+  label: string;
+  occurred_at: string | null;
+  stage_id: string | null;
+  item_id: string | null;
+  attempt: number | null;
+  detail: string | null;
+}
 
 export interface RunsIndex {
   runs: string[];
   active: string[];
   errored: string[];
+  cancelled: string[];
 }
 
 export interface CreatorsIndex {
@@ -102,10 +150,54 @@ export interface StartRunBody {
   edit_concepts?: boolean;
 }
 
+export interface PerformanceMetric {
+  creative_id: string;
+  impressions?: number;
+  clicks?: number;
+  conversions?: number;
+  spend_usd?: number;
+}
+
+export interface PerformanceSnapshot {
+  metrics: PerformanceMetric[];
+  notes?: string | null;
+}
+
+export interface CampaignInput {
+  offer: string;
+  audience: string;
+  facts_restrictions?: string | null;
+  creator_direction?: string | null;
+  video_direction?: string | null;
+  platform?: "tiktok" | "instagram" | "youtube" | "facebook" | "reels";
+  objective?: "conversion" | "awareness" | "consideration";
+  batch_size?: number;
+  performance?: PerformanceSnapshot | null;
+}
+
+export interface StartRunV2Body {
+  campaign: CampaignInput;
+  config_dir?: string | null;
+}
+
+export interface RetryRunResponse {
+  run_id: string;
+  source_run_id: string;
+  job_id: string;
+}
+
 export interface EditableConcept {
   id: string;
   script?: string;
   [k: string]: unknown;
+}
+
+export type GateType = "edit_concepts" | "approve_creators" | "review_creative_plan";
+
+export interface GateRef {
+  gate_id: string;
+  version: number;
+  gate_type: GateType;
 }
 
 export interface RunDetail {
@@ -114,17 +206,47 @@ export interface RunDetail {
   items: Item[];
   edit_concepts: EditableConcept[];
   awaiting: Creator[];
+  review: {
+    concepts: EditableConcept[];
+    creators: Creator[];
+  } | null;
+  gate: GateRef | null;
   summary: RunSummary | null;
+  progress?: RunProgress;
+  activity?: RunActivity[];
   error?: string | null;
 }
 
-export type StreamEvent =
+export interface StreamEventMetadata {
+  event_id?: string;
+  occurred_at?: string;
+}
+
+export type StreamEvent = StreamEventMetadata & (
   | { type: "run_start"; run_id: string; offer: string; batch: number }
   | { type: "node_start"; node: string; label: string }
   | { type: "node_end"; node: string; label: string; item?: Partial<Item> }
+  | {
+      type: "progress_event";
+      operation_id: string;
+      stage_id: string;
+      stage_label: string;
+      node: string;
+      status: "started" | "progress" | "completed" | "waiting" | "retrying" | "failed";
+      item_id?: string;
+      attempt?: number;
+      completed_units?: number;
+      total_units?: number;
+    }
   | { type: "item_update"; run_id: string; node: string; label: string; item: Item }
-  | { type: "awaiting_concept_edit"; run_id: string; concepts: EditableConcept[] }
-  | { type: "awaiting_approval"; creators: Creator[] }
+  | ({ type: "awaiting_concept_edit"; run_id: string; concepts: EditableConcept[] } & Partial<GateRef>)
+  | ({ type: "awaiting_approval"; run_id?: string; creators: Creator[] } & Partial<GateRef>)
+  | ({
+      type: "awaiting_review";
+      run_id: string;
+      concepts: EditableConcept[];
+      creators: Creator[];
+    } & Partial<GateRef>)
   | { type: "creator_update"; run_id: string; creator: Creator }
   | { type: "creator_start"; creator_id: string }
   | { type: "creator_ready"; creator: Creator }
@@ -133,4 +255,5 @@ export type StreamEvent =
   | { type: "llm_end"; [k: string]: unknown }
   | { type: "run_end"; run_id: string; summary: RunSummary }
   | { type: "error"; message: string }
-  | { type: "stream_end" };
+  | { type: "stream_end" }
+);

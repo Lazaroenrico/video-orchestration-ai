@@ -132,6 +132,15 @@ async def test_healthz_is_ok_without_touching_config() -> None:
     assert await web_server.healthz() == {"status": "ok"}
 
 
+def test_healthz_accepts_head_for_liveness_probes() -> None:
+    methods = set()
+    for route in web_server.app.routes:
+        if getattr(route, "path", None) == "/healthz":
+            methods.update(getattr(route, "methods", set()) or set())
+
+    assert "HEAD" in methods
+
+
 async def test_app_lifespan_opens_shared_auth_database_only_in_access_mode(
     monkeypatch,
 ) -> None:

@@ -28,6 +28,7 @@ from orchestrator.adapters._agent_loop import (
     AgentRunResult,
     ToolCall,
     run_agent_loop,
+    serialize_agent_inputs,
     summarize_tool_result,
 )
 from orchestrator.adapters.base import StageToolRunner
@@ -360,6 +361,8 @@ class AnthropicLLMAdapter:
         system_prompt: Optional[str] = None,
         max_steps: int = DEFAULT_MAX_STEPS,
         max_tool_calls: Optional[int] = None,
+        require_tool_call: bool = False,
+        stop_after_success: bool = False,
     ) -> AgentRunResult:
         """Loop de tool-calling real, com o modelo Claude via SDK.
 
@@ -382,6 +385,8 @@ class AnthropicLLMAdapter:
             max_steps=max_steps,
             tool_schemas=tool_call_schemas(allowed_tools),
             max_tool_calls=max_tool_calls,
+            require_tool_call=require_tool_call,
+            stop_after_success=stop_after_success,
         )
         add_trace_metadata(
             agent_backend="anthropic_gateway",
@@ -448,10 +453,7 @@ class _AnthropicAgentBrain:
         return [
             {
                 "role": "user",
-                "content": (
-                    f"Stage inputs (fixed): {json.dumps(inputs, default=str)}\n"
-                    "Begin by calling the tool to produce the initial draft."
-                ),
+                "content": serialize_agent_inputs(inputs),
             }
         ]
 

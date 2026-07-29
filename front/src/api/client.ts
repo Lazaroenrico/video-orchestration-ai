@@ -5,10 +5,13 @@ import type {
   PromptsIndex,
   PromptTemplate,
   EditableConcept,
+  GateRef,
+  RetryRunResponse,
   RunDetail,
   RunSummary,
   RunsIndex,
   StartRunBody,
+  StartRunV2Body,
 } from "./contracts";
 import { apiUrl } from "./urls";
 
@@ -41,6 +44,33 @@ export const api = {
       method: "POST",
       body: JSON.stringify(body),
     }),
+  startRunV2: (body: StartRunV2Body) =>
+    req<{ run_id: string; job_id?: string }>("/api/v2/runs", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  reviewRunV2: (
+    runId: string,
+    body: {
+      action: "approve" | "regenerate";
+      concepts?: EditableConcept[];
+      creators?: Creator[];
+      target?: "concepts" | "scripts" | "creators";
+      ids?: string[];
+      feedback?: string;
+      gate_id?: string;
+      version?: number;
+      gate_type?: "review_creative_plan";
+    },
+  ) =>
+    req<{ ok: boolean; job_id?: string }>(
+      `/api/v2/runs/${encodeURIComponent(runId)}/review`,
+      { method: "POST", body: JSON.stringify(body) },
+    ),
+  retryRun: (runId: string) =>
+    req<RetryRunResponse>(`/api/run/${encodeURIComponent(runId)}/retry`, {
+      method: "POST",
+    }),
   getCreators: () => req<CreatorsIndex>("/api/creators"),
   rerollVoice: (runId: string, creatorId: string) =>
     req<{ ok: boolean; creator: Creator }>(
@@ -49,17 +79,23 @@ export const api = {
       )}/reroll-voice`,
       { method: "POST" }
     ),
-  approve: (runId: string, approved: string[]) =>
+  approve: (runId: string, approved: string[], gate?: GateRef | null) =>
     req<{ ok: boolean }>(`/api/approve/${encodeURIComponent(runId)}`, {
       method: "POST",
-      body: JSON.stringify({ approved }),
+      body: JSON.stringify({
+        approved,
+        ...(gate ? { gate_id: gate.gate_id, version: gate.version } : {}),
+      }),
     }),
-  submitConcepts: (runId: string, concepts: EditableConcept[]) =>
+  submitConcepts: (runId: string, concepts: EditableConcept[], gate?: GateRef | null) =>
     req<{ ok: boolean; count: number }>(
       `/api/approve/${encodeURIComponent(runId)}/concepts`,
       {
         method: "POST",
-        body: JSON.stringify({ concepts }),
+        body: JSON.stringify({
+          concepts,
+          ...(gate ? { gate_id: gate.gate_id, version: gate.version } : {}),
+        }),
       }
     ),
   getIntegrations: () => req<IntegrationsIndex>("/api/integrations"),

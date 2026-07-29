@@ -9,7 +9,7 @@ import { RunSelect } from "../components/RunSelect";
 import { EmptyState, ErrorState, Loading } from "../components/States";
 import { useRunSelection } from "../api/useRunSelection";
 import { useRunStream } from "../api/useRunStream";
-import { api } from "../api/client";
+import { useSubmitConceptsMutation } from "../api/queries";
 import type { EditableConcept, Item } from "../types";
 
 function conceptField(it: Item, key: string): string | null {
@@ -51,8 +51,8 @@ export function Concepts() {
   const items = Object.values(run.items).filter((i) => i.concept || i.script);
   const [pick, setPick] = useState<string | null>(null);
   const [drafts, setDrafts] = useState<ConceptDraft[]>([]);
-  const [saving, setSaving] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
+  const submitConcepts = useSubmitConceptsMutation();
   const editKey = useMemo(
     () => run.editConcepts.map((c) => String(c.id)).join("|"),
     [run.editConcepts]
@@ -95,17 +95,15 @@ export function Concepts() {
 
   const submitDrafts = async () => {
     if (!selected) return;
-    setSaving(true);
     setSubmitError(null);
     try {
-      await api.submitConcepts(
-        selected,
-        drafts.filter((draft) => draft.included).map((draft) => draft.concept)
-      );
+      await submitConcepts.mutateAsync({
+        runId: selected,
+        concepts: drafts.filter((draft) => draft.included).map((draft) => draft.concept),
+        gate: run.gate,
+      });
     } catch (err) {
       setSubmitError(err instanceof Error ? err.message : "Could not save concepts");
-    } finally {
-      setSaving(false);
     }
   };
 
@@ -236,8 +234,8 @@ export function Concepts() {
                     <p className="font-body-md text-body-md text-on-surface-variant">
                       {drafts.filter((draft) => draft.included).length} of {drafts.length} concepts selected
                     </p>
-                    <Button icon="check" loading={saving} onClick={submitDrafts}>
-                      {saving ? "Saving" : "Save & Continue"}
+                    <Button icon="check" loading={submitConcepts.isPending} onClick={submitDrafts}>
+                      {submitConcepts.isPending ? "Saving" : "Save & Continue"}
                     </Button>
                   </div>
                 </Card>

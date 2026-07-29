@@ -3,8 +3,7 @@ import { Card, SectionTitle } from "../components/Card";
 import { Icon } from "../components/Icon";
 import { Button } from "../components/Button";
 import { useNavigate } from "react-router";
-import { useAsync } from "../api/useAsync";
-import { api } from "../api/client";
+import { useCreators, usePrompts } from "../api/queries";
 
 function StoreRow({ label, path, exists }: { label: string; path?: string; exists?: boolean }) {
   return (
@@ -28,8 +27,8 @@ function StoreRow({ label, path, exists }: { label: string; path?: string; exist
 }
 
 export function Settings() {
-  const prompts = useAsync(() => api.getPrompts(), []);
-  const creators = useAsync(() => api.getCreators(), []);
+  const prompts = usePrompts();
+  const creators = useCreators();
   const navigate = useNavigate();
 
   return (
@@ -57,7 +56,7 @@ export function Settings() {
             {[
               ["Default platform", "TikTok"],
               ["Default batch size", "6"],
-              ["Human approval gate", "Enabled"],
+              ["Creative review", "One combined review"],
               ["Dry-run mode", "Config-driven (providers.yaml)"],
             ].map(([k, v]) => (
               <div key={k} className="flex items-center justify-between py-3 border-b border-surface-border last:border-0">

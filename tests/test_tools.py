@@ -378,6 +378,7 @@ def test_tool_registry_lists_static_tool_specs():
         "write_persona",
         "generate_concepts",
         "write_script",
+        "design_creator_roster",
         "build_creator",
         "generate_clip",
         "qc_check",
@@ -446,31 +447,35 @@ def test_tool_registry_lookup_by_name_and_stage():
         get_tool_spec("unknown_tool")
 
 
-def test_tool_registry_exposes_agent_parameter_schemas():
-    """Cada ToolSpec declara um JSON schema dos params controláveis pelo agent.
-
-    Os stages agentic (concepts/scripts na Fase 1; video no D33) expõem ``revision`` — a
-    única alavanca do modelo. offer/n/seed (texto) e item_id/tier/seconds/attempt (vídeo)
-    ficam server-authoritative, injetados pelo run_tool. As tools ainda não agentic
-    declaram schema vazio.
-    """
+def test_tool_registry_exposes_terminal_creative_submission_schemas():
     from orchestrator.tools.registry import TOOL_REGISTRY, get_tool_spec
 
     for spec in TOOL_REGISTRY:
         assert isinstance(spec.parameters, dict)
         assert spec.parameters.get("type", "object") == "object"
 
-    for name in ("write_persona", "generate_concepts", "write_script", "generate_clip"):
-        params = get_tool_spec(name).parameters
-        assert "revision" in params["properties"]
-        assert params["properties"]["revision"]["type"] == "string"
-        # nada de params obrigatórios: o modelo pode chamar sem revisão (draft inicial).
-        assert params.get("required", []) == []
-        # o modelo não pode inventar params fora do schema (ex.: tier).
+    creative = {
+        "generate_concepts": "proposals",
+        "write_script": "draft",
+        "design_creator_roster": "creators",
+    }
+    for name, required_field in creative.items():
+        spec = get_tool_spec(name)
+        params = spec.parameters
+        assert spec.terminal_submission is True
+        assert required_field in params["properties"]
+        assert required_field in params["required"]
         assert params["additionalProperties"] is False
 
-    # Stages ainda não agentic seguem sem alavanca para o modelo.
-    for name in ("build_creator", "qc_check", "assemble_video", "upscale_video"):
+    for name in (
+        "write_persona",
+        "build_creator",
+        "generate_clip",
+        "qc_check",
+        "assemble_video",
+        "upscale_video",
+    ):
+        assert get_tool_spec(name).terminal_submission is False
         assert get_tool_spec(name).parameters["properties"] == {}
 
 
@@ -494,7 +499,9 @@ def test_tool_call_schemas_builds_neutral_schema_for_allowed_tools():
     schema = schemas[0]
     assert schema["name"] == "generate_concepts"
     assert schema["description"].strip()
-    assert schema["parameters"]["properties"]["revision"]["type"] == "string"
+    proposals = schema["parameters"]["properties"]["proposals"]
+    assert proposals["type"] == "array"
+    assert "hook" in proposals["items"]["required"]
 
     # nomes desconhecidos estouram (contrato: só tools registradas viram schema).
     with pytest.raises(KeyError, match="nope"):

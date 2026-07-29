@@ -425,44 +425,22 @@ async def test_mock_pipeline_can_opt_into_agentic_concepts_and_scripts(tmp_path,
     assert all(item.script for item in out["results"])
 
 
-async def test_mock_pipeline_can_opt_into_agentic_video(tmp_path, pipeline_cfg):
-    """D33: o grafo inteiro roda com o stage video agentic, offline e sem custo.
-
-    Prova a integração ponta a ponta que o ``config-mock`` não exercita (ele mantém
-    video em modo tool para o dry-run seguir barato): o loop de tool-calling dirige a
-    geração de clips, o QC gate segue funcionando e os itens chegam a montado.
-    """
+async def test_pipeline_rejects_agentic_video(pipeline_cfg):
+    """Media adapters are deterministic tools, never prompt-driven agents."""
     from orchestrator.agent_catalog import build_agent_catalog
-    from orchestrator.runner import run_pipeline, summarize
 
-    catalog = build_agent_catalog(
-        {
-            "stages": {
-                "video": {
-                    "executor": "agent",
-                    "tools": ["generate_clip"],
-                    "agent_enabled": True,
-                },
+    with pytest.raises(ValueError, match="only supported for stages"):
+        build_agent_catalog(
+            {
+                "stages": {
+                    "video": {
+                        "executor": "agent",
+                        "tools": ["generate_clip"],
+                        "agent_enabled": True,
+                    },
+                }
             }
-        }
-    )
-
-    run_id, out = await run_pipeline(
-        pipeline_cfg,
-        {"adapters": {}},
-        db_path=tmp_path / "runs.sqlite",
-        run_id="agentic-video",
-        batch=2,
-        offer="serum X",
-        agent_catalog=catalog,
-    )
-
-    summary = summarize({**out, "run_id": run_id})
-    assert summary["produced"] == 2
-    # Cada item continua com seus clips (talking-head + product demo) e custo cobrado.
-    for item in out["results"]:
-        assert item.clips
-        assert item.cost_usd > 0
+        )
 
 
 async def test_stage_executor_agent_run_tool_enforces_boundary_and_budget():

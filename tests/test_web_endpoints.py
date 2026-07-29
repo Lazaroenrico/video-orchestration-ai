@@ -8,13 +8,18 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
+from datetime import datetime
 import sqlite3
 from pathlib import Path
+from types import SimpleNamespace
+from uuid import UUID
 
 import pytest
 from fastapi import BackgroundTasks, HTTPException
 
 from orchestrator import runner
+from orchestrator.db.jobs import Job, RunGate
+from orchestrator.db.runs import RunSnapshot
 from orchestrator.graph.state import Artifact
 from orchestrator.web import server as web_server
 
@@ -63,8 +68,198 @@ def test_emit_sync_buffers_when_queue_full():
 
     web_server._emit_sync("r", {"type": "new"})
 
-    assert web_server._runs["r"]["buffer"] == [{"type": "new"}]  # buffer sempre
+    event = web_server._runs["r"]["buffer"][0]
+    assert event["type"] == "new"  # buffer sempre
+    assert event["event_id"] == "local-1"
+    assert datetime.fromisoformat(event["occurred_at"]).tzinfo is not None
     assert q.qsize() == 1  # fila cheia: evento descartado sem erro
+
+
+# ------------------------------------------------------------------ #
+# runner embutido no web                                             #
+# ------------------------------------------------------------------ #
+
+async def test_app_lifespan_starts_embedded_runner_when_flagged(monkeypatch):
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    class SharedDatabase:
+        async def close(self):
+            pass
+
+    async def get_database():
+        return SharedDatabase()
+
+    async def close_database():
+        pass
+
+    async def runner_loop(wake_event):
+        assert wake_event is web_server._web_runner_wake_event
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    monkeypatch.setenv("DATABASE_URL", "postgresql://unit-test")
+    monkeypatch.setenv("ORCH_WEB_EMBEDDED_RUNNER", "true")
+    monkeypatch.setattr(web_server, "get_shared_database", get_database)
+    monkeypatch.setattr(web_server, "close_shared_database", close_database)
+    monkeypatch.setattr(web_server, "_web_embedded_runner_loop", runner_loop)
+
+    async with web_server._app_lifespan(web_server.app):
+        await asyncio.wait_for(started.wait(), timeout=1)
+        assert web_server._web_runner_wake_event is not None
+
+    await asyncio.wait_for(cancelled.wait(), timeout=1)
+    assert web_server._web_runner_wake_event is None
+
+
+async def test_embedded_runner_reuses_shared_database(monkeypatch):
+    called = asyncio.Event()
+    tenant = object()
+    observed: dict[str, object] = {}
+
+    class SharedDatabase:
+        async def resolve_tenant(self, _identity):
+            return tenant
+
+    shared_database = SharedDatabase()
+
+    async def get_database():
+        return shared_database
+
+    async def run_worker_once(**kwargs):
+        observed.update(kwargs)
+        called.set()
+        return False
+
+    monkeypatch.setenv("ORCH_ORGANIZATION_SLUG", "embedded-runner")
+    monkeypatch.setenv("ORCH_ORGANIZATION_NAME", "Embedded Runner")
+    monkeypatch.setenv("ORCH_USER_SUBJECT", "oidc|embedded")
+    monkeypatch.setattr(web_server, "get_shared_database", get_database)
+    monkeypatch.setattr(web_server, "run_worker_once", run_worker_once)
+
+    wake_event = asyncio.Event()
+    task = asyncio.create_task(web_server._web_embedded_runner_loop(wake_event))
+    await asyncio.wait_for(called.wait(), timeout=1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert observed["database"] is shared_database
+    assert observed["tenant"] is tenant
+
+
+async def test_start_run_defaults_to_staging_config_and_wakes_runner(monkeypatch):
+    queued_payloads: list[dict] = []
+    wake_event = asyncio.Event()
+
+    class Prompts:
+        async def record_last_used(self, **_values):
+            pass
+
+    class Jobs:
+        async def enqueue_run(self, _run_id, **kwargs):
+            queued_payloads.append(kwargs["payload"])
+            return SimpleNamespace(job_id=UUID("00000000-0000-0000-0000-000000000011"))
+
+    @asynccontextmanager
+    async def open_prompts(_path):
+        yield Prompts()
+
+    @asynccontextmanager
+    async def open_jobs():
+        yield Jobs()
+
+    monkeypatch.setenv("DATABASE_URL", "postgresql://unit-test")
+    monkeypatch.delenv("ORCH_CONFIG_DIR", raising=False)
+    monkeypatch.setattr(web_server, "_web_runner_wake_event", wake_event, raising=False)
+    monkeypatch.setattr(web_server.prompt_store, "open_repository", open_prompts)
+    monkeypatch.setattr(web_server.job_store, "open_repository", open_jobs)
+
+    response = await web_server.start_run(
+        web_server.RunRequest(offer="serum X"),
+        BackgroundTasks(),
+    )
+
+    assert response["job_id"] == "00000000-0000-0000-0000-000000000011"
+    assert queued_payloads[0]["config_dir"] == "config-staging"
+    assert wake_event.is_set()
+
+
+async def test_approve_wakes_embedded_runner_after_persisted_gate_resolution(monkeypatch):
+    wake_event = asyncio.Event()
+    resolved: list[tuple[UUID, int, dict]] = []
+
+    class Jobs:
+        async def resolve_gate(self, gate_id, *, version, resolution):
+            resolved.append((gate_id, version, resolution))
+            return SimpleNamespace(job_id=UUID("00000000-0000-0000-0000-000000000012"))
+
+    @asynccontextmanager
+    async def open_jobs():
+        yield Jobs()
+
+    monkeypatch.setenv("DATABASE_URL", "postgresql://unit-test")
+    monkeypatch.setattr(web_server, "_web_runner_wake_event", wake_event, raising=False)
+    monkeypatch.setattr(web_server.job_store, "open_repository", open_jobs)
+
+    response = await web_server.approve(
+        "run-1",
+        web_server.ApproveRequest(
+            gate_id="00000000-0000-0000-0000-000000000001",
+            version=3,
+            approved=["creator-0"],
+        ),
+    )
+
+    assert response["job_id"] == "00000000-0000-0000-0000-000000000012"
+    assert resolved == [
+        (
+            UUID("00000000-0000-0000-0000-000000000001"),
+            3,
+            {"approved": ["creator-0"]},
+        )
+    ]
+    assert wake_event.is_set()
+
+
+async def test_submit_concepts_wakes_embedded_runner_after_persisted_gate_resolution(monkeypatch):
+    wake_event = asyncio.Event()
+    resolved: list[tuple[UUID, int, dict]] = []
+
+    class Jobs:
+        async def resolve_gate(self, gate_id, *, version, resolution):
+            resolved.append((gate_id, version, resolution))
+            return SimpleNamespace(job_id=UUID("00000000-0000-0000-0000-000000000013"))
+
+    @asynccontextmanager
+    async def open_jobs():
+        yield Jobs()
+
+    monkeypatch.setenv("DATABASE_URL", "postgresql://unit-test")
+    monkeypatch.setattr(web_server, "_web_runner_wake_event", wake_event, raising=False)
+    monkeypatch.setattr(web_server.job_store, "open_repository", open_jobs)
+
+    response = await web_server.submit_concepts(
+        "run-1",
+        web_server.ConceptEditRequest(
+            gate_id="00000000-0000-0000-0000-000000000002",
+            version=4,
+            concepts=[{"id": "concept-0", "script": "edited"}],
+        ),
+    )
+
+    assert response["job_id"] == "00000000-0000-0000-0000-000000000013"
+    assert resolved == [
+        (
+            UUID("00000000-0000-0000-0000-000000000002"),
+            4,
+            {"concepts": [{"id": "concept-0", "script": "edited"}]},
+        )
+    ]
+    assert wake_event.is_set()
 
 
 # ------------------------------------------------------------------ #
@@ -333,6 +528,25 @@ async def test_stream_events_replays_buffer_and_ends_when_done():
     assert "stream_end" in body
 
 
+async def test_stream_events_resumes_local_replay_after_last_event_id():
+    web_server._runs["r"] = {
+        "buffer": [
+            {"type": "first", "event_id": "local-1"},
+            {"type": "second", "event_id": "local-2"},
+        ],
+        "queues": [],
+        "done": True,
+    }
+
+    resp = await web_server.stream_events("r", last_event_id="local-1")
+    body = "".join([c async for c in resp.body_iterator])
+
+    assert '"type": "first"' not in body
+    assert '"type": "second"' in body
+    assert "id: local-2" in body
+    assert "stream_end" in body
+
+
 async def test_stream_events_emits_keepalive_on_timeout(monkeypatch):
     web_server._runs["r"] = {"buffer": [], "queues": [], "done": False}
     calls = {"n": 0}
@@ -363,6 +577,7 @@ async def test_list_runs_endpoint_empty_for_missing_db(tmp_path):
     assert out["runs"] == []
     assert isinstance(out["active"], list)
     assert out["errored"] == []
+    assert out["cancelled"] == []
 
 
 async def test_list_runs_endpoint_reports_errored_and_excludes_from_active(tmp_path):
@@ -371,12 +586,20 @@ async def test_list_runs_endpoint_reports_errored_and_excludes_from_active(tmp_p
     web_server._runs["errored-run"] = {
         "queues": [], "buffer": [], "done": True, "error": "boom",
     }
+    web_server._runs["cancelled-run"] = {
+        "queues": [],
+        "buffer": [],
+        "done": True,
+        "phase": "cancelled",
+        "error": "pipeline_v2_reset",
+    }
 
     out = await web_server.list_runs_endpoint(db=str(tmp_path / "missing.db"))
 
     # active = só o que está realmente rodando (nem concluído, nem quebrado).
     assert out["active"] == ["running-run"]
     assert out["errored"] == ["errored-run"]
+    assert out["cancelled"] == ["cancelled-run"]
 
 
 def test_runner_list_runs_handles_db_without_checkpoints_table(tmp_path):
@@ -428,6 +651,203 @@ async def test_run_state_returns_runtime_summary_without_checkpoint(tmp_path):
     assert state["summary"]["produced"] == 1
     assert state["items"] == []
     assert state["error"] is None
+
+
+async def test_run_state_rehydrates_completed_and_active_pipeline_stages(tmp_path):
+    run_id = "runtime-progress"
+    web_server._runs[run_id] = {
+        "queues": [],
+        "buffer": [
+            {"type": "run_start", "run_id": run_id, "offer": "serum X", "batch": 2},
+            {"type": "node_start", "node": "concepts", "label": "Conceitos"},
+            {"type": "node_end", "node": "concepts", "label": "Conceitos"},
+            {"type": "node_start", "node": "scripts", "label": "Scripts"},
+        ],
+        "done": False,
+    }
+
+    state = await web_server.run_state(
+        run_id,
+        config_dir="config-mock",
+        db=str(tmp_path / "cp.db"),
+    )
+
+    stages = {stage["id"]: stage for stage in state["progress"]["stages"]}
+    assert state["progress"]["execution_status"] == "running"
+    assert stages["concepts"]["status"] == "completed"
+    assert stages["scripts"]["status"] == "running"
+    assert stages["creator_profiles"]["status"] == "pending"
+    assert state["progress"]["active_stage_ids"] == ["scripts"]
+
+
+async def test_run_state_keeps_parallel_stage_active_until_every_clip_finishes(tmp_path):
+    run_id = "runtime-parallel-progress"
+    web_server._runs[run_id] = {
+        "queues": [],
+        "buffer": [
+            {"type": "run_start", "run_id": run_id, "offer": "serum X", "batch": 2},
+            {
+                "type": "progress_event",
+                "operation_id": "video-a",
+                "stage_id": "talking_head",
+                "node": "ltx",
+                "status": "started",
+                "item_id": "clip-a",
+            },
+            {
+                "type": "progress_event",
+                "operation_id": "video-b",
+                "stage_id": "talking_head",
+                "node": "ltx",
+                "status": "started",
+                "item_id": "clip-b",
+            },
+            {
+                "type": "progress_event",
+                "operation_id": "video-a",
+                "stage_id": "talking_head",
+                "node": "ltx",
+                "status": "completed",
+                "item_id": "clip-a",
+            },
+        ],
+        "done": False,
+    }
+
+    state = await web_server.run_state(
+        run_id,
+        config_dir="config-mock",
+        db=str(tmp_path / "cp.db"),
+    )
+
+    stages = {stage["id"]: stage for stage in state["progress"]["stages"]}
+    assert stages["talking_head"]["status"] == "running"
+    assert stages["talking_head"]["completed_units"] == 1
+    assert stages["talking_head"]["active_units"] == 1
+    assert stages["talking_head"]["total_units"] == 2
+    assert stages["production"]["status"] == "running"
+    assert state["progress"]["active_stage_ids"] == ["talking_head"]
+
+
+async def test_run_state_returns_semantic_activity_with_server_timestamps(tmp_path):
+    run_id = "runtime-activity"
+    web_server._runs[run_id] = {
+        "queues": [],
+        "buffer": [
+            {
+                "type": "run_start",
+                "run_id": run_id,
+                "offer": "serum X",
+                "batch": 1,
+                "event_id": "local-1",
+                "occurred_at": "2026-07-28T10:00:00+00:00",
+            },
+            {
+                "type": "progress_event",
+                "operation_id": "scripts-a",
+                "stage_id": "scripts",
+                "stage_label": "Scripts & review",
+                "node": "scripts",
+                "status": "started",
+                "event_id": "local-2",
+                "occurred_at": "2026-07-28T10:01:00+00:00",
+            },
+        ],
+        "done": False,
+    }
+
+    state = await web_server.run_state(
+        run_id,
+        config_dir="config-mock",
+        db=str(tmp_path / "cp.db"),
+    )
+
+    assert state["activity"] == [
+        {
+            "event_id": "local-1",
+            "kind": "run",
+            "status": "started",
+            "label": "Pipeline started",
+            "occurred_at": "2026-07-28T10:00:00+00:00",
+            "stage_id": None,
+            "item_id": None,
+            "attempt": None,
+            "detail": None,
+        },
+        {
+            "event_id": "local-2",
+            "kind": "stage",
+            "status": "started",
+            "label": "Scripts & review started",
+            "occurred_at": "2026-07-28T10:01:00+00:00",
+            "stage_id": "scripts",
+            "item_id": None,
+            "attempt": None,
+            "detail": None,
+        },
+    ]
+
+
+async def test_run_state_rehydrates_progress_from_persisted_events_after_restart(
+    monkeypatch,
+    tmp_path,
+):
+    run_id = "persisted-progress"
+    occurred_at = datetime.fromisoformat("2026-07-28T10:01:00+00:00")
+
+    class Runs:
+        async def get(self, _run_id):
+            return RunSnapshot(
+                run_id=run_id,
+                phase="running",
+                batch_size=2,
+                summary={},
+                state={},
+                items=[],
+            )
+
+    class Jobs:
+        async def list_events(self, _run_id):
+            return [
+                SimpleNamespace(
+                    seq=41,
+                    event_type="progress_event",
+                    data={
+                        "operation_id": "scripts-a",
+                        "stage_id": "scripts",
+                        "stage_label": "Scripts & review",
+                        "node": "scripts",
+                        "status": "started",
+                    },
+                    created_at=occurred_at,
+                )
+            ]
+
+    @asynccontextmanager
+    async def open_runs():
+        yield Runs()
+
+    @asynccontextmanager
+    async def open_jobs():
+        yield Jobs()
+
+    async def no_checkpoint(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setenv("DATABASE_URL", "postgresql://unit-test")
+    monkeypatch.setattr(web_server.runner, "get_status", no_checkpoint)
+    monkeypatch.setattr(web_server.run_store, "open_repository", open_runs)
+    monkeypatch.setattr(web_server.job_store, "open_repository", open_jobs)
+
+    state = await web_server.run_state(
+        run_id,
+        config_dir="config-mock",
+        db=str(tmp_path / "cp.db"),
+    )
+
+    assert state["progress"]["active_stage_ids"] == ["scripts"]
+    assert state["activity"][0]["event_id"] == "41"
+    assert state["activity"][0]["occurred_at"] == occurred_at.isoformat()
 
 
 async def test_run_state_surfaces_run_crash_error(tmp_path):
@@ -540,6 +960,297 @@ async def test_run_state_returns_pending_creators_during_approval_gate(tmp_path)
 
     assert state["phase"] == "awaiting"
     assert state["awaiting"][0]["id"] == "creator-0"
+    assert state["gate"] is None
+
+
+async def test_run_state_returns_versioned_persisted_concept_gate(monkeypatch, tmp_path):
+    run_id = "persisted-edit"
+    gate = RunGate(
+        gate_id=UUID("00000000-0000-0000-0000-000000000001"),
+        run_id=run_id,
+        gate_type="edit_concepts",
+        version=2,
+        status="pending",
+        payload={"concepts": [{"id": "concept-a", "script": "draft"}]},
+        resolution=None,
+    )
+
+    class Runs:
+        async def get(self, _run_id):
+            return RunSnapshot(
+                run_id=run_id,
+                phase="editing",
+                state={},
+                summary={},
+                items=[],
+            )
+
+    class Jobs:
+        async def get_pending_gate(self, _run_id):
+            return gate
+
+    @asynccontextmanager
+    async def open_runs():
+        yield Runs()
+
+    @asynccontextmanager
+    async def open_jobs():
+        yield Jobs()
+
+    async def no_checkpoint(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setenv("DATABASE_URL", "postgresql://unit-test")
+    monkeypatch.setattr(web_server.runner, "get_status", no_checkpoint)
+    monkeypatch.setattr(web_server.run_store, "open_repository", open_runs)
+    monkeypatch.setattr(web_server.job_store, "open_repository", open_jobs)
+
+    state = await web_server.run_state(
+        run_id,
+        config_dir="config-mock",
+        db=str(tmp_path / "cp.db"),
+    )
+
+    assert state["phase"] == "editing"
+    assert state["edit_concepts"] == [{"id": "concept-a", "script": "draft"}]
+    assert state["gate"] == {
+        "gate_id": str(gate.gate_id),
+        "version": 2,
+        "gate_type": "edit_concepts",
+    }
+
+
+async def test_run_state_returns_versioned_persisted_creator_gate(monkeypatch, tmp_path):
+    run_id = "persisted-awaiting"
+    gate = RunGate(
+        gate_id=UUID("00000000-0000-0000-0000-000000000002"),
+        run_id=run_id,
+        gate_type="approve_creators",
+        version=1,
+        status="pending",
+        payload={
+            "creators": [{
+                "creator_id": "creator-0",
+                "image": "/media/persisted-awaiting/creator-0/image.png",
+                "voice": "/media/persisted-awaiting/creator-0/voice.wav",
+            }]
+        },
+        resolution=None,
+    )
+
+    class Runs:
+        async def get(self, _run_id):
+            return RunSnapshot(
+                run_id=run_id,
+                phase="awaiting",
+                state={},
+                summary={},
+                items=[],
+            )
+
+    class Jobs:
+        async def get_pending_gate(self, _run_id):
+            return gate
+
+    @asynccontextmanager
+    async def open_runs():
+        yield Runs()
+
+    @asynccontextmanager
+    async def open_jobs():
+        yield Jobs()
+
+    async def no_checkpoint(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setenv("DATABASE_URL", "postgresql://unit-test")
+    monkeypatch.setattr(web_server.runner, "get_status", no_checkpoint)
+    monkeypatch.setattr(web_server.run_store, "open_repository", open_runs)
+    monkeypatch.setattr(web_server.job_store, "open_repository", open_jobs)
+
+    state = await web_server.run_state(
+        run_id,
+        config_dir="config-mock",
+        db=str(tmp_path / "cp.db"),
+    )
+
+    assert state["phase"] == "awaiting"
+    assert state["awaiting"][0]["id"] == "creator-0"
+    assert state["gate"] == {
+        "gate_id": str(gate.gate_id),
+        "version": 1,
+        "gate_type": "approve_creators",
+    }
+
+
+async def test_retry_failed_persisted_run_creates_clean_fork(monkeypatch):
+    old_run_id = "web-failed"
+    wake_event = asyncio.Event()
+    original_payload = {
+        "offer": "serum X",
+        "batch": 2,
+        "platform": "tiktok",
+        "config_dir": "config-mock",
+        "db_path": "/tmp/orchestrator.db",
+        "creator_prompt": "creator prompt",
+        "video_prompt": "video prompt",
+        "approve_creators": False,
+        "edit_concepts": True,
+        "seed_creator": {"id": "creator-fixed"},
+    }
+    enqueued: list[dict[str, object]] = []
+
+    class Runs:
+        async def get(self, run_id):
+            assert run_id == old_run_id
+            return RunSnapshot(
+                run_id=old_run_id,
+                phase="error",
+                offer="serum X",
+                platform="tiktok",
+                batch_size=2,
+                error="adapter failed",
+                state={"partial": True},
+                summary={},
+                items=[{"id": "old-item"}],
+            )
+
+    class Jobs:
+        async def get_initial_run_payload(self, run_id):
+            assert run_id == old_run_id
+            return original_payload
+
+        async def enqueue_run(self, run_id, **kwargs):
+            enqueued.append({"run_id": run_id, **kwargs})
+            return Job(
+                job_id=UUID("00000000-0000-0000-0000-000000000101"),
+                run_id=run_id,
+                kind="execute_run",
+                status="queued",
+                payload=kwargs["payload"],
+                attempt=0,
+                max_attempts=kwargs.get("max_attempts", 5),
+                available_at=kwargs.get("now"),
+                lease_expires_at=None,
+                worker_id=None,
+                error=None,
+            )
+
+    @asynccontextmanager
+    async def open_runs():
+        yield Runs()
+
+    @asynccontextmanager
+    async def open_jobs():
+        yield Jobs()
+
+    monkeypatch.setenv("DATABASE_URL", "postgresql://unit-test")
+    monkeypatch.setattr(web_server, "_web_runner_wake_event", wake_event, raising=False)
+    monkeypatch.setattr(web_server.run_store, "open_repository", open_runs)
+    monkeypatch.setattr(web_server.job_store, "open_repository", open_jobs)
+
+    response = await web_server.retry_run(old_run_id)
+
+    assert response["run_id"] != old_run_id
+    assert response["run_id"].startswith("web-")
+    assert response["source_run_id"] == old_run_id
+    assert response["job_id"] == "00000000-0000-0000-0000-000000000101"
+    assert enqueued == [{
+        "run_id": response["run_id"],
+        "offer": "serum X",
+        "platform": "tiktok",
+        "batch_size": 2,
+        "payload": {**original_payload, "source_run_id": old_run_id},
+    }]
+    assert wake_event.is_set()
+
+
+async def test_retry_unknown_persisted_run_returns_404(monkeypatch):
+    class Runs:
+        async def get(self, _run_id):
+            return None
+
+    @asynccontextmanager
+    async def open_runs():
+        yield Runs()
+
+    monkeypatch.setenv("DATABASE_URL", "postgresql://unit-test")
+    monkeypatch.setattr(web_server.run_store, "open_repository", open_runs)
+
+    with pytest.raises(HTTPException) as exc:
+        await web_server.retry_run("missing-run")
+
+    assert exc.value.status_code == 404
+
+
+async def test_retry_non_failed_persisted_run_returns_409(monkeypatch):
+    class Runs:
+        async def get(self, _run_id):
+            return RunSnapshot(
+                run_id="web-running",
+                phase="running",
+                offer="serum X",
+                platform="tiktok",
+                batch_size=2,
+                summary={},
+                state={},
+                items=[],
+            )
+
+    @asynccontextmanager
+    async def open_runs():
+        yield Runs()
+
+    monkeypatch.setenv("DATABASE_URL", "postgresql://unit-test")
+    monkeypatch.setattr(web_server.run_store, "open_repository", open_runs)
+
+    with pytest.raises(HTTPException) as exc:
+        await web_server.retry_run("web-running")
+
+    assert exc.value.status_code == 409
+
+
+async def test_retry_failed_run_without_initial_payload_returns_409(monkeypatch):
+    enqueued: list[str] = []
+
+    class Runs:
+        async def get(self, _run_id):
+            return RunSnapshot(
+                run_id="web-no-payload",
+                phase="error",
+                offer="serum X",
+                platform="tiktok",
+                batch_size=2,
+                error="adapter failed",
+                summary={},
+                state={},
+                items=[],
+            )
+
+    class Jobs:
+        async def get_initial_run_payload(self, _run_id):
+            return None
+
+        async def enqueue_run(self, run_id, **_kwargs):
+            enqueued.append(run_id)
+
+    @asynccontextmanager
+    async def open_runs():
+        yield Runs()
+
+    @asynccontextmanager
+    async def open_jobs():
+        yield Jobs()
+
+    monkeypatch.setenv("DATABASE_URL", "postgresql://unit-test")
+    monkeypatch.setattr(web_server.run_store, "open_repository", open_runs)
+    monkeypatch.setattr(web_server.job_store, "open_repository", open_jobs)
+
+    with pytest.raises(HTTPException) as exc:
+        await web_server.retry_run("web-no-payload")
+
+    assert exc.value.status_code == 409
+    assert enqueued == []
 
 
 async def test_run_state_returns_checkpoint_items_with_scripts(tmp_path, monkeypatch):
@@ -564,7 +1275,7 @@ async def test_run_state_returns_checkpoint_items_with_scripts(tmp_path, monkeyp
     assert all(item["concept"] for item in state["items"])
 
 
-async def test_run_state_returns_pending_concepts_during_edit_gate(tmp_path, monkeypatch):
+async def test_run_state_returns_combined_pending_creative_review(tmp_path, monkeypatch):
     monkeypatch.setenv("ORCH_MEDIA", str(tmp_path / "media"))
     monkeypatch.setenv("ORCH_CREATORS", str(tmp_path / "creators.json"))
     run_id = "web-state-edit"
@@ -574,20 +1285,22 @@ async def test_run_state_returns_pending_concepts_during_edit_gate(tmp_path, mon
         web_server._execute_run(
             run_id, offer="serum X", batch=2, platform="tiktok",
             config_dir="config-mock", db_path=str(db),
-            approve_creators=False, edit_concepts=True,
+            approve_creators=False, edit_concepts=False, review_plan=True,
         )
     )
 
     try:
-        runtime = await _wait_for_run_key(run_id, "concept_edit", task)
+        runtime = await _wait_for_run_key(run_id, "review", task)
 
         state = await web_server.run_state(run_id, config_dir="config-mock", db=str(db))
 
-        assert state["phase"] == "editing"
-        assert len(state["edit_concepts"]) == 2
-        assert all(concept["script"] for concept in state["edit_concepts"])
+        assert state["phase"] == "review"
+        assert state["edit_concepts"] == []
+        assert len(state["review"]["concepts"]) == 2
+        assert len(state["review"]["creators"]) == 2
+        assert all(concept["script"] for concept in state["review"]["concepts"])
 
-        runtime["concept_edit"].set_result({"concepts": runtime["pending_concepts"]})
+        runtime["review"].set_result({"action": "approve"})
         await asyncio.wait_for(task, timeout=8.0)
     finally:
         if not task.done():
@@ -733,7 +1446,7 @@ async def test_local_start_signs_seed_and_can_persist_run_index(
     assert background.tasks[0].args[-1] == signed
 
 
-async def test_local_execute_persists_both_gates_completion_and_error(
+async def test_local_execute_persists_combined_review_completion_and_error(
     monkeypatch,
     tmp_path,
 ):
@@ -760,13 +1473,8 @@ async def test_local_execute_persists_both_gates_completion_and_error(
             _run_repository=RecordingRuns(),
         )
     )
-    runtime = await _wait_for_run_key(run_id, "concept_edit", task)
-    runtime["concept_edit"].set_result({"concepts": runtime["pending_concepts"]})
-    runtime = await _wait_for_run_key(run_id, "approval", task)
-    runtime["approval"].set_result({
-        "approved": [creator["id"] for creator in runtime["pending_creators"]],
-        "creators": runtime["pending_creators"],
-    })
+    runtime = await _wait_for_run_key(run_id, "review", task)
+    runtime["review"].set_result({"action": "approve"})
     await asyncio.wait_for(task, timeout=8)
 
     original_load_pipeline = web_server.load_pipeline
@@ -793,6 +1501,8 @@ async def test_local_execute_persists_both_gates_completion_and_error(
     )
     monkeypatch.setattr(web_server, "load_pipeline", original_load_pipeline)
 
-    assert phases[:2] == ["editing", "awaiting"]
+    assert phases[0] == "review"
+    assert "editing" not in phases
+    assert "awaiting" not in phases
     assert "running" in phases
     assert phases[-2:] == ["done", "error"]

@@ -182,6 +182,8 @@ class AgentPort(Protocol):
         system_prompt: Optional[str] = None,
         max_steps: int = DEFAULT_MAX_STEPS,
         max_tool_calls: Optional[int] = None,
+        require_tool_call: bool = False,
+        stop_after_success: bool = False,
     ) -> "AgentRunResult": ...
 
 

@@ -1,5 +1,173 @@
 # PROGRESS — handoff
 
+## Cache persistente do front com TanStack Query (2026-07-28)
+
+Objetivo: reduzir waterfalls repetidos no dashboard React (`getRuns` + vários
+`getStatus`) e manter resultados anteriores disponíveis após navegação/reload.
+
+### Red → Green e falhas investigadas
+
+- **RED:** `front/src/api/queries.contract.ts` falhou no `tsc` com
+  `Cannot find module './queries'`. **Causa:** não existia uma camada pública de
+  cache/query keys para o front. **Correção:** criada a camada TanStack Query com
+  query keys estáveis, hooks cacheados, agregação de campanhas e mutations que
+  invalidam runs/gates/prompts/creators.
+- **Persistência:** o app agora usa `PersistQueryClientProvider` com `localStorage`,
+  `maxAge` de 12h, `gcTime` de 24h e `buster` versionado. Somente queries
+  bem-sucedidas e com payload serializado até 500 KB entram no cache persistente.
+- **SSE:** `useRunStream` hidrata o snapshot inicial via QueryClient e atualiza ou
+  invalida cache quando recebe `run_end`, gates, item updates, erro e creator updates.
+  Tokens/logs de LLM continuam apenas em memória.
+
+**Verificação local:** `rtk npm run typecheck`, `rtk npm run check:boundaries` e
+`rtk npm run build` verdes em `front/`.
+
+## Runner embutido no web para campanhas duráveis locais (2026-07-28)
+
+Objetivo: permitir que a criação/aprovação de campanha pelo dashboard avance no caminho
+durável sem exigir um processo `orchestrator runner` separado durante desenvolvimento.
+
+### Red → Green e falhas investigadas
+
+- **RED:** `test_start_run_defaults_to_staging_config_and_wakes_runner` falhou porque
+  `POST /api/run` persistia o job com `config_dir=None` e não sinalizava nenhum executor.
+  **Causa:** com `DATABASE_URL`, o endpoint só enfileira `execute_run`; sem runner ativo,
+  o job fica `queued`, nenhum gate é aberto em `run_gates` e o front observa a campanha
+  parada. **Correção:** o web agora usa `config-staging` como default durável e, quando
+  `ORCH_WEB_EMBEDDED_RUNNER=true`, inicia um loop interno que chama `run_worker_once()`.
+- **Gates e retry:** aprovações de creator/conceitos e retry manual agora acordam o
+  runner embutido depois de `resolve_gate()`/`enqueue_run()`. Isso cobre o ciclo front
+  → gate persistido → job de resume sem depender de polling longo.
+- **Escopo:** o runner embutido é opt-in e só liga com `DATABASE_URL`; produção/runner
+  dedicado continuam no contrato existente. O loop captura falhas de job em log para não
+  derrubar a API e é cancelado no lifespan shutdown.
+
+**Verificação local:** `rtk proxy .venv/bin/python -m pytest --no-cov tests/test_web_endpoints.py`
+→ **56 passed**; `rtk proxy .venv/bin/python -m pytest --no-cov tests/test_web_spa.py tests/test_web_prompts.py tests/test_web_item_updates.py tests/test_runner_service.py tests/test_sqs_runner.py`
+→ **68 passed**. A suíte PostgreSQL relevante foi tentada, mas o fixture falhou antes do
+código por ausência/configuração local de PostgreSQL em `127.0.0.1:5432`
+(`fe_sendauth: no password supplied`), limitação já prevista nas instruções do projeto.
+
+## Cancelamento em conexão PostgreSQL encerra transação antes de descarte (2026-07-28)
+
+Objetivo: reduzir warnings do psycopg em SSE/requests cancelados, como
+`another command is already in progress` e `Explicit rollback() forbidden within a
+Transaction context` durante cleanup de conexão async ativa, e aceitar probes
+`HEAD /healthz` sem ruído `405`.
+
+### Red → Green e falhas investigadas
+
+- **RED:** `test_database_connection_closes_connection_on_cancellation_before_rollback`
+  falhou porque `Database.connection()` deixava o `async with connection.transaction()`
+  executar `__aexit__`/rollback quando o corpo era cancelado. **Causa:** em async Python,
+  uma exceção lançada no `yield` de um `@asynccontextmanager` sai primeiro pelos context
+  managers internos; portanto o rollback automático da transação roda antes de qualquer
+  `except` externo conseguir fechar a conexão. Isso reproduz a classe do warning visto em
+  produção: uma query ainda ativa impede o rollback e o pool descarta a conexão como `BAD`.
+- **RED adicional:** `test_database_connection_exits_transaction_before_closing_on_cancellation`
+  falhou porque a correção anterior fechava a conexão cancelada sem chamar
+  `transaction.__aexit__()`. **Causa:** o contexto `Transaction` do psycopg ficava ativo;
+  ao receber a conexão de volta, o pool tentava `connection.rollback()` explicitamente e o
+  psycopg recusava rollback explícito dentro de um `Transaction` aberto. **Correção:**
+  `Database.connection()` agora chama `transaction.__aexit__(CancelledError, exc, tb)` em
+  `asyncio.shield()` antes de fechar/descartar a conexão cancelada.
+- **GREEN:** fluxo normal segue chamando `transaction.__aexit__()` para commit/rollback
+  como antes. Em `asyncio.CancelledError`, a transação é encerrada formalmente e a conexão
+  ainda é fechada com `asyncio.shield(connection.close())`. **Trade-off aceito:** em
+  cancelamentos frequentes o pool recria mais conexões, mas evita devolver ao pool uma
+  conexão em estado incerto ou com contexto de transação pendurado.
+- **Health:** `test_healthz_accepts_head_for_liveness_probes` falhou porque o FastAPI
+  registrava só `GET /healthz`; probes com `HEAD` caíam em `405 Method Not Allowed`.
+  **Correção:** `/healthz` agora registra `HEAD` no mesmo handler de liveness sem IO.
+
+**Verificação local:** `rtk proxy .venv/bin/python -m pytest --no-cov tests/test_postgres_foundation.py -k 'closes_connection_on_cancellation_before_rollback or tenant_identity'`
+→ **3 passed** antes da regressão observada; `rtk proxy .venv/bin/python -m pytest --no-cov tests/test_postgres_foundation.py -k 'exits_transaction_before_closing_on_cancellation or tenant_identity'`
+→ **3 passed**; `rtk proxy .venv/bin/python -m pytest --no-cov tests/test_web_spa.py -k 'healthz_accepts_head or healthz_is_ok'`
+→ **2 passed**.
+
+## Retry manual de campanha falhada cria fork limpo (2026-07-28)
+
+Objetivo: permitir que o dashboard tente novamente uma campanha em `error` criando uma
+nova campanha, sem reusar o `run_id` antigo nem copiar estado parcial.
+
+### Red → Green e falhas investigadas
+
+- **RED:** `test_retry_failed_persisted_run_creates_clean_fork` falhou com
+  `AttributeError: module 'orchestrator.web.server' has no attribute 'retry_run'`.
+  **Causa:** não existia rota/coroutine pública para retry manual. **Correção:**
+  adicionado `POST /api/run/{run_id}/retry`, que valida `phase == "error"`, lê o payload
+  original do job `execute_run`, cria novo `web-...`, adiciona `source_run_id` no payload
+  e enfileira uma execução limpa via `enqueue_run()`.
+- **Contratos de erro:** adicionados testes para run inexistente (`404`), run não falhado
+  (`409`) e run falhado sem payload inicial (`409`). **Causa coberta:** retry não deve
+  funcionar como resume nem tentar reconstruir campanha a partir de estado parcial.
+  **Correção:** a rota só usa o payload inicial persistido, e falha antes de enfileirar
+  quando ele não existe ou não possui campos mínimos de execução.
+- **Persistência:** `PostgresJobRepository.get_initial_run_payload()` recupera o primeiro
+  payload `execute_run` do run; a cobertura PostgreSQL foi adicionada em
+  `test_initial_run_payload_is_retrievable_for_manual_retry`.
+- **Front:** `RetryRunResponse` e `api.retryRun()` foram adicionados. `CampaignDetail`
+  mostra “Retry campaign” em `phase === "error"`, exibe loading/erro e navega para a
+  nova campanha retornada pelo backend.
+- **Docs:** `AGENTS.md` agora registra que retry manual de campanha falhada sempre cria
+  novo `run_id` e nunca reutiliza o antigo.
+
+**Verificação local:** `rtk proxy .venv/bin/python -m pytest --no-cov tests/test_web_endpoints.py`
+→ **52 passed**; `rtk npm run typecheck` e `rtk npm run check:boundaries` verdes em
+`front/`. O teste PostgreSQL novo foi tentado isoladamente, mas o fixture falhou antes do
+código por ausência de PostgreSQL em `127.0.0.1:5432`
+(`psycopg.OperationalError: connection is bad`), a mesma limitação de infraestrutura já
+documentada para este sandbox.
+
+### Follow-up frontend
+
+- **Sintoma:** o botão “Retry campaign” não aparecia no front servido pelo FastAPI.
+  **Causa:** `front/dist` já existia e ainda continha o bundle antigo; `dashboard()` serve
+  `front/dist/index.html` quando ele existe, então mudanças em `front/src` não aparecem no
+  backend sem rebuild. **Correção:** `rtk npm run build` em `front/` regenerou
+  `dist/assets/index-CI1DOQNM.js`; o bundle novo contém “Retry campaign” e
+  `/api/run/${run_id}/retry`.
+- **Segundo sintoma:** mesmo com o bundle novo, a ação só existia dentro de
+  `CampaignDetail`; em Campaigns, Dashboard, Queue e Video Review não havia nenhum botão
+  visível no contexto onde o usuário vê a falha. **Causa:** a implementação inicial
+  seguiu a rota planejada do detalhe, mas o fluxo real do dashboard expõe campanhas
+  falhadas em várias telas. **Correção:** criado `RetryCampaignButton` reutilizável e
+  conectado em Campaigns (desktop/mobile), Dashboard (um erro = retry direto, múltiplos =
+  ir para Campaigns), Queue e Video Review. O build servido foi regenerado para
+  `dist/assets/index-DENXVYSo.js`.
+
+## Gates duráveis: contrato front ↔ backend corrigido (2026-07-28)
+
+Objetivo: corrigir o contrato dos human gates no dashboard quando `DATABASE_URL` está
+ativo. O backend já exigia `gate_id`/`version` para resolver gates persistidos, mas o
+front só enviava `approved`/`concepts`.
+
+### Red → Green e falhas investigadas
+
+- **RED:** `test_run_state_returns_versioned_persisted_concept_gate` e
+  `test_run_state_returns_versioned_persisted_creator_gate` falharam porque
+  `/api/state/{run_id}` retornava `edit_concepts=[]`/`awaiting=[]` e não retornava
+  `gate` quando o run vinha do read model PostgreSQL. **Causa:** no caminho durável, o
+  payload canônico do gate vive em `run_gates`, mas `/api/state` lia apenas
+  `persisted.state["pending_*"]` — campo produzido pelo caminho local `_runs`, não pelo
+  Runner durável. **Correção:** `/api/state` agora busca `get_pending_gate(run_id)`,
+  deriva `edit_concepts`/`awaiting` do payload do gate e retorna
+  `{gate_id, version, gate_type}`.
+- **Contrato SSE:** `PostgresJobRepository.open_gate()` agora inclui
+  `gate_id`/`version`/`gate_type` nos eventos públicos `awaiting_concept_edit` e
+  `awaiting_approval`, preservando o replay por `Last-Event-ID`.
+- **Front:** `RunDetail`/`StreamEvent` ganharam `GateRef`; `useRunStream` hidrata e
+  reduz o gate; `CampaignDetail` e `Concepts` reenviam `gate_id`/`version` em
+  aprovações/edições. O modo local continua compatível com `gate: null`.
+- **Docs:** `AGENTS.md` foi atualizado para refletir `config-mock`, `config-staging`,
+  `config`, `AsyncPostgresSaver`, jobs/gates/eventos duráveis e a regra de nunca resolver
+  gate persistido só por `run_id`.
+
+**Verificação local:** `rtk proxy .venv/bin/python -m pytest --no-cov tests/test_web_endpoints.py`
+→ **48 passed**; `rtk npm run typecheck`, `rtk npm run check:boundaries` e
+`rtk npm run check:video-bridge` verdes. O teste PostgreSQL alterado foi coletado com
+sucesso, mas não executado neste sandbox porque não há PostgreSQL em `127.0.0.1:5432`.
+
 ## D36 — Plano Cloudflare com portabilidade AWS (2026-07-16)
 
 Foi documentado o plano em `docs/ADR-D36-cloudflare-aws-portability.md`; **nenhuma
@@ -2370,3 +2538,166 @@ ficou `LOGIN`, `NOSUPERUSER`, `NOBYPASSRLS`, `NOCREATEDB`, `NOCREATEROLE` e
 - Suíte completa de testes (`rtk proxy .venv/bin/python -m pytest --no-cov`): **1093 passed, 2 skipped** (100% verde).
 - Execução E2E mock (`orchestrator run --offer "Serum X SQLAlchemy ORM" --config-dir config-mock`): 12/12 itens produzidos e persistidos no PostgreSQL sem erros.
 
+---
+
+## Investigação — creators aprovados sem imagem/voz no web
+
+- **Sintoma:** após continuar o fluxo web com creators, a UI não mostrava creator com
+  imagem e voz tocável. Nos runs ativos investigados (`web-88c64f21`, `web-e3eaddf7`,
+  `web-8ea32f1f`), o payload do job tinha `seed_creator=true`, `approve_creators=true`
+  e `edit_concepts=true`, mas o banco não tinha linhas em `creators` para esses run ids.
+- **Causa:** o caminho de reutilização por `seed_creator` não constrói roster novo e,
+  quando o front da galeria inicia draft, envia `approve_creators=false`; logo não há
+  gate `approve_creators` para gravar `record_creators`. Além disso, áudio baixável do
+  adapter live era persistido só em `voice_id`, sem preencher `voice_preview_uri`, e o
+  front só renderizava `<audio>` para caminhos locais iniciados por `/`.
+- **Correção:** o worker durável passa a registrar o `seed_creator` canônico como
+  creator aprovado do novo run no execute/resume quando não há gate de aprovação; a normalização comum
+  promove URIs de áudio tocáveis para `voice_preview_uri`; `persist_creator_media`
+  preenche `voice_id`, `voice_ref`, `voice` e `voice_preview_uri`; o front usa um helper
+  único que aceita `/media`, `https`, `data:audio` e `blob` para preview de voz.
+- **Verificação:** RED reproduzido em
+  `test_downloadable_creator_voice_becomes_playable_preview` e
+  `test_record_creators_uses_renderable_voice_uri_as_preview`; GREEN com
+  `rtk proxy .venv/bin/python -m pytest --no-cov` nos testes focados de mídia/store/web
+  (`7 passed`). `front`: `npm run typecheck`, `npm run check:boundaries` e
+  `npm run build` passaram. O teste PostgreSQL do worker ficou bloqueado localmente no
+  setup (`127.0.0.1:5432` exigiu senha), antes de executar as asserções.
+
+---
+
+## Investigação — psycopg `another command is already in progress` no runner web
+
+- **Sintoma:** durante polling do front e execução do runner embutido, os logs mostravam
+  rollback psycopg ignorado por `another command is already in progress`, descarte de
+  conexão `BAD`, `couldn't stop task 'pool-*-worker-0' within 5.0 seconds` e
+  `web embedded runner falhou ao processar job`.
+- **Causa:** `run_worker_once()` cancelava a task de heartbeat no `finally`. Se o
+  cancelamento caísse enquanto `jobs.renew()` estava executando SQL, a conexão recebia
+  `CancelledError` no meio do comando e o rollback subsequente concorria com a query
+  ainda em progresso. O runner embutido também chamava `run_worker_once()` sem passar o
+  pool compartilhado da API, criando e fechando um novo `AsyncConnectionPool` em cada
+  poll/job.
+- **Correção:** o heartbeat agora para por sinal cooperativo (`asyncio.Event`) e espera
+  o `renew()` em andamento terminar, sem cancelar a operação psycopg. `run_worker_once()`
+  aceita `database`/`tenant` opcionais, e o runner embutido reutiliza o
+  `get_shared_database()` resolvido no lifespan da API.
+- **Verificação:** RED→GREEN em
+  `test_worker_stops_heartbeat_without_cancelling_inflight_renew` e
+  `test_embedded_runner_reuses_shared_database`; regressões focadas de lifespan/runner:
+  `3 passed`; `py_compile` de `worker.py` e `web/server.py` passou. Testes que exigem
+  PostgreSQL local continuam bloqueados no sandbox por autenticação em `127.0.0.1:5432`.
+
+---
+
+## Implementação — progresso observável da pipeline e atividade semântica
+
+- **Sintoma:** Campaign Detail e Operations exibiam apenas eventos técnicos efêmeros.
+  Ao recarregar, o usuário não conseguia distinguir estágios concluídos, o trabalho
+  atual, os processos paralelos por clip nem gates aguardando sua ação.
+- **Causa:** não havia um read model canônico de progresso. O stream do LangGraph era
+  traduzido somente para `node_start`/`node_end`, o frontend reconstruía estado local
+  incompleto e Recent Activity usava texto técnico/horário do navegador. No modo local,
+  o `event_id` também não era enviado como campo SSE `id:`, impedindo resume preciso.
+- **Correção:** criado `orchestrator.progress`, que mapeia nodes para estágios estáveis,
+  correlaciona start/end por `operation_id`, preserva `item_id`/tentativa e projeta
+  `progress` e `activity`. O runner entrega esses eventos por `event_sink`; o worker
+  durável persiste cada evento em `run_events` antes da publicação; `/api/state`
+  reidrata o snapshot e a timeline. O modo local ganhou IDs/horários estáveis, replay
+  após `Last-Event-ID` e emissão SSE `id:`. O frontend passou a hidratar REST + SSE com
+  deduplicação, mostrar checks duráveis, todos os processos paralelos ativos, gates,
+  contadores, estágio/tentativa por clip e atividade com horário do servidor.
+- **RED API:** `/api/state` não retornava `progress`; o teste falhou com `KeyError`.
+  **GREEN:** projeção canônica adicionada sem alterar os contratos de gate.
+- **RED fan-out:** concluir um clip encerrava visualmente o estágio enquanto outro
+  permanecia ativo. **GREEN:** operações são correlacionadas individualmente e o estágio
+  só conclui ao atingir `total_units`.
+- **RED SSE local:** reconectar com `Last-Event-ID: local-1` repetia `local-1` e o
+  stream não continha `id: local-2`. **GREEN:** replay filtrado e ID SSE explícito.
+- **RED frontend:** estágio global ativo aparecia como `1 clip in Concepts`.
+  **GREEN:** contagem de clips ficou restrita aos estágios por item; estágios globais
+  usam `Concepts in progress`. O mesmo ciclo revelou DOM acumulado entre testes porque
+  Vitest não tinha cleanup global; `afterEach(cleanup)` foi adicionado ao setup.
+- **RED atividade:** o smoke test ainda projetava 106 eventos brutos como entradas
+  repetidas de Concepts, Creators e Assembly. **GREEN:** a timeline mantém a primeira
+  abertura e somente a conclusão canônica de cada estágio/item/tentativa, descartando
+  `item_update` técnico quando há `progress_event`; o mesmo run passou a expor 34
+  entradas operacionais sem perder os dois clips paralelos.
+- **Falha TypeScript:** a primeira implementação de `gateRef` exigia
+  `Record<string, unknown>`, incompatível com variantes discriminadas do stream.
+  **Correção:** o helper recebe somente a estrutura opcional necessária e mantém o
+  narrowing de `gate_type`.
+- **Falhas de comando sem mudança de produto:** `python` e `ruff` não estão instalados
+  diretamente no ambiente, então Python foi executado por `uv run`; lint Ruff não pôde
+  ser executado e foi substituído por `compileall` mais os gates de teste/tipo. Um
+  filtro Vitest incluiu `front/` apesar do cwd já ser `front/`, e um gate referenciou o
+  arquivo inexistente `tests/test_worker.py`; ambos foram corrigidos para os caminhos
+  reais antes da verificação final.
+- **Cobertura focada inicialmente falhou:** o `addopts` global exige 100% do projeto
+  mesmo ao selecionar um único teste. Os ciclos red/green usaram `--no-cov`, seguidos
+  de uma execução isolada de `orchestrator.progress` com **244/244 statements (100%)**.
+- **Suíte global:** `1004 passed, 2 skipped, 113 errors`; os 113 erros ocorreram no
+  setup das fixtures PostgreSQL antes das asserções, porque `127.0.0.1:5432` exigiu
+  senha. Nenhuma falha funcional apareceu fora desse bloqueio de infraestrutura.
+- **Verificação final:** backend focado, incluindo projeção, runner E2E, REST/SSE,
+  execução web local, URLs assinadas e serviços de runner: **128 passed**. O módulo
+  `orchestrator.progress` manteve **258/258 statements (100%)**. Frontend:
+  **3 passed**, `tsc --noEmit`, boundaries e build Vite verdes. `compileall` e
+  `git diff --check` também passaram. Smoke real em `config-mock`, batch 2: fase
+  `done`, 9 estágios completos, 2/2 clips montados e 34 atividades semânticas.
+
+---
+
+## Implementação — Pipeline V2, agents criativos e revisão única
+
+- **Sintoma:** o usuário não sabia o que já havia terminado, qual processo estava
+  executando nem o que seria solicitado em seguida. A topologia pública misturava
+  persona, dois gates humanos e nodes técnicos; concepts/scripts/video tinham
+  autoridades agentic diferentes e contratos de saída inconsistentes.
+- **Causa:** o grafo interno era usado como modelo de UX. Dados da campanha podiam
+  aparecer próximos do prompt, outputs criativos não tinham um schema terminal comum e
+  tracing preservava offer/script quando a flag de redação estava desligada.
+- **Correção de produto:** a API/UI V2 expõe Configuração → Plano criativo → Revisão →
+  Produção e QC → Montagem. Há um único interrupt `review_creative_plan`; regeneração
+  volta a concepts/scripts/creator_profiles e aprovação inicia o fan-out. O wizard pede
+  offer, público, fatos/restrições, direções opcionais, plataforma, objetivo, batch e
+  performance; a revisão mostra conceitos+roteiros e exatamente dois creators.
+- **Correção dos agents:** criados contratos Pydantic estritos para campanha,
+  concepts, scripts e casting. Apenas `concepts`, `scripts` e `creator_profiles` podem
+  ser agents; cada um tem prompt e hash próprios, allowlist de uma tool e uma submissão
+  `creative-v2`. Persona saiu do top graph e vídeo voltou a tool/adapters automáticos.
+- **Prompt injection:** a prioridade é controles do servidor → política compartilhada
+  → contrato de fase → dados. Campanha, performance, feedback e outputs são
+  `UNTRUSTED_STAGE_DATA`. IDs, counts, routing, budgets e providers permanecem
+  server-owned. API/traces expõem apenas versão/hash/schema, nunca corpo/path, offer,
+  script ou mensagens.
+- **Revisão:** patches aninhados usam `extra=forbid`; concept IDs, dois creator IDs,
+  offer e mídia são preservados. Só copy e direção criativa conhecidas podem mudar.
+  Runs duráveis exigem `gate_id`, `version` e `gate_type=review_creative_plan`.
+- **Progresso:** eventos customizados reais do LangChain informam scripts `N/total` e
+  previews `N/2`; REST/SSE e Recent Activity projetam as cinco fases e os trabalhos
+  internos relevantes sem expor detalhes de prompt.
+- **Cancelamento:** a migration `20260728_0009` adicionou estados `review` e
+  `cancelled`, cancelou gates V1 pendentes e bloqueia resolução posterior com 410. Foi
+  aplicada na base configurada em 2026-07-28: **3 gates**, **3 runs** e **0 jobs**
+  associados foram cancelados.
+- **Falhas investigadas:** o perfil live com providers mock falhou porque o mock antigo
+  não submetia schemas terminais; ele agora produz os três contratos V2
+  deterministicamente. A revisão web descartava briefs dos creators e aceitava campos
+  arbitrários; a normalização passou a preservar os briefs e o merge ganhou allowlists.
+  A API durável também resolvia o `gate_id` sem conferir o `run_id` da URL e o worker
+  podia persistir creators antes do merge seguro; a API agora compara o gate pendente
+  completo e materializa uma resolução sanitizada sobre o payload canônico antes de
+  enfileirar o resume. O índice de runs classificava cancelamentos como erro por causa
+  do motivo de auditoria em `runs.error`; `cancelled` agora é uma coleção própria na
+  API/UI e esses runs não oferecem retry.
+  Testes antigos de persona/video-agent/dois gates foram atualizados porque
+  especificavam comportamento deliberadamente substituído pela D38.
+- **Verificação:** todos os testes backend sem fixture PostgreSQL passaram; a suíte
+  PostgreSQL continua bloqueada no runner local de pytest por autenticação em
+  `127.0.0.1:5432`, mas a migração real chegou a `head`. Frontend: Vitest verde,
+  `tsc --noEmit`, boundaries e build Vite verdes. `compileall` e `git diff --check`
+  passaram; Ruff não está instalado no venv.
+- **Documentação:** `docs/PIPELINE_V2.md`,
+  `docs/ADR-D38-pipeline-v2-agent-contracts.md`, D38 em `docs/DECISIONS.md` e regras
+  canônicas atualizadas em `AGENTS.md`.

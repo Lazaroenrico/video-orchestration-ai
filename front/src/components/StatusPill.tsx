@@ -7,6 +7,7 @@ export type Status =
   | "review"
   | "approved"
   | "draft"
+  | "cancelled"
   | "failed"
   | "done";
 
@@ -16,6 +17,7 @@ const STYLES: Record<Status, { cls: string; icon?: string; label: string }> = {
   review: { cls: "bg-warning-review/10 text-warning-review", icon: "rate_review", label: "In Review" },
   approved: { cls: "bg-success-published/10 text-success-published", icon: "check_circle", label: "Approved" },
   draft: { cls: "bg-draft-gray/10 text-draft-gray", icon: "edit_note", label: "Draft" },
+  cancelled: { cls: "bg-draft-gray/10 text-draft-gray", icon: "cancel", label: "Cancelled" },
   failed: { cls: "bg-error/10 text-error", icon: "error", label: "Failed" },
   done: { cls: "bg-success-published/10 text-success-published", icon: "check", label: "Done" },
 };

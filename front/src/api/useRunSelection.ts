@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { useAsync } from "./useAsync";
-import { api } from "./client";
+import { errorMessage, useRunsIndex } from "./queries";
 
 /**
  * Load the run index and track a selected run id, defaulting to the first active
@@ -8,7 +7,8 @@ import { api } from "./client";
  * screens, which all attach to one run's event stream.
  */
 export function useRunSelection(preferredRunId?: string | null) {
-  const { data, loading, error } = useAsync(() => api.getRuns(), []);
+  const runsQuery = useRunsIndex();
+  const data = runsQuery.data ?? null;
   const preferred = preferredRunId?.trim() || null;
   const [selected, setSelected] = useState<string | null>(() => preferred);
   const lastAppliedPreferred = useRef<string | null>(preferred);
@@ -28,5 +28,12 @@ export function useRunSelection(preferredRunId?: string | null) {
   const baseRuns = data?.runs ?? [];
   const runs = selected && !baseRuns.includes(selected) ? [selected, ...baseRuns] : baseRuns;
   const active = new Set(data?.active ?? []);
-  return { runs, active, selected, setSelected, loading, error };
+  return {
+    runs,
+    active,
+    selected,
+    setSelected,
+    loading: runsQuery.isLoading,
+    error: errorMessage(runsQuery.error),
+  };
 }

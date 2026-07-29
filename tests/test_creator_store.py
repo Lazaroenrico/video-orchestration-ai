@@ -158,6 +158,21 @@ def test_record_creators_persists_normalized_creator_fields(tmp_path):
     assert e["angles"] == ["front", "profile"]
 
 
+def test_record_creators_uses_renderable_voice_uri_as_preview(tmp_path):
+    store = tmp_path / "creators.json"
+    creator = {
+        "id": "creator-9",
+        "image_uri": "https://cdn.example/face.png",
+        "voice_id": "https://cdn.example/voice.mp3",
+    }
+
+    record_creators(str(store), "run-001", [creator], approved_ids=["creator-9"])
+
+    e = load_creators(str(store))[0]
+    assert e["voice_ref"] == "https://cdn.example/voice.mp3"
+    assert e["voice_preview_uri"] == "https://cdn.example/voice.mp3"
+
+
 def test_load_creators_old_store_without_normalized_fields_still_loads(tmp_path):
     store = tmp_path / "creators.json"
     store.write_text(

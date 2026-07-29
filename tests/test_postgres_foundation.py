@@ -1,6 +1,7 @@
 """Integração real da fundação PostgreSQL multi-tenant (ADR-D36, Fase 2)."""
 from __future__ import annotations
 
+import asyncio
 import logging
 
 import pytest
@@ -185,6 +186,69 @@ async def test_pool_does_not_leak_tenant_context_between_transactions(postgresql
 
     assert scoped_rows == [("acme",)]
     assert unscoped_rows == []
+
+
+async def test_database_connection_exits_transaction_before_closing_on_cancellation():
+    class FakeTransaction:
+        def __init__(self) -> None:
+            self.entered = False
+            self.exited = False
+            self.exit_exc_type = None
+
+        async def __aenter__(self):
+            self.entered = True
+            return self
+
+        async def __aexit__(self, exc_type, *_exc):
+            self.exited = True
+            self.exit_exc_type = exc_type
+            return False
+
+    class FakeConnection:
+        def __init__(self) -> None:
+            self.closed = False
+            self.transaction_context = FakeTransaction()
+
+        def transaction(self):
+            return self.transaction_context
+
+        async def close(self):
+            self.closed = True
+
+    class FakePoolConnection:
+        def __init__(self, connection: FakeConnection) -> None:
+            self.connection = connection
+            self.exited = False
+
+        async def __aenter__(self):
+            return self.connection
+
+        async def __aexit__(self, *_exc):
+            self.exited = True
+            return False
+
+    class FakePool:
+        def __init__(self) -> None:
+            self.connection_obj = FakeConnection()
+            self.context = FakePoolConnection(self.connection_obj)
+
+        def connection(self):
+            return self.context
+
+    pool = FakePool()
+    database = Database.__new__(Database)
+    database._pool = pool
+
+    with pytest.raises(asyncio.CancelledError):
+        async with database.connection() as connection:
+            assert connection is pool.connection_obj
+            raise asyncio.CancelledError
+
+    assert pool.connection_obj.closed is True
+    assert pool.connection_obj.transaction_context.entered is True
+    assert pool.connection_obj.transaction_context.exited is True
+    assert pool.connection_obj.transaction_context.exit_exc_type is asyncio.CancelledError
+    assert pool.context.exited is True
 
 
 def test_cli_migrate_upgrades_postgres_idempotently(postgresql):

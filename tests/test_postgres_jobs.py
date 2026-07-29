@@ -9,6 +9,7 @@ import pytest
 from fastapi import BackgroundTasks
 
 from orchestrator.db import (
+    CancelledGateError,
     Database,
     Job,
     LeaseLostError,
@@ -93,6 +94,40 @@ async def test_enqueued_run_is_claimed_completed_and_replayable_after_restart(
     assert [(entry.topic, entry.status) for entry in outbox] == [
         ("run.queued", "pending")
     ]
+
+
+async def test_initial_run_payload_is_retrievable_for_manual_retry(postgresql):
+    runtime_url = _runtime_url(postgresql)
+    identity = TenantIdentity("retry-jobs", "Retry Jobs", "oidc|runner")
+    payload = {
+        "offer": "serum X",
+        "batch": 2,
+        "platform": "tiktok",
+        "config_dir": "config-mock",
+        "db_path": "/tmp/orchestrator.db",
+        "creator_prompt": "creator prompt",
+        "video_prompt": "video prompt",
+        "approve_creators": False,
+        "edit_concepts": True,
+        "seed_creator": {"id": "creator-fixed"},
+    }
+
+    async with Database(runtime_url) as database:
+        tenant = await database.ensure_tenant(identity)
+        jobs = PostgresJobRepository(database, tenant)
+        await jobs.enqueue_run(
+            "run-retry-source",
+            offer="serum X",
+            platform="tiktok",
+            batch_size=2,
+            payload=payload,
+            now=NOW,
+        )
+        initial = await jobs.get_initial_run_payload("run-retry-source")
+        missing = await jobs.get_initial_run_payload("missing-run")
+
+    assert initial == payload
+    assert missing is None
 
 
 async def test_job_lease_renews_and_failures_retry_with_bounded_backoff(
@@ -235,6 +270,56 @@ async def test_gate_resolution_is_versioned_and_enqueues_exactly_one_resume(
         "gate_opened",
         "awaiting_approval",
     ]
+    first_public_gate = events[3].data
+    assert first_public_gate["gate_id"] == str(gate.gate_id)
+    assert first_public_gate["version"] == 1
+    assert first_public_gate["gate_type"] == "approve_creators"
+
+
+async def test_pipeline_v2_cancellation_is_tenant_scoped_and_idempotent(postgresql):
+    runtime_url = _runtime_url(postgresql)
+    identity = TenantIdentity("cancel-v1", "Cancel V1", "oidc|reviewer")
+
+    async with Database(runtime_url) as database:
+        tenant = await database.ensure_tenant(identity)
+        jobs = PostgresJobRepository(database, tenant)
+        queued = await jobs.enqueue_run(
+            "run-v1-gate",
+            offer="serum X",
+            platform="tiktok",
+            batch_size=2,
+            payload={},
+            now=NOW,
+        )
+        gate = await jobs.open_gate(
+            "run-v1-gate",
+            gate_type="approve_creators",
+            payload={"creators": [{"id": "creator-0"}]},
+            now=NOW,
+        )
+
+        summary = await jobs.cancel_pending_test_runs(now=NOW + timedelta(seconds=1))
+        repeated = await jobs.cancel_pending_test_runs(now=NOW + timedelta(seconds=2))
+        cancelled_job = await jobs.get(queued.job_id)
+        cancelled_run = await PostgresRunRepository(database, tenant).get("run-v1-gate")
+        events = await jobs.list_events("run-v1-gate")
+
+        with pytest.raises(CancelledGateError, match="cancelado"):
+            await jobs.resolve_gate(
+                gate.gate_id,
+                version=gate.version,
+                resolution={"approved": ["creator-0"]},
+                now=NOW + timedelta(seconds=3),
+            )
+
+    assert summary.gates == 1
+    assert summary.runs == 1
+    assert summary.jobs == 1
+    assert repeated.gates == repeated.runs == repeated.jobs == 0
+    assert cancelled_job is not None and cancelled_job.status == "cancelled"
+    assert cancelled_run is not None and cancelled_run.phase == "cancelled"
+    assert events[-1].event_type == "run_cancelled"
+    assert events[-1].data["reason"] == "pipeline_v2_reset"
 
 
 async def test_post_run_enqueues_durable_job_without_background_task(
@@ -658,6 +743,92 @@ async def test_worker_renews_lease_while_executor_is_running(
     assert lease_renewed.is_set()
 
 
+async def test_worker_stops_heartbeat_without_cancelling_inflight_renew(monkeypatch):
+    job = Job(
+        job_id=UUID("00000000-0000-0000-0000-000000000001"),
+        run_id="run-heartbeat-stop",
+        kind="execute_run",
+        status="running",
+        payload={},
+        attempt=1,
+        max_attempts=1,
+        available_at=NOW,
+        lease_expires_at=None,
+        worker_id="runner-heartbeat-stop",
+        error=None,
+    )
+    renew_started = asyncio.Event()
+    release_renew = asyncio.Event()
+    renew_cancelled = False
+    completed = False
+
+    class FakeDatabase:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc):
+            return None
+
+        async def resolve_tenant(self, _identity):
+            return object()
+
+    class FakeDatabaseFactory:
+        @staticmethod
+        def from_env():
+            return FakeDatabase()
+
+    class FakeJobs:
+        def __init__(self, *_args):
+            pass
+
+        async def claim(self, *_args, **_kwargs):
+            return [job]
+
+        async def renew(self, *_args, **_kwargs):
+            nonlocal renew_cancelled
+            renew_started.set()
+            try:
+                await release_renew.wait()
+            except asyncio.CancelledError:
+                renew_cancelled = True
+                raise
+            return job
+
+        async def complete(self, *_args, **_kwargs):
+            nonlocal completed
+            completed = True
+
+        async def fail(self, *_args, **_kwargs):
+            raise AssertionError("job should not fail")
+
+    async def finish_after_renew_starts(_job):
+        await asyncio.wait_for(renew_started.wait(), timeout=1)
+
+    monkeypatch.setenv("ORCH_ORGANIZATION_SLUG", "heartbeat-stop")
+    monkeypatch.setenv("ORCH_ORGANIZATION_NAME", "Heartbeat Stop")
+    monkeypatch.setenv("ORCH_USER_SUBJECT", "oidc|heartbeat-stop")
+    monkeypatch.setattr(worker_module, "Database", FakeDatabaseFactory)
+    monkeypatch.setattr(worker_module, "PostgresJobRepository", FakeJobs)
+
+    task = asyncio.create_task(
+        run_worker_once(
+            worker_id="runner-heartbeat-stop",
+            execute=finish_after_renew_starts,
+            heartbeat_seconds=0,
+        )
+    )
+    await asyncio.wait_for(renew_started.wait(), timeout=1)
+    await asyncio.sleep(0.05)
+    if not task.done():
+        release_renew.set()
+
+    worked = await asyncio.wait_for(task, timeout=1)
+
+    assert worked is True
+    assert completed is True
+    assert renew_cancelled is False
+
+
 async def test_worker_cancels_execution_immediately_when_heartbeat_loses_lease(
     postgresql,
     monkeypatch,
@@ -800,9 +971,12 @@ async def test_worker_signs_canonical_creator_only_at_provider_boundary(
             batch_size=1,
             payload={
                 "config_dir": "config-mock",
+                "offer": "serum X",
+                "approve_creators": False,
                 "seed_creator": {
                     "id": "creator-0",
                     "image_uri": "r2://ugc/source-run/creator-0.webp",
+                    "voice_preview_uri": "r2://ugc/source-run/creator-0.wav",
                 },
             },
         )
@@ -839,6 +1013,16 @@ async def test_worker_signs_canonical_creator_only_at_provider_boundary(
     assert observed["seed_creator"]["image_uri"] == (
         "https://provider.example/source-run/creator-0.webp?ttl=900"
     )
+    async with Database(runtime_url) as database:
+        tenant = await database.ensure_tenant(TenantIdentity.from_env())
+        persisted = await PostgresCreatorRepository(database, tenant).find_creator(
+            "creator-0", "run-provider-handoff"
+        )
+
+    assert persisted is not None
+    assert persisted["image_uri"] == "r2://ugc/source-run/creator-0.webp"
+    assert persisted["voice_preview_uri"] == "r2://ugc/source-run/creator-0.wav"
+    assert persisted["status"] == "approved"
 
 
 async def test_jobs_events_and_outbox_are_isolated_between_organizations(

@@ -11,7 +11,9 @@ from orchestrator.db.database import Database
 from orchestrator.db.models import Run, RunItem
 from orchestrator.db.tenancy import TenantContext
 
-_RUN_PHASES = frozenset({"running", "editing", "awaiting", "done", "error"})
+_RUN_PHASES = frozenset(
+    {"running", "editing", "awaiting", "review", "done", "error", "cancelled"}
+)
 
 
 @dataclass(frozen=True)
@@ -214,4 +216,3 @@ class PostgresRunRepository:
             RunIndexEntry(run_id=row[0], phase=row[1], error=row[2])
             for row in rows
         ]
-

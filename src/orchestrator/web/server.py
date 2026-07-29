@@ -11,18 +11,20 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import uuid
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 from urllib.parse import urlparse
 
 from fastapi import BackgroundTasks, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from langgraph.types import Command
 
@@ -43,28 +45,118 @@ from orchestrator.config import (
     load_pipeline,
     load_providers,
 )
-from orchestrator.db import Database, close_shared_database, get_shared_database
+from orchestrator.creators import normalize_creator_fields
+from orchestrator.creative_contracts import CampaignInput
+from orchestrator.db import Database, TenantIdentity, close_shared_database, get_shared_database
 from orchestrator.tracing import run_trace_config
 from orchestrator.graph.builder import build_graph
 from orchestrator.graph.checkpoint import open_checkpointer
-from orchestrator.nodes.stages import reroll_creator_voice as reroll_creator_voice_in_stage
+from orchestrator.nodes.stages import (
+    apply_review_concept_updates,
+    apply_review_creator_updates,
+    reroll_creator_voice as reroll_creator_voice_in_stage,
+)
+from orchestrator.progress import ProgressEventTranslator, build_activity, build_progress
 from orchestrator.registry import build_adapter_from_providers
 from orchestrator.storage.factory import build_media_storage
 from orchestrator.storage.r2 import R2MediaStorage
 from orchestrator.storage.resolve import resolve_signed_uris
+from orchestrator.worker import run_worker_once
+
+_log = logging.getLogger(__name__)
+_WEB_DEFAULT_CONFIG_DIR = "config-staging"
+_web_runner_wake_event: asyncio.Event | None = None
+
+
+def _truthy_env(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _effective_config_dir(config_dir: Optional[str]) -> str:
+    return config_dir or os.environ.get("ORCH_CONFIG_DIR") or _WEB_DEFAULT_CONFIG_DIR
+
+
+def _web_embedded_runner_enabled() -> bool:
+    return _truthy_env("ORCH_WEB_EMBEDDED_RUNNER") and bool(os.environ.get("DATABASE_URL"))
+
+
+def _web_runner_poll_interval() -> float:
+    try:
+        value = float(os.environ.get("ORCH_WEB_RUNNER_POLL_INTERVAL", "2"))
+    except ValueError:
+        return 2.0
+    return value if value > 0 else 2.0
+
+
+def _web_runner_worker_id() -> str:
+    return os.environ.get("ORCH_WEB_RUNNER_WORKER_ID", "web-embedded-runner")
+
+
+def _wake_web_embedded_runner() -> None:
+    if _web_runner_wake_event is not None:
+        _web_runner_wake_event.set()
+
+
+async def _web_embedded_runner_loop(wake_event: asyncio.Event) -> None:
+    worker_id = _web_runner_worker_id()
+    database = await get_shared_database()
+    tenant = await database.resolve_tenant(TenantIdentity.from_env())
+    _log.info("web embedded runner iniciado: worker_id=%s", worker_id)
+    try:
+        while True:
+            try:
+                worked = await run_worker_once(
+                    worker_id=worker_id,
+                    database=database,
+                    tenant=tenant,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - falha de job não pode derrubar a API
+                _log.exception("web embedded runner falhou ao processar job")
+                worked = False
+            if worked:
+                continue
+            try:
+                await asyncio.wait_for(
+                    wake_event.wait(),
+                    timeout=_web_runner_poll_interval(),
+                )
+                wake_event.clear()
+            except asyncio.TimeoutError:
+                pass
+    finally:
+        _log.info("web embedded runner encerrado: worker_id=%s", worker_id)
+
 
 @asynccontextmanager
 async def _app_lifespan(app_: FastAPI):
+    global _web_runner_wake_event
     database: Database | None = None
+    web_runner_task: asyncio.Task | None = None
+    web_runner_event: asyncio.Event | None = None
     if os.environ.get("ORCH_AUTH_MODE", "disabled") == "cloudflare_access":
         database = Database.from_env()
         await database.open()
         app_.state.auth_database = database
     elif os.environ.get("DATABASE_URL"):
         database = await get_shared_database()
+    if _web_embedded_runner_enabled():
+        web_runner_event = asyncio.Event()
+        _web_runner_wake_event = web_runner_event
+        web_runner_task = asyncio.create_task(
+            _web_embedded_runner_loop(web_runner_event),
+            name="orchestrator-web-embedded-runner",
+        )
     try:
         yield
     finally:
+        if web_runner_task is not None:
+            web_runner_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await web_runner_task
+        if web_runner_event is not None and _web_runner_wake_event is web_runner_event:
+            _web_runner_wake_event = None
         if database is not None:
             await database.close()
         await close_shared_database()
@@ -97,6 +189,7 @@ def _install_cors(app_: FastAPI, origins: list[str]) -> None:
 _install_cors(app, _cors_origins)
 
 
+@app.head("/healthz")
 @app.get("/healthz")
 async def healthz() -> dict[str, str]:
     """Liveness: o processo respondeu. Não toca config nem IO externo."""
@@ -110,9 +203,10 @@ async def readyz() -> JSONResponse:
     Não chama provider pago nem faz request S3 — só valida config e credenciais.
     """
     try:
-        load_pipeline()
-        providers = load_providers()
-        load_judge()
+        effective_config_dir = _effective_config_dir(None)
+        load_pipeline(effective_config_dir)
+        providers = load_providers(effective_config_dir)
+        load_judge(effective_config_dir)
         backend = ((providers or {}).get("storage") or {}).get("backend", "local")
         if backend == "local":
             pass
@@ -187,7 +281,7 @@ _runs: dict[str, dict[str, Any]] = {}
 _RUN_REPOSITORY_UNSET = object()
 
 PIPELINE_NODES = {
-    "persona", "roster", "approval", "concepts", "scripts", "concept_review",
+    "concepts", "scripts", "creator_profiles", "roster", "review",
     "process_item", "feedback",
     "script", "ltx", "kling", "seedance",
     "product_demo", "qc", "assembly", "upscale", "drop",
@@ -200,12 +294,11 @@ ITEM_UPDATE_NODES = {
 }
 
 NODE_LABELS: dict[str, str] = {
-    "persona": "Persona",
-    "roster": "Creator Roster",
-    "approval": "Aceite Human",
     "concepts": "Conceitos",
     "scripts": "Scripts",
-    "concept_review": "Edição de Conceitos",
+    "creator_profiles": "Perfis de creators",
+    "roster": "Previews de creators",
+    "review": "Revisão do plano criativo",
     "process_item": "Item",
     "feedback": "Feedback",
     "script": "Script",
@@ -229,6 +322,13 @@ def _emit_sync(run_id: str, event: dict[str, Any]) -> None:
     state = _runs.get(run_id)
     if state is None:
         return
+    sequence = int(state.get("event_sequence") or len(state.get("buffer") or [])) + 1
+    state["event_sequence"] = sequence
+    event = {
+        **event,
+        "event_id": event.get("event_id") or f"local-{sequence}",
+        "occurred_at": event.get("occurred_at") or datetime.now(UTC).isoformat(),
+    }
     state["buffer"].append(event)
     for q in list(state["queues"]):
         try:
@@ -239,6 +339,16 @@ def _emit_sync(run_id: str, event: dict[str, Any]) -> None:
 
 async def _emit(run_id: str, event: dict[str, Any]) -> None:
     _emit_sync(run_id, event)
+
+
+def _persisted_event_payload(event: Any) -> dict[str, Any]:
+    data = event.data if isinstance(event.data, dict) else {}
+    return {
+        **data,
+        "type": event.event_type,
+        "event_id": str(event.seq),
+        "occurred_at": event.created_at.isoformat(),
+    }
 
 
 def _to_plain(obj: Any) -> Any:
@@ -262,7 +372,9 @@ def _signing_storage(config_dir: Optional[str]) -> Optional[Any]:
     """
     try:
         storage = build_media_storage(
-            load_providers(config_dir), root=_media_root, web_prefix="/media",
+            load_providers(_effective_config_dir(config_dir)),
+            root=_media_root,
+            web_prefix="/media",
         )
     except Exception:  # noqa: BLE001 — dashboard nunca cai por config de storage
         return None
@@ -330,30 +442,26 @@ def _normalize_artifact(art: Any) -> Optional[dict[str, Any]]:
 
 def _normalize_creator(creator: dict[str, Any]) -> dict[str, Any]:
     """Normaliza creator mantendo aliases legados durante a migração da UI."""
-    image_uri = (
-        creator.get("image_uri")
-        or creator.get("image")
-        or creator.get("upscaled_base")
-    )
-    voice_ref = (
-        creator.get("voice_ref")
-        or creator.get("voice")
-        or creator.get("voice_id")
-    )
-    voice_preview_uri = (
-        creator.get("voice_preview_uri")
-        or creator.get("voice_preview")
-        or creator.get("preview_uri")
-    )
-    return {
+    fields = normalize_creator_fields(creator)
+    normalized = {
         "id": creator.get("id") or creator.get("creator_id"),
-        "image_uri": image_uri,
-        "voice_ref": voice_ref,
-        "voice_preview_uri": voice_preview_uri,
-        "image": image_uri,
-        "voice": voice_ref,
-        "angles": list(creator.get("angles") or []),
+        "image_uri": fields["image_uri"],
+        "voice_ref": fields["voice_ref"],
+        "voice_preview_uri": fields["voice_preview_uri"],
+        "image": fields["image"],
+        "voice": fields["voice"],
+        "angles": fields["angles"],
     }
+    for key in (
+        "archetype",
+        "visual_brief",
+        "voice_brief",
+        "performance_style",
+        "exclusions",
+    ):
+        if key in creator:
+            normalized[key] = creator[key]
+    return normalized
 
 
 def _normalize_creator_history(creator: dict[str, Any]) -> dict[str, Any]:
@@ -605,6 +713,11 @@ def _runtime_phase(
         concept_future = state.get("concept_edit")
         if concept_future is not None and not getattr(concept_future, "done", lambda: False)():
             return "editing"
+        review_future = state.get("review")
+        if review_future is not None and not getattr(
+            review_future, "done", lambda: False
+        )():
+            return "review"
         approval_future = state.get("approval")
         if approval_future is not None and not getattr(approval_future, "done", lambda: False)():
             return "awaiting"
@@ -687,6 +800,8 @@ async def _execute_run(
     approve_creators: bool = True,
     edit_concepts: bool = True,
     seed_creator: Optional[dict[str, Any]] = None,
+    campaign_payload: Optional[dict[str, Any]] = None,
+    review_plan: Optional[bool] = None,
     _run_repository: Any = _RUN_REPOSITORY_UNSET,
 ) -> None:
     """Roda a pipeline completa, emitindo eventos para os subscribers SSE.
@@ -709,6 +824,8 @@ async def _execute_run(
                 approve_creators,
                 edit_concepts,
                 seed_creator,
+                campaign_payload,
+                review_plan,
                 repository,
             )
         return
@@ -726,6 +843,18 @@ async def _execute_run(
     run_state["offer"] = offer
     run_state["creator_prompt"] = creator_prompt
     run_state["video_prompt"] = video_prompt
+    campaign = CampaignInput.model_validate(
+        campaign_payload
+        or {
+            "offer": offer,
+            "audience": "General adult audience",
+            "creator_direction": creator_prompt,
+            "video_direction": video_prompt,
+            "platform": platform,
+            "batch_size": batch,
+        }
+    )
+    run_state["campaign"] = campaign.model_dump(mode="json")
     run_state.setdefault("item_snapshots", {})
 
     try:
@@ -752,6 +881,11 @@ async def _execute_run(
                     # concept+script; opt-out via edit_concepts=False no POST /api/run.
                     "edit_concepts": edit_concepts,
                     "seed_creator": seed_creator,
+                    "review_plan": (
+                        review_plan
+                        if review_plan is not None
+                        else bool(approve_creators or edit_concepts)
+                    ),
                 },
                 "thread_id": run_id,
             },
@@ -762,11 +896,13 @@ async def _execute_run(
         init: Any = {
             "run_id": run_id,
             "config": {"offer": offer, "batch_size": batch},
+            "campaign": campaign.model_dump(mode="json"),
         }
 
         await _emit(run_id, {"type": "run_start", "run_id": run_id, "offer": offer, "batch": batch})
 
         final_output: dict[str, Any] = {}
+        progress_translator = ProgressEventTranslator()
 
         async with open_checkpointer(db_path) as cp:
             graph = build_graph(pipeline, checkpointer=cp)
@@ -777,6 +913,9 @@ async def _execute_run(
                     etype: str = event["event"]
                     meta = event.get("metadata", {})
                     node = meta.get("langgraph_node") or event.get("name", "")
+                    progress_event = progress_translator.translate(event)
+                    if progress_event is not None:
+                        await _emit(run_id, progress_event)
 
                     if node in PIPELINE_NODES:
                         if etype == "on_chain_start":
@@ -850,6 +989,65 @@ async def _execute_run(
                 all_interrupts = [i for t in snap.tasks for i in getattr(t, "interrupts", ())]
                 if snap.next and all_interrupts:
                     intr_payload = all_interrupts[0].value  # {"type": ...}
+                    if intr_payload.get("type") == "review_creative_plan":
+                        concepts = [
+                            _safe_serialize(c)
+                            for c in intr_payload.get("concepts", [])
+                        ]
+                        creators = [
+                            _normalize_creator(c)
+                            for c in intr_payload.get("creators", [])
+                        ]
+                        review_payload = {
+                            "concepts": concepts,
+                            "creators": creators,
+                        }
+                        await _emit(
+                            run_id,
+                            {
+                                "type": "awaiting_review",
+                                "run_id": run_id,
+                                **review_payload,
+                            },
+                        )
+                        review_future = asyncio.get_event_loop().create_future()
+                        run_state_ref = _runs.get(run_id)
+                        if run_state_ref is not None:
+                            run_state_ref["review"] = review_future
+                            run_state_ref["pending_review"] = review_payload
+                        persisted_state = _to_plain(dict(snap.values or {}))
+                        persisted_state["pending_review"] = review_payload
+                        if _run_repository is not None:
+                            await _run_repository.save(
+                                run_id,
+                                phase="review",
+                                state=persisted_state,
+                                summary=runner.summarize({
+                                    **dict(snap.values or {}),
+                                    "run_id": run_id,
+                                }),
+                                items=[],
+                            )
+                        review_decision = await review_future
+                        if review_decision.get("action") == "approve":
+                            approved_creators = (
+                                review_decision.get("creators") or creators
+                            )
+                            async with creator_store.open_repository(store_path) as creator_repo:
+                                await creator_repo.record_creators(
+                                    run_id,
+                                    approved_creators,
+                                    approved_ids=[
+                                        str(c.get("id"))
+                                        for c in approved_creators
+                                        if c.get("id")
+                                    ],
+                                    creator_prompt=creator_prompt,
+                                    video_prompt=video_prompt,
+                                    offer=offer,
+                                )
+                        resume_input = Command(resume=review_decision)
+                        continue
                     # Gate de edição de concept+script (ANTES do creator).
                     if intr_payload.get("type") == "edit_concepts":
                         concepts = [
@@ -1004,6 +1202,139 @@ class RunRequest(BaseModel):
     creator_run_id: Optional[str] = None
 
 
+class RunV2Request(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    campaign: CampaignInput
+    config_dir: Optional[str] = None
+    db: Optional[str] = None
+
+
+class ReviewConceptPatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(min_length=1, max_length=200)
+    offer: Optional[str] = Field(default=None, max_length=8000)
+    hook: Optional[str] = Field(default=None, max_length=500)
+    angle: Optional[str] = Field(default=None, max_length=1000)
+    audience_problem: Optional[str] = Field(default=None, max_length=1000)
+    product_mechanism: Optional[str] = Field(default=None, max_length=1000)
+    evidence_basis: Optional[
+        Literal["provided_fact", "performance", "cold_test"]
+    ] = None
+    format: Optional[str] = Field(default=None, max_length=200)
+    hook_style: Optional[str] = Field(default=None, max_length=200)
+    script: Optional[str] = Field(default=None, max_length=12000)
+    script_draft: Optional[dict[str, Any]] = None
+
+
+class ReviewCreatorPatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(min_length=1, max_length=200)
+    archetype: Optional[str] = Field(default=None, max_length=500)
+    visual_brief: Optional[str] = Field(default=None, max_length=2000)
+    voice_brief: Optional[str] = Field(default=None, max_length=2000)
+    performance_style: Optional[str] = Field(default=None, max_length=1000)
+    exclusions: Optional[list[str]] = Field(default=None, max_length=20)
+    image_uri: Optional[str] = None
+    voice_ref: Optional[str] = None
+    voice_preview_uri: Optional[str] = None
+    image: Optional[str] = None
+    voice: Optional[str] = None
+    angles: Optional[list[str]] = Field(default=None, max_length=20)
+    run_id: Optional[str] = None
+    offer: Optional[str] = None
+    status: Optional[str] = None
+
+
+class ReviewV2Request(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    action: str
+    concepts: Optional[list[ReviewConceptPatch]] = None
+    creators: Optional[list[ReviewCreatorPatch]] = None
+    target: Optional[str] = None
+    ids: list[str] = Field(default_factory=list, max_length=48)
+    feedback: Optional[str] = Field(default=None, max_length=4000)
+    gate_id: Optional[str] = None
+    version: Optional[int] = Field(default=None, ge=1)
+    gate_type: Optional[Literal["review_creative_plan"]] = None
+
+    @model_validator(mode="after")
+    def validate_action(self) -> "ReviewV2Request":
+        if self.action == "approve":
+            if self.target is not None or self.ids or self.feedback is not None:
+                raise ValueError("approve does not accept regeneration fields")
+            return self
+        if self.action == "regenerate":
+            if self.target not in {"concepts", "scripts", "creators"}:
+                raise ValueError(
+                    "regenerate requires target concepts, scripts, or creators"
+                )
+            if self.concepts is not None or self.creators is not None:
+                raise ValueError("regenerate does not accept review edits")
+            return self
+        raise ValueError("action must be approve or regenerate")
+
+    def resolution(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {"action": self.action}
+        if self.concepts is not None:
+            payload["concepts"] = [
+                concept.model_dump(exclude_none=True)
+                for concept in self.concepts
+            ]
+        if self.creators is not None:
+            payload["creators"] = [
+                creator.model_dump(exclude_none=True)
+                for creator in self.creators
+            ]
+        if self.action == "regenerate":
+            payload.update(
+                target=self.target,
+                ids=self.ids,
+                feedback=self.feedback or "",
+            )
+        return payload
+
+
+def _validated_review_resolution(
+    req: ReviewV2Request,
+    pending_review: dict[str, Any],
+) -> dict[str, Any]:
+    resolution = req.resolution()
+    concepts = pending_review.get("concepts")
+    creators = pending_review.get("creators")
+    if not isinstance(concepts, list) or not isinstance(creators, list):
+        raise HTTPException(409, "payload canônico da revisão indisponível")
+
+    try:
+        if req.action == "approve":
+            if req.concepts is not None:
+                resolution["concepts"] = apply_review_concept_updates(
+                    concepts,
+                    resolution["concepts"],
+                )
+            if req.creators is not None:
+                resolution["creators"] = apply_review_creator_updates(
+                    creators,
+                    resolution["creators"],
+                )
+        elif req.ids:
+            available_ids = {
+                str(item.get("id"))
+                for item in (
+                    creators if req.target == "creators" else concepts
+                )
+                if isinstance(item, dict) and item.get("id")
+            }
+            if not set(req.ids).issubset(available_ids):
+                raise ValueError("regeneration IDs must belong to the pending review")
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return resolution
+
+
 @app.get("/", response_class=HTMLResponse)
 async def dashboard() -> HTMLResponse:
     """Serve o SPA React (front/dist) ou um fallback quando ainda não foi buildado."""
@@ -1011,6 +1342,64 @@ async def dashboard() -> HTMLResponse:
     if idx is not None:
         return HTMLResponse(idx.read_text(encoding="utf-8"))
     return HTMLResponse(_UNBUILT_FALLBACK)
+
+
+@app.post("/api/v2/runs")
+async def start_run_v2(
+    req: RunV2Request,
+    background_tasks: BackgroundTasks,
+) -> dict[str, str]:
+    campaign = req.campaign
+    run_id = f"web-{uuid.uuid4().hex[:8]}"
+    db_path = req.db or str(default_db_path())
+    effective_config_dir = _effective_config_dir(req.config_dir)
+    payload = {
+        "offer": campaign.offer,
+        "batch": campaign.batch_size,
+        "platform": campaign.platform,
+        "config_dir": effective_config_dir,
+        "db_path": db_path,
+        "campaign": campaign.model_dump(mode="json"),
+        "review_plan": True,
+    }
+    async with job_store.open_repository() as jobs:
+        if jobs is not None:
+            queued = await jobs.enqueue_run(
+                run_id,
+                offer=campaign.offer,
+                platform=campaign.platform,
+                batch_size=campaign.batch_size,
+                payload=payload,
+            )
+            _wake_web_embedded_runner()
+            return {"run_id": run_id, "job_id": str(queued.job_id)}
+
+    _runs[run_id] = {"queues": [], "buffer": [], "done": False}
+    async with run_store.open_repository() as runs:
+        if runs is not None:
+            await runs.start(
+                run_id,
+                offer=campaign.offer,
+                platform=campaign.platform,
+                batch_size=campaign.batch_size,
+            )
+    background_tasks.add_task(
+        _execute_run,
+        run_id,
+        campaign.offer,
+        campaign.batch_size,
+        campaign.platform,
+        effective_config_dir,
+        db_path,
+        None,
+        None,
+        False,
+        False,
+        None,
+        campaign.model_dump(mode="json"),
+        True,
+    )
+    return {"run_id": run_id}
 
 
 @app.post("/api/run")
@@ -1023,6 +1412,7 @@ async def start_run(req: RunRequest, background_tasks: BackgroundTasks) -> dict[
         )
     run_id = f"web-{uuid.uuid4().hex[:8]}"
     db_path = req.db or str(default_db_path())
+    effective_config_dir = _effective_config_dir(req.config_dir)
     # Todo run registra o "último prompt usado" por tipo — independente do gate de
     # aprovação (creators.json só persiste prompts quando o gate roda).
     async with prompt_store.open_repository(default_prompt_store_path()) as prompts:
@@ -1041,7 +1431,7 @@ async def start_run(req: RunRequest, background_tasks: BackgroundTasks) -> dict[
                     "offer": req.offer,
                     "batch": req.batch,
                     "platform": req.platform,
-                    "config_dir": req.config_dir,
+                    "config_dir": effective_config_dir,
                     "db_path": db_path,
                     "creator_prompt": req.creator_prompt,
                     "video_prompt": req.video_prompt,
@@ -1050,12 +1440,13 @@ async def start_run(req: RunRequest, background_tasks: BackgroundTasks) -> dict[
                     "seed_creator": seed_creator,
                 },
             )
+            _wake_web_embedded_runner()
             return {"run_id": run_id, "job_id": str(queued.job_id)}
 
     # No caminho local, API e executor vivem no mesmo processo. No caminho durável,
     # o job acima guarda só o ponteiro canônico e o Runner assina no consumo.
     if seed_creator is not None:
-        seed_creator = await _sign_payload(seed_creator, req.config_dir)
+        seed_creator = await _sign_payload(seed_creator, effective_config_dir)
     _runs[run_id] = {"queues": [], "buffer": [], "done": False}
     async with run_store.open_repository() as runs:
         if runs is not None:
@@ -1067,11 +1458,137 @@ async def start_run(req: RunRequest, background_tasks: BackgroundTasks) -> dict[
             )
     background_tasks.add_task(
         _execute_run,
-        run_id, req.offer, req.batch, req.platform, req.config_dir, db_path,
-        req.creator_prompt, req.video_prompt,
-        req.approve_creators, req.edit_concepts, seed_creator,
+        run_id,
+        req.offer,
+        req.batch,
+        req.platform,
+        effective_config_dir,
+        db_path,
+        req.creator_prompt,
+        req.video_prompt,
+        req.approve_creators,
+        req.edit_concepts,
+        seed_creator,
     )
     return {"run_id": run_id}
+
+
+@app.post("/api/v2/runs/{run_id}/review")
+async def review_run_v2(
+    run_id: str,
+    req: ReviewV2Request,
+) -> dict[str, Any]:
+    if os.environ.get("DATABASE_URL"):
+        if req.gate_id is None or req.version is None:
+            raise HTTPException(409, "gate_id e version são obrigatórios")
+        if req.gate_type != "review_creative_plan":
+            raise HTTPException(
+                409,
+                "gate_type=review_creative_plan é obrigatório",
+            )
+        from orchestrator.db import CancelledGateError, StaleGateError
+
+        async with job_store.open_repository() as jobs:
+            assert jobs is not None
+            try:
+                requested_gate_id = uuid.UUID(req.gate_id)
+                pending_gate = await jobs.get_pending_gate(run_id)
+                if (
+                    pending_gate is None
+                    or pending_gate.gate_id != requested_gate_id
+                    or pending_gate.version != req.version
+                    or pending_gate.gate_type != req.gate_type
+                ):
+                    raise HTTPException(
+                        409,
+                        "gate não corresponde à revisão pendente deste run",
+                    )
+                resolution = _validated_review_resolution(
+                    req,
+                    pending_gate.payload,
+                )
+                resume = await jobs.resolve_gate(
+                    requested_gate_id,
+                    version=req.version,
+                    resolution=resolution,
+                )
+            except HTTPException:
+                raise
+            except CancelledGateError as exc:
+                raise HTTPException(410, str(exc)) from exc
+            except (ValueError, StaleGateError) as exc:
+                raise HTTPException(409, str(exc)) from exc
+        _wake_web_embedded_runner()
+        return {"ok": True, "job_id": str(resume.job_id)}
+
+    state = _runs.get(run_id)
+    future = (state or {}).get("review")
+    if future is None or future.done():
+        raise HTTPException(409, "nenhuma revisão pendente")
+    pending_review = (state or {}).get("pending_review")
+    if not isinstance(pending_review, dict):
+        raise HTTPException(409, "payload canônico da revisão indisponível")
+    resolution = _validated_review_resolution(req, pending_review)
+    future.set_result(resolution)
+    return {"ok": True}
+
+
+def _retry_payload_fields(payload: dict[str, Any]) -> tuple[str, str, int]:
+    offer = payload.get("offer")
+    platform = payload.get("platform")
+    batch = payload.get("batch")
+    if (
+        not isinstance(offer, str)
+        or not offer.strip()
+        or not isinstance(platform, str)
+        or not platform.strip()
+        or not isinstance(batch, int)
+        or isinstance(batch, bool)
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="payload original indisponível para retry",
+        )
+    return offer, platform, batch
+
+
+@app.post("/api/run/{run_id}/retry")
+async def retry_run(run_id: str) -> dict[str, str]:
+    async with run_store.open_repository() as runs:
+        snapshot = await runs.get(run_id) if runs is not None else None
+    if snapshot is None:
+        raise HTTPException(status_code=404, detail=f"run {run_id!r} not found")
+    if snapshot.phase != "error":
+        raise HTTPException(status_code=409, detail="retry exige run em error")
+
+    async with job_store.open_repository() as jobs:
+        if jobs is None:
+            raise HTTPException(
+                status_code=409,
+                detail="payload original indisponível para retry",
+            )
+        original_payload = await jobs.get_initial_run_payload(run_id)
+        if original_payload is None:
+            raise HTTPException(
+                status_code=409,
+                detail="payload original indisponível para retry",
+            )
+        offer, platform, batch = _retry_payload_fields(original_payload)
+        new_run_id = f"web-{uuid.uuid4().hex[:8]}"
+        payload = {**original_payload, "source_run_id": run_id}
+        queued = await jobs.enqueue_run(
+            new_run_id,
+            offer=offer,
+            platform=platform,
+            batch_size=batch,
+            payload=payload,
+        )
+        _wake_web_embedded_runner()
+    return {
+        "run_id": new_run_id,
+        "source_run_id": run_id,
+        "job_id": str(queued.job_id),
+    }
 
 
 class ApproveRequest(BaseModel):
@@ -1123,6 +1640,7 @@ async def approve(run_id: str, req: ApproveRequest) -> dict[str, Any]:
                 )
             except (ValueError, StaleGateError) as exc:
                 raise HTTPException(409, str(exc)) from exc
+        _wake_web_embedded_runner()
         return {"ok": True, "job_id": str(resume.job_id)}
     st = _runs.get(run_id)
     fut = (st or {}).get("approval")
@@ -1160,6 +1678,7 @@ async def submit_concepts(run_id: str, req: ConceptEditRequest) -> dict[str, Any
                 )
             except (ValueError, StaleGateError) as exc:
                 raise HTTPException(409, str(exc)) from exc
+        _wake_web_embedded_runner()
         return {
             "ok": True,
             "count": len(req.concepts),
@@ -1242,8 +1761,9 @@ async def creators_history() -> dict[str, Any]:
 @app.get("/api/integrations")
 async def integrations_index(config_dir: Optional[str] = None) -> dict[str, Any]:
     """Mapa stage → adapter lido de providers.yaml (fonte da tela Integrations Hub)."""
-    providers = load_providers(config_dir)
-    agent_catalog = load_agent_catalog(config_dir)
+    effective_config_dir = _effective_config_dir(config_dir)
+    providers = load_providers(effective_config_dir)
+    agent_catalog = load_agent_catalog(effective_config_dir)
     adapters = (providers or {}).get("adapters", {}) or {}
     stages = {str(k): str(v) for k, v in adapters.items()}
     return {"stages": stages, "agents": agent_catalog.as_dict()}
@@ -1280,7 +1800,7 @@ async def stream_events(
                 for event in events:
                     cursor = event.seq
                     payload = await resolve_signed_uris(
-                        {**event.data, "type": event.event_type},
+                        _persisted_event_payload(event),
                         storage=storage,
                     )
                     yield (
@@ -1289,7 +1809,11 @@ async def stream_events(
                     )
                 async with run_store.open_repository() as runs:
                     snapshot = await runs.get(run_id) if runs is not None else None
-                if snapshot is not None and snapshot.phase in {"done", "error"}:
+                if snapshot is not None and snapshot.phase in {
+                    "done",
+                    "error",
+                    "cancelled",
+                }:
                     yield 'data: {"type": "stream_end"}\n\n'
                     return
                 await asyncio.sleep(1)
@@ -1308,11 +1832,27 @@ async def stream_events(
     if state is None:
         raise HTTPException(status_code=404, detail=f"run {run_id!r} not found")
 
+    local_after = 0
+    if isinstance(last_event_id, str) and last_event_id:
+        prefix, separator, raw_sequence = last_event_id.partition("-")
+        if prefix != "local" or separator != "-":
+            raise HTTPException(400, "Last-Event-ID inválido")
+        try:
+            local_after = int(raw_sequence)
+        except ValueError as exc:
+            raise HTTPException(400, "Last-Event-ID inválido") from exc
+
     q: asyncio.Queue[Optional[dict]] = asyncio.Queue(maxsize=500)
 
     # Replay eventos já emitidos (para clientes que conectam tarde)
     for event in state["buffer"]:
-        q.put_nowait(event)
+        event_id = str(event.get("event_id") or "")
+        try:
+            event_sequence = int(event_id.removeprefix("local-"))
+        except ValueError:
+            event_sequence = local_after + 1
+        if event_sequence > local_after:
+            q.put_nowait(event)
 
     if state["done"]:
         q.put_nowait(None)
@@ -1337,7 +1877,9 @@ async def stream_events(
                     yield "data: {\"type\": \"stream_end\"}\n\n"
                     return
                 event = await resolve_signed_uris(event, storage=storage)
-                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+                event_id = event.get("event_id")
+                prefix = f"id: {event_id}\n" if event_id else ""
+                yield f"{prefix}data: {json.dumps(event, ensure_ascii=False)}\n\n"
         finally:
             qs = _runs.get(run_id, {}).get("queues", [])
             if q in qs:
@@ -1362,6 +1904,7 @@ async def list_runs_endpoint(db: Optional[str] = None) -> dict[str, Any]:
     # UI marcar os que falharam como "Failed".
     persisted_ids: list[str] = []
     persisted_errors: list[str] = []
+    persisted_cancelled: list[str] = []
     persisted_active: list[str] = []
     postgres_enabled = False
     async with run_store.open_repository() as runs:
@@ -1372,32 +1915,55 @@ async def list_runs_endpoint(db: Optional[str] = None) -> dict[str, Any]:
             persisted_errors = [
                 entry.run_id
                 for entry in index
-                if entry.phase == "error" or entry.error
+                if entry.phase != "cancelled"
+                and (entry.phase == "error" or entry.error)
+            ]
+            persisted_cancelled = [
+                entry.run_id
+                for entry in index
+                if entry.phase == "cancelled"
             ]
             persisted_active = [
                 entry.run_id
                 for entry in index
-                if entry.phase in {"running", "editing", "awaiting"}
+                if entry.phase in {"running", "editing", "awaiting", "review"}
                 and not entry.error
             ]
     if postgres_enabled:
         errored = persisted_errors
+        cancelled = persisted_cancelled
         active = persisted_active
         known = persisted_ids
     else:
-        errored = [rid for rid, state in _runs.items() if state.get("error")]
+        cancelled = [
+            rid
+            for rid, state in _runs.items()
+            if state.get("phase") == "cancelled"
+        ]
+        errored = [
+            rid
+            for rid, state in _runs.items()
+            if state.get("error") and state.get("phase") != "cancelled"
+        ]
         active = [
             rid
             for rid, state in _runs.items()
-            if not state.get("error") and not state.get("done")
+            if not state.get("error")
+            and state.get("phase") != "cancelled"
+            and not state.get("done")
         ]
         known = runner.list_runs(db_path)
-    return {"runs": known, "active": active, "errored": errored}
+    return {
+        "runs": known,
+        "active": active,
+        "errored": errored,
+        "cancelled": cancelled,
+    }
 
 
 @app.get("/api/status/{run_id}")
 async def run_status(run_id: str, config_dir: Optional[str] = None, db: Optional[str] = None) -> Any:
-    pipeline = load_pipeline(config_dir)
+    pipeline = load_pipeline(_effective_config_dir(config_dir))
     db_path = db or str(default_db_path())
     state = await runner.get_status(pipeline, db_path=db_path, run_id=run_id)
     if state is None:
@@ -1411,7 +1977,8 @@ async def run_status(run_id: str, config_dir: Optional[str] = None, db: Optional
 
 @app.get("/api/state/{run_id}")
 async def run_state(run_id: str, config_dir: Optional[str] = None, db: Optional[str] = None) -> dict[str, Any]:
-    pipeline = load_pipeline(config_dir)
+    effective_config_dir = _effective_config_dir(config_dir)
+    pipeline = load_pipeline(effective_config_dir)
     db_path = db or str(default_db_path())
     checkpoint_state = await runner.get_status(pipeline, db_path=db_path, run_id=run_id)
     runtime_state = _runs.get(run_id)
@@ -1487,8 +2054,60 @@ async def run_state(run_id: str, config_dir: Optional[str] = None, db: Optional[
         if runtime_state is not None
         else persisted.phase if persisted is not None else _runtime_phase(None, summary)
     )
+    pending_gate = None
+    persisted_events: list[dict[str, Any]] = []
+    if runtime_state is None and persisted is not None:
+        async with job_store.open_repository() as jobs:
+            if jobs is not None:
+                list_events = getattr(jobs, "list_events", None)
+                if list_events is not None:
+                    persisted_events = [
+                        _persisted_event_payload(event)
+                        for event in await list_events(run_id)
+                    ]
+                if phase in {"editing", "awaiting", "review"}:
+                    get_pending_gate = getattr(jobs, "get_pending_gate", None)
+                    if get_pending_gate is not None:
+                        pending_gate = await get_pending_gate(run_id)
+    if pending_gate is not None:
+        expected_gate_type = {
+            "editing": "edit_concepts",
+            "awaiting": "approve_creators",
+            "review": "review_creative_plan",
+        }.get(phase)
+        if pending_gate.gate_type != expected_gate_type:
+            pending_gate = None
+    gate_ref = (
+        {
+            "gate_id": str(pending_gate.gate_id),
+            "version": pending_gate.version,
+            "gate_type": pending_gate.gate_type,
+        }
+        if pending_gate is not None
+        else None
+    )
     edit_concepts: list[dict[str, Any]] = []
     awaiting: list[dict[str, Any]] = []
+    review: dict[str, Any] | None = None
+    if runtime_state is not None and phase == "review":
+        pending_review = runtime_state.get("pending_review")
+        if isinstance(pending_review, dict):
+            review = _safe_serialize(pending_review)
+    elif persisted is not None and phase == "review":
+        review_source = (
+            pending_gate.payload
+            if pending_gate is not None
+            and pending_gate.gate_type == "review_creative_plan"
+            else persisted.state.get("pending_review")
+        )
+        if isinstance(review_source, dict):
+            review = _safe_serialize(
+                {
+                    key: value
+                    for key, value in review_source.items()
+                    if key != "type"
+                }
+            )
     if runtime_state is not None and phase == "editing":
         edit_concepts = [
             _safe_serialize(c)
@@ -1496,9 +2115,14 @@ async def run_state(run_id: str, config_dir: Optional[str] = None, db: Optional[
             if isinstance(c, dict)
         ]
     elif persisted is not None and phase == "editing":
+        concepts_source = (
+            pending_gate.payload.get("concepts")
+            if pending_gate is not None and pending_gate.gate_type == "edit_concepts"
+            else persisted.state.get("pending_concepts")
+        )
         edit_concepts = [
             _safe_serialize(c)
-            for c in persisted.state.get("pending_concepts") or []
+            for c in concepts_source or []
             if isinstance(c, dict)
         ]
     if runtime_state is not None and phase == "awaiting":
@@ -1508,11 +2132,29 @@ async def run_state(run_id: str, config_dir: Optional[str] = None, db: Optional[
             if isinstance(c, dict)
         ]
     elif persisted is not None and phase == "awaiting":
+        creators_source = (
+            pending_gate.payload.get("creators")
+            if pending_gate is not None and pending_gate.gate_type == "approve_creators"
+            else persisted.state.get("pending_creators")
+        )
         awaiting = [
             _normalize_creator(c)
-            for c in persisted.state.get("pending_creators") or []
+            for c in creators_source or []
             if isinstance(c, dict)
         ]
+
+    progress_events = (
+        list(runtime_state.get("buffer") or [])
+        if runtime_state is not None
+        else persisted_events
+    )
+    progress = build_progress(
+        progress_events,
+        phase=phase,
+        items=items,
+        batch_size=persisted.batch_size if persisted is not None else None,
+    )
+    activity = build_activity(progress_events)
 
     return await _sign_payload(
         {
@@ -1521,14 +2163,18 @@ async def run_state(run_id: str, config_dir: Optional[str] = None, db: Optional[
             "items": items,
             "edit_concepts": edit_concepts,
             "awaiting": awaiting,
+            "review": review,
+            "gate": gate_ref,
             "summary": summary,
+            "progress": progress,
+            "activity": activity,
             "error": (
                 runtime_state.get("error")
                 if runtime_state is not None
                 else persisted.error if persisted is not None else None
             ),
         },
-        config_dir,
+        effective_config_dir,
     )
 
 

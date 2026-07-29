@@ -6,17 +6,14 @@ import { Button } from "../components/Button";
 import { Icon } from "../components/Icon";
 import { Drawer } from "../components/Drawer";
 import { Loading, ErrorState, EmptyState } from "../components/States";
-import { useAsync } from "../api/useAsync";
-import { api } from "../api/client";
+import { errorMessage, useCreators, useStartRunMutation } from "../api/queries";
 import { mediaUrl } from "../api/urls";
+import { creatorVoiceUri } from "../api/media";
 import type { Creator } from "../types";
-
-function playableVoice(c: Creator): string | null {
-  return c.voice_preview_uri || (c.voice && c.voice.startsWith("/") ? c.voice : null) || null;
-}
 
 function CreatorCard({ c, onOpen }: { c: Creator; onOpen: () => void }) {
   const img = c.image_uri || c.image || "";
+  const voice = creatorVoiceUri(c);
   return (
     <Card padded={false} className="overflow-hidden flex flex-col">
       <div className="aspect-[4/5] bg-surface-container overflow-hidden">
@@ -52,9 +49,9 @@ function CreatorCard({ c, onOpen }: { c: Creator; onOpen: () => void }) {
           <Button variant="secondary" icon="visibility" className="flex-1" onClick={onOpen}>
             Details
           </Button>
-          {playableVoice(c) && (
+          {voice && (
             <a
-              href={mediaUrl(playableVoice(c)!)}
+              href={mediaUrl(voice)}
               target="_blank"
               rel="noreferrer"
               className="inline-flex items-center justify-center w-10 h-10 rounded-lg border border-surface-border text-ai-processing hover:bg-surface-container-low"
@@ -70,12 +67,15 @@ function CreatorCard({ c, onOpen }: { c: Creator; onOpen: () => void }) {
 }
 
 export function Creators() {
-  const { data, loading, error } = useAsync(() => api.getCreators(), []);
+  const creatorsQuery = useCreators();
+  const data = creatorsQuery.data ?? null;
+  const loading = creatorsQuery.isLoading;
+  const error = errorMessage(creatorsQuery.error);
+  const startRun = useStartRunMutation();
   const navigate = useNavigate();
   const [selected, setSelected] = useState<Creator | null>(null);
   const [query, setQuery] = useState("");
   const [draftOffer, setDraftOffer] = useState("");
-  const [drafting, setDrafting] = useState(false);
   const [draftError, setDraftError] = useState<string | null>(null);
 
   const creators = data?.creators ?? [];
@@ -91,10 +91,9 @@ export function Creators() {
 
   const launchDraft = async () => {
     if (!selected) return;
-    setDrafting(true);
     setDraftError(null);
     try {
-      const { run_id } = await api.startRun({
+      const { run_id } = await startRun.mutateAsync({
         offer: draftOffer.trim() || selected.offer || "creator draft",
         batch: 1,
         platform: "tiktok",
@@ -106,8 +105,6 @@ export function Creators() {
       navigate(`/scripts?run=${encodeURIComponent(run_id)}`);
     } catch (err) {
       setDraftError(err instanceof Error ? err.message : "Could not start draft run");
-    } finally {
-      setDrafting(false);
     }
   };
 
@@ -173,8 +170,8 @@ export function Creators() {
         title={selected?.id ?? ""}
         footer={
           selected ? (
-            <Button icon="movie" className="w-full" onClick={launchDraft} loading={drafting}>
-              {drafting ? "Starting draft" : `Draft Video with ${selected.id}`}
+            <Button icon="movie" className="w-full" onClick={launchDraft} loading={startRun.isPending}>
+              {startRun.isPending ? "Starting draft" : `Draft Video with ${selected.id}`}
             </Button>
           ) : null
         }
@@ -208,12 +205,12 @@ export function Creators() {
                 </span>
               </div>
             </div>
-            {playableVoice(selected) && (
+            {creatorVoiceUri(selected) && (
               <div>
                 <span className="font-label-sm text-label-sm uppercase tracking-wider text-on-surface-variant">
                   Voice preview
                 </span>
-                <audio src={mediaUrl(playableVoice(selected)!)} controls className="w-full mt-2" />
+                <audio src={mediaUrl(creatorVoiceUri(selected)!)} controls className="w-full mt-2" />
               </div>
             )}
             <label className="block">

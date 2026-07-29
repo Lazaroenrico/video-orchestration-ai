@@ -24,6 +24,8 @@ from orchestrator.db.effects import (
     UncertainEffectError,
 )
 from orchestrator.db.jobs import (
+    CancellationSummary,
+    CancelledGateError,
     Job,
     LeaseLostError,
     OutboxEntry,
@@ -38,6 +40,8 @@ from orchestrator.db.runs import PostgresRunRepository, RunIndexEntry, RunSnapsh
 from orchestrator.db.tenancy import TenantContext, TenantIdentity
 
 __all__ = [
+    "CancellationSummary",
+    "CancelledGateError",
     "Database",
     "TenantAuthorizationError",
     "PostgresArtifactRepository",
@@ -70,4 +74,3 @@ __all__ = [
     "get_shared_database",
     "close_shared_database",
 ]
-

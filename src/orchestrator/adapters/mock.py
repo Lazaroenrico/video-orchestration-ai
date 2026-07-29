@@ -14,6 +14,7 @@ from typing import Any, Optional
 from orchestrator.adapters._agent_loop import (
     DEFAULT_MAX_STEPS,
     AgentRunResult,
+    ToolAttempt,
     ToolCall,
     run_agent_loop,
 )
@@ -163,6 +164,79 @@ class _MockAgentBrain:
         return {"role": "tool", "name": call.name, "result": result}
 
 
+def _terminal_submission(stage: str, inputs: dict[str, Any]) -> dict[str, Any]:
+    """Build deterministic creative-v2 tool arguments for offline agent runs."""
+    campaign = inputs.get("campaign")
+    campaign = campaign if isinstance(campaign, dict) else {}
+    if stage == "concepts":
+        count = int(inputs.get("n") or campaign.get("batch_size") or 1)
+        offer = str(campaign.get("offer") or inputs.get("offer") or "the offer")
+        audience = str(campaign.get("audience") or "the audience")
+        return {
+            "proposals": [
+                {
+                    "hook": f"{offer}: angle {index + 1} for {audience}",
+                    "angle": f"Deterministic test angle {index + 1}",
+                    "audience_problem": f"A relevant problem for {audience}",
+                    "product_mechanism": f"The supplied mechanism for {offer}",
+                    "evidence_basis": "cold_test",
+                    "format": "direct-to-camera",
+                    "hook_style": _HOOK_STYLES[index % len(_HOOK_STYLES)],
+                }
+                for index in range(count)
+            ]
+        }
+    if stage == "scripts":
+        concept = inputs.get("concept")
+        concept = concept if isinstance(concept, dict) else {}
+        hook = str(concept.get("hook") or "I changed one part of my routine.")
+        return {
+            "draft": {
+                "spoken_beats": [
+                    {"section": "hook", "text": hook, "seconds": 3},
+                    {
+                        "section": "body",
+                        "text": "Here is how the approved product fits the routine.",
+                        "seconds": 8,
+                    },
+                    {"section": "cta", "text": "See the approved offer.", "seconds": 3},
+                ],
+                "visual_beats": [
+                    "Creator addresses camera",
+                    "Approved product demonstration",
+                ],
+                "on_screen_text": [hook[:80]],
+                "call_to_action": "See the approved offer.",
+                "estimated_duration": 14,
+            }
+        }
+    if stage == "creator_profiles":
+        concept_ids = [str(value) for value in inputs.get("concept_ids") or []]
+        return {
+            "creators": [
+                {
+                    "archetype": "Warm routine guide",
+                    "visual_brief": "Adult creator in a bright, realistic home setting.",
+                    "voice_brief": "Warm, clear, conversational delivery.",
+                    "performance_style": "Calm, practical, and credible.",
+                    "exclusions": ["medical authority", "guaranteed outcomes"],
+                },
+                {
+                    "archetype": "Direct product tester",
+                    "visual_brief": "Adult creator at a clean vanity with the real product.",
+                    "voice_brief": "Direct, energetic, natural delivery.",
+                    "performance_style": "Concise demonstration with visible product handling.",
+                    "exclusions": ["medical authority", "guaranteed outcomes"],
+                },
+            ],
+            "assignments": [
+                {"concept_id": concept_id, "creator_index": index % 2}
+                for index, concept_id in enumerate(concept_ids)
+            ],
+        }
+    raise ValueError(f"unsupported terminal mock stage: {stage}")
+
+
 class MockAdapter:
     """Serve aos papéis mock (llm/image/voice/video/assembly) no v1."""
 
@@ -291,6 +365,8 @@ class MockAdapter:
         system_prompt: Optional[str] = None,
         max_steps: int = DEFAULT_MAX_STEPS,
         max_tool_calls: Optional[int] = None,
+        require_tool_call: bool = False,
+        stop_after_success: bool = False,
     ) -> AgentRunResult:
         """Loop de tool-calling determinístico e offline (custo zero).
 
@@ -299,6 +375,26 @@ class MockAdapter:
         refino, chama a tool de novo com a diretiva. Nunca chama ``generate_concepts``/
         ``write_script`` diretamente — só ``run_tool`` (fronteira D29).
         """
+        if require_tool_call and stop_after_success:
+            call = ToolCall(
+                id="mock-submission",
+                name=allowed_tools[0],
+                arguments=_terminal_submission(stage, inputs),
+            )
+            result = await run_tool(call.name, **call.arguments)
+            run = AgentRunResult(
+                result=result,
+                attempts=(ToolAttempt(call=call, result=result),),
+            )
+            add_trace_metadata(
+                agent_backend="mock",
+                stage=stage,
+                allowed_tools=list(allowed_tools),
+                target_model=target_model,
+                agent_steps=run.executed,
+            )
+            return run
+
         brain = _MockAgentBrain(self._agent_critique, system_prompt=system_prompt)
         run = await run_agent_loop(
             brain,
@@ -309,6 +405,8 @@ class MockAdapter:
             max_steps=max_steps,
             tool_schemas=tool_call_schemas(allowed_tools),
             max_tool_calls=max_tool_calls,
+            require_tool_call=require_tool_call,
+            stop_after_success=stop_after_success,
         )
         add_trace_metadata(
             agent_backend="mock",
@@ -392,7 +490,9 @@ class MockAdapter:
                 "attempt": attempt,
             }
             if system_prompt:
-                meta["system_prompt"] = system_prompt
+                meta["prompt_hash"] = hashlib.sha256(
+                    system_prompt.encode()
+                ).hexdigest()
             if reference_image_uri:
                 meta["has_reference_image"] = True
             return Artifact(

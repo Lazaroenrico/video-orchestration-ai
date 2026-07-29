@@ -2,6 +2,26 @@
 from __future__ import annotations
 
 from typing import Any
+from urllib.parse import urlparse
+
+
+_AUDIO_EXTENSIONS = (".mp3", ".wav", ".m4a", ".ogg")
+
+
+def _is_playable_voice_uri(uri: Any) -> bool:
+    if not isinstance(uri, str) or not uri:
+        return False
+    lower = uri.lower()
+    if lower.startswith("data:audio/"):
+        return True
+    parsed = urlparse(uri)
+    if parsed.scheme in {"http", "https", "r2"}:
+        return parsed.path.lower().endswith(_AUDIO_EXTENSIONS)
+    if parsed.scheme:
+        return False
+    if uri.startswith(("/", "./", "../")):
+        return parsed.path.lower().endswith(_AUDIO_EXTENSIONS)
+    return False
 
 
 def normalize_creator_fields(creator: dict[str, Any]) -> dict[str, Any]:
@@ -21,6 +41,8 @@ def normalize_creator_fields(creator: dict[str, Any]) -> dict[str, Any]:
         or creator.get("voice_preview")
         or creator.get("preview_uri")
     )
+    if voice_preview_uri is None and _is_playable_voice_uri(voice_ref):
+        voice_preview_uri = voice_ref
     return {
         "image_uri": image_uri,
         "voice_ref": voice_ref,

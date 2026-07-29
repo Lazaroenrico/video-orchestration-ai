@@ -5,7 +5,7 @@ import re
 import sqlite3
 import uuid
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Awaitable, Callable, Optional
 
 from langgraph.types import Command
 
@@ -19,6 +19,7 @@ import orchestrator.feedback_store as _feedback_store
 from orchestrator.graph.builder import build_graph
 from orchestrator.graph.checkpoint import open_checkpointer
 from orchestrator.graph.state import Item
+from orchestrator.progress import ProgressEventTranslator
 from orchestrator.registry import build_adapter_from_providers
 from orchestrator.storage.db import (
     ArtifactDB,
@@ -27,6 +28,8 @@ from orchestrator.storage.db import (
 )
 from orchestrator.storage.factory import build_media_storage
 from orchestrator.tracing import run_trace_config
+
+ProgressEventSink = Callable[[dict[str, Any]], Awaitable[None]]
 
 
 def _build_config(
@@ -84,6 +87,7 @@ async def run_pipeline(
     feedback_store: Optional[str | Path] = None,
     agent_catalog: Optional[AgentCatalog] = None,
     run_options: Optional[dict[str, Any]] = None,
+    event_sink: Optional[ProgressEventSink] = None,
 ) -> tuple[str, dict[str, Any]]:
     run_id = run_id or f"run-{uuid.uuid4().hex[:8]}"
     async with open_artifact_repository(default_artifacts_db_path()) as artifact_repository:
@@ -105,6 +109,7 @@ async def run_pipeline(
             async with _feedback_store.open_repository(feedback_store) as repository:
                 prior = await repository.load_latest_feedback()
         prior_styles = (prior or {}).get("winning_styles", [])
+        campaign = (run_options or {}).get("campaign")
         init = {
             "run_id": run_id,
             "config": {
@@ -113,9 +118,11 @@ async def run_pipeline(
                 "prior_winning_styles": prior_styles,
             },
         }
+        if isinstance(campaign, dict):
+            init["campaign"] = campaign
         async with open_checkpointer(db_path) as cp:
             app = build_graph(pipeline, checkpointer=cp)
-            out = await app.ainvoke(init, cfg)
+            out = await _invoke_with_progress(app, init, cfg, event_sink)
         return run_id, out
 
 
@@ -166,6 +173,7 @@ async def resume_pipeline(
     agent_catalog: Optional[AgentCatalog] = None,
     resume_value: Any = None,
     run_options: Optional[dict[str, Any]] = None,
+    event_sink: Optional[ProgressEventSink] = None,
 ) -> tuple[str, dict[str, Any]]:
     async with open_artifact_repository(default_artifacts_db_path()) as artifact_repository:
         cfg = _build_config(
@@ -186,8 +194,34 @@ async def resume_pipeline(
                 if resume_value is not None
                 else None
             )
-            out = await app.ainvoke(resume_input, cfg)
+            out = await _invoke_with_progress(app, resume_input, cfg, event_sink)
         return run_id, out
+
+
+async def _invoke_with_progress(
+    app: Any,
+    input_value: Any,
+    config: dict[str, Any],
+    event_sink: Optional[ProgressEventSink],
+) -> dict[str, Any]:
+    if event_sink is None:
+        return await app.ainvoke(input_value, config)
+
+    translator = ProgressEventTranslator()
+    final_output: dict[str, Any] = {}
+    async for event in app.astream_events(input_value, config, version="v2"):
+        progress_event = translator.translate(event)
+        if progress_event is not None:
+            await event_sink(progress_event)
+        if event.get("event") == "on_chain_end" and event.get("name") == "LangGraph":
+            output = event.get("data", {}).get("output")
+            if isinstance(output, dict):
+                final_output = output
+
+    snapshot = await app.aget_state(config)
+    if snapshot is not None and snapshot.values:
+        return dict(snapshot.values)
+    return final_output
 
 
 async def get_interrupt(
