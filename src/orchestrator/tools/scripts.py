@@ -33,6 +33,8 @@ async def write_script_tool(
     revision_feedback: Optional[str] = None,
     return_contract: bool = False,
     agent_submission: bool = False,
+    target_duration_seconds: Optional[int] = None,
+    max_spoken_words: Optional[int] = None,
 ) -> str | ScriptResult:
     add_trace_metadata(
         tool_name="write_script",
@@ -60,6 +62,23 @@ async def write_script_tool(
         submission = ScriptSubmission.model_validate(draft)
         script = ""
 
+    spoken_seconds = sum(beat.seconds for beat in submission.spoken_beats)
+    if (
+        target_duration_seconds is not None
+        and max(spoken_seconds, submission.estimated_duration)
+        > target_duration_seconds
+    ):
+        raise ValueError(
+            f"narration exceeds {target_duration_seconds} seconds"
+        )
+    spoken_words = sum(
+        len(beat.text.split()) for beat in submission.spoken_beats
+    )
+    if max_spoken_words is not None and spoken_words > max_spoken_words:
+        raise ValueError(
+            f"narration exceeds {max_spoken_words} spoken words"
+        )
+
     concept_id = str(concept.get("id") or "")
     if not concept_id:
         raise ValueError("concept id is required")
@@ -82,11 +101,12 @@ def _submission_from_text(
         label, separator, text = raw_line.partition(":")
         section = label.strip().lower()
         if separator and section in {"hook", "body", "cta"} and text.strip():
+            spoken = text.strip()
             sections.append(
                 SpokenBeat(
                     section=section,
-                    text=text.strip(),
-                    seconds=2 if section == "hook" else 8,
+                    text=spoken,
+                    seconds=max(1, round(len(spoken.split()) / 2.5)),
                 )
             )
     if not sections:

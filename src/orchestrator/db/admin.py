@@ -10,69 +10,6 @@ RUNTIME_ROLE = "orchestrator_runtime"
 MEMBERSHIP_ROLES = ("owner", "admin", "member", "viewer")
 
 
-def provision_runtime_role(database_url: str, password: str) -> None:
-    """Cria ou endurece o papel fixo usado pela API e pelos runners."""
-    if not password:
-        raise ValueError("ORCHESTRATOR_RUNTIME_PASSWORD é obrigatória")
-
-    with Connection.connect(database_url) as connection:
-        role = sql.Identifier(RUNTIME_ROLE)
-        connection.execute(
-            sql.SQL(
-                "DO $$ BEGIN CREATE ROLE {} LOGIN; "
-                "EXCEPTION WHEN duplicate_object THEN NULL; END $$"
-            ).format(role)
-        )
-        attributes = connection.execute(
-            """
-            SELECT rolsuper, rolbypassrls, rolreplication
-            FROM pg_roles
-            WHERE rolname = %s
-            """,
-            (RUNTIME_ROLE,),
-        ).fetchone()
-        if attributes is None or any(attributes):
-            raise ValueError(
-                f"papel runtime {RUNTIME_ROLE!r} possui "
-                "SUPERUSER/BYPASSRLS/REPLICATION e exige hardening por superuser"
-            )
-        connection.execute(
-            sql.SQL(
-                "ALTER ROLE {} LOGIN NOCREATEDB NOCREATEROLE PASSWORD {}"
-            ).format(role, sql.Literal(password)),
-        )
-        connection.execute(
-            sql.SQL("GRANT CONNECT ON DATABASE {} TO {}").format(
-                sql.Identifier(connection.info.dbname),
-                role,
-            )
-        )
-        connection.execute(sql.SQL("GRANT USAGE ON SCHEMA public TO {}").format(role))
-        connection.execute(
-            sql.SQL(
-                "GRANT SELECT, INSERT, UPDATE, DELETE "
-                "ON ALL TABLES IN SCHEMA public TO {}"
-            ).format(role)
-        )
-        connection.execute(
-            sql.SQL("GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO {}").format(
-                role
-            )
-        )
-        connection.execute(
-            sql.SQL(
-                "ALTER DEFAULT PRIVILEGES IN SCHEMA public "
-                "GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO {}"
-            ).format(role)
-        )
-        connection.execute(
-            sql.SQL(
-                "ALTER DEFAULT PRIVILEGES IN SCHEMA public "
-                "GRANT USAGE, SELECT ON SEQUENCES TO {}"
-            ).format(role)
-        )
-
-
 from sqlalchemy import create_engine, delete, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
@@ -228,4 +165,3 @@ def revoke_membership(
             )
         )
         return result.rowcount > 0
-

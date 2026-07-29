@@ -369,6 +369,7 @@ class PostgresJobRepository:
         *,
         worker_id: str,
         error: str,
+        retryable: bool = True,
         now: datetime | None = None,
     ) -> Job:
         timestamp = now or datetime.now(UTC)
@@ -389,7 +390,7 @@ class PostgresJobRepository:
             if row is None:
                 raise LeaseLostError(f"lease perdido para job {job_id}")
             current = _job(row)
-            will_retry = current.attempt < current.max_attempts
+            will_retry = retryable and current.attempt < current.max_attempts
             delay_seconds = min(5 * (2 ** (current.attempt - 1)), 300)
 
             stmt_update = (

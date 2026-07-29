@@ -188,29 +188,15 @@ async def test_pool_does_not_leak_tenant_context_between_transactions(postgresql
     assert unscoped_rows == []
 
 
-async def test_database_connection_exits_transaction_before_closing_on_cancellation():
-    class FakeTransaction:
-        def __init__(self) -> None:
-            self.entered = False
-            self.exited = False
-            self.exit_exc_type = None
-
-        async def __aenter__(self):
-            self.entered = True
-            return self
-
-        async def __aexit__(self, exc_type, *_exc):
-            self.exited = True
-            self.exit_exc_type = exc_type
-            return False
-
+async def test_database_connection_closes_cancelled_connection_without_nested_transaction():
     class FakeConnection:
         def __init__(self) -> None:
             self.closed = False
-            self.transaction_context = FakeTransaction()
+            self.transaction_calls = 0
 
         def transaction(self):
-            return self.transaction_context
+            self.transaction_calls += 1
+            raise AssertionError("o pool já controla a transação da conexão")
 
         async def close(self):
             self.closed = True
@@ -245,10 +231,114 @@ async def test_database_connection_exits_transaction_before_closing_on_cancellat
             raise asyncio.CancelledError
 
     assert pool.connection_obj.closed is True
-    assert pool.connection_obj.transaction_context.entered is True
-    assert pool.connection_obj.transaction_context.exited is True
-    assert pool.connection_obj.transaction_context.exit_exc_type is asyncio.CancelledError
+    assert pool.connection_obj.transaction_calls == 0
     assert pool.context.exited is True
+
+
+async def test_database_connection_preserves_cancellation_when_close_also_fails():
+    class FakeConnection:
+        async def close(self):
+            raise RuntimeError("already closed")
+
+    class FakePoolConnection:
+        async def __aenter__(self):
+            return FakeConnection()
+
+        async def __aexit__(self, *_exc):
+            return False
+
+    class FakePool:
+        def connection(self):
+            return FakePoolConnection()
+
+    database = Database.__new__(Database)
+    database._pool = FakePool()
+
+    with pytest.raises(asyncio.CancelledError):
+        async with database.connection():
+            raise asyncio.CancelledError
+
+
+async def test_database_execute_accepts_raw_sql_and_params():
+    calls: list[tuple[str, tuple[int]]] = []
+
+    class FakeConnection:
+        async def execute(self, query, params):
+            calls.append((query, params))
+            return "cursor"
+
+    result = await Database.execute(FakeConnection(), "SELECT %s", (1,))
+
+    assert result == "cursor"
+    assert calls == [("SELECT %s", (1,))]
+
+
+async def test_close_shared_database_closes_and_forgets_the_open_pool(monkeypatch):
+    from orchestrator.db import database as database_module
+
+    class FakePool:
+        closed = False
+
+    class FakeDatabase:
+        def __init__(self):
+            self._pool = FakePool()
+            self.closed = False
+
+        async def close(self):
+            self.closed = True
+            self._pool.closed = True
+
+    shared = FakeDatabase()
+    monkeypatch.setattr(database_module, "_shared_database", shared)
+
+    await database_module.close_shared_database()
+
+    assert shared.closed is True
+    assert database_module._shared_database is None
+
+
+async def test_resolve_tenant_bootstraps_each_local_identity_once(monkeypatch):
+    database = Database.__new__(Database)
+    database._resolved_tenants = {}
+    database._resolved_tenants_lock = asyncio.Lock()
+    identity = TenantIdentity("acme", "Acme", "oidc|alice")
+    calls = 0
+
+    async def ensure_tenant(candidate: TenantIdentity):
+        nonlocal calls
+        calls += 1
+        await asyncio.sleep(0)
+        return candidate.context()
+
+    database.ensure_tenant = ensure_tenant
+    monkeypatch.setenv("ORCH_AUTH_MODE", "disabled")
+
+    tenants = await asyncio.gather(
+        *(database.resolve_tenant(identity) for _ in range(8))
+    )
+
+    assert calls == 1
+    assert tenants == [identity.context()] * 8
+
+
+async def test_resolve_tenant_reauthorizes_every_access_identity(monkeypatch):
+    database = Database.__new__(Database)
+    identity = TenantIdentity("acme", "Acme", "oidc|alice")
+    calls = 0
+
+    async def authorize_tenant(candidate: TenantIdentity):
+        nonlocal calls
+        calls += 1
+        return candidate.context()
+
+    database.authorize_tenant = authorize_tenant
+    monkeypatch.setenv("ORCH_AUTH_MODE", "cloudflare_access")
+
+    first = await database.resolve_tenant(identity)
+    second = await database.resolve_tenant(identity)
+
+    assert calls == 2
+    assert first == second == identity.context()
 
 
 def test_cli_migrate_upgrades_postgres_idempotently(postgresql):

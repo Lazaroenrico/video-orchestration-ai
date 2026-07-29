@@ -1,7 +1,11 @@
 """Live config must not route production roles to mock adapters."""
 from __future__ import annotations
 
+from orchestrator.adapters.ffmpeg_assembly import FfmpegAssemblyAdapter
+from orchestrator.adapters.replicate_video import ReplicateVideoAdapter
+from orchestrator.adapters.replicate_voice import ReplicateVoiceAdapter
 from orchestrator.config import load_agent_catalog, load_pipeline, load_providers
+from orchestrator.registry import build_adapter_from_providers
 
 
 def test_live_config_routes_all_runtime_roles_to_non_mock_adapters():
@@ -11,18 +15,59 @@ def test_live_config_routes_all_runtime_roles_to_non_mock_adapters():
     runtime_roles = ("llm", "creator", "video", "qc", "assembly")
     assert {role: adapters.get(role) for role in runtime_roles} == {
         "llm": "vercel_gateway_llm",
-        "creator": "creator_real_replicate",
+        "creator": "creator_vercel_replicate_voice",
         "video": "replicate",
         "qc": "integrity_qc",
-        "assembly": "vercel_seedance_assembly",
+        "assembly": "ffmpeg_assembly",
     }
     assert all(adapters[role] != "mock" for role in runtime_roles)
+    assert [
+        role
+        for role, adapter_name in adapters.items()
+        if "replicate" in adapter_name
+    ] == ["creator", "video"]
 
 
-def test_live_config_disables_replicate_mock_fallback():
+def test_live_config_uses_pruna_p_video_for_all_clips():
     pipeline = load_pipeline("config")
 
     assert pipeline["video"]["allow_mock_fallback"] is False
+    assert pipeline["video"]["product_demo_tier"] == "pruna"
+    assert [
+        (tier["name"], tier["model"], tier["cost_per_second"])
+        for tier in pipeline["tiers"]
+    ] == [
+        ("pruna", "prunaai/p-video", 0.01),
+    ]
+    assert pipeline["clip"]["fps"] == 24
+    assert pipeline["clip"]["draft"] is True
+    assert pipeline["assembly"] == {
+        "final_duration_seconds": 16,
+        "narration_target_seconds": 14,
+        "narration_max_words": 35,
+        "audio_speedup_max": 1.10,
+        "resolution": "1080x1920",
+        "fps": 24,
+        "timeout_seconds": 300,
+        "allow_mock_fallback": False,
+    }
+
+
+def test_live_runtime_uses_replicate_for_clips_and_ffmpeg_for_assembly(monkeypatch):
+    monkeypatch.setenv("AI_GATEWAY_API_KEY", "test-gateway-key")
+    monkeypatch.setenv("REPLICATE_API_TOKEN", "test-replicate-key")
+    monkeypatch.setenv(
+        "REPLICATE_ELEVENLABS_MODEL",
+        "elevenlabs/turbo-v2.5",
+    )
+    composite = build_adapter_from_providers(
+        load_providers("config"),
+        load_pipeline("config"),
+    )
+
+    assert isinstance(composite._by_role["creator"].voice, ReplicateVoiceAdapter)
+    assert isinstance(composite._by_role["video"], ReplicateVideoAdapter)
+    assert isinstance(composite._by_role["assembly"], FfmpegAssemblyAdapter)
 
 
 def test_live_config_activates_agent_mode_only_on_creative_stages():
@@ -37,17 +82,25 @@ def test_live_config_activates_agent_mode_only_on_creative_stages():
         assert spec.prompt_hash
         assert spec.schema_version == "creative-v2"
 
-    for stage in ("persona", "video", "roster", "qc", "assembly", "upscale"):
+    for stage in (
+        "persona",
+        "video",
+        "roster",
+        "qc",
+        "voiceover",
+        "assembly",
+        "upscale",
+    ):
         spec = catalog.stage(stage)
         assert spec.executor == "tool", f"{stage} deve permanecer em modo tool"
         assert spec.agent_enabled is False
 
 
-def test_live_config_caps_each_creative_agent_to_one_submission():
+def test_live_config_allows_one_bounded_script_correction():
     pipeline = load_pipeline("config")
     agent = pipeline["agent"]
 
     assert agent["max_steps"] == 2
     assert agent["max_tool_calls"] == 1
-    assert "max_steps_by_stage" not in agent
-    assert "max_tool_calls_by_stage" not in agent
+    assert agent["max_steps_by_stage"] == {"scripts": 3}
+    assert agent["max_tool_calls_by_stage"] == {"scripts": 2}

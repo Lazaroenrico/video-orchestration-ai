@@ -24,7 +24,7 @@ from langgraph.types import interrupt
 import orchestrator.feedback_store as _feedback_store
 from orchestrator import media_store, stream_bus
 from orchestrator.adapters._agent_loop import AgentRunResult
-from orchestrator.adapters.base import VoiceProfile, assign_voice_profile
+from orchestrator.adapters.base import RenderedMedia, VoiceProfile, assign_voice_profile
 from orchestrator.config import default_media_path, default_videos_path
 from orchestrator.creative_contracts import (
     CampaignInput,
@@ -40,7 +40,12 @@ from orchestrator.storage.retention import (
     RETENTION_KEEP,
     RETENTION_REJECTED,
 )
-from orchestrator.tools.assembly import assemble_video_tool, upscale_video_tool
+from orchestrator.storage.resolve import resolve_signed_uris
+from orchestrator.tools.assembly import (
+    assemble_video_tool,
+    synthesize_voiceover_tool,
+    upscale_video_tool,
+)
 from orchestrator.tools.base import tool_context_from_config
 from orchestrator.tools.concepts import generate_concepts_tool
 from orchestrator.tools.creators import build_creator_tool
@@ -214,8 +219,9 @@ async def reroll_creator_voice(
         )
         if local != voice_uri:
             next_creator["voice_id"] = local
-            next_creator["voice_ref"] = local
-            next_creator["voice"] = local
+            stable_voice_ref = next_creator.get("voice_model_ref")
+            next_creator["voice_ref"] = stable_voice_ref or local
+            next_creator["voice"] = stable_voice_ref or local
             next_creator["voice_source_uri"] = voice_uri
             next_creator["voice_preview_uri"] = local
 
@@ -732,6 +738,10 @@ async def node_scripts(state: dict[str, Any], config: RunnableConfig) -> dict[st
     """
     tool_ctx = tool_context_from_config(config)
     campaign = _campaign_input(state, config)
+    pipeline = config["configurable"].get("pipeline") or {}
+    assembly_cfg = pipeline.get("assembly", {})
+    narration_target = assembly_cfg.get("narration_target_seconds")
+    narration_max_words = assembly_cfg.get("narration_max_words")
     platform = campaign.platform
     concepts = state.get("concepts") or []
     completed = 0
@@ -749,6 +759,8 @@ async def node_scripts(state: dict[str, Any], config: RunnableConfig) -> dict[st
             campaign=campaign.model_dump(mode="json"),
             revision_feedback=(state.get("revision_request") or {}).get("feedback"),
             return_contract=True,
+            target_duration_seconds=narration_target,
+            max_spoken_words=narration_max_words,
         )
         if not isinstance(result, ScriptResult):
             if isinstance(result, str):
@@ -1009,7 +1021,7 @@ def make_gen_node(tier: str):
             stage="talking_head",
         )
         clip, takes_cost = _settle_takes(run)
-        # Surfaça se o clip veio do provider real (replicate) ou de fallback mock,
+        # Surfaça se o clip veio do provider real ou de fallback mock,
         # + o modelo e a URI de saída — responde "está gerando o vídeo mesmo?".
         add_trace_metadata(
             step=4, stage="talking_head_done", item_id=item.id,
@@ -1039,13 +1051,23 @@ def make_gen_node(tier: str):
 
 @traced("node.product_demo", run_type="chain", step=5)
 async def node_product_demo(state: Any, config: RunnableConfig) -> dict[str, Any]:
-    """Step 5 — clip de product demo (lean barato: LTX), anexado ao item."""
+    """Step 5 — clip de product demo no tier configurado, anexado ao item."""
     item = as_item(state)
     tool_ctx = tool_context_from_config(config)
     pipeline = get_pipeline(config)
     run_cfg = config["configurable"].get("run", {})
     seconds = int(pipeline.get("clip", {}).get("duration_seconds", 8))
-    add_trace_metadata(step=5, stage="product_demo", item_id=item.id, attempt=item.attempts)
+    product_demo_tier = str(
+        pipeline.get("video", {}).get("product_demo_tier")
+        or next((tier["name"] for tier in pipeline.get("tiers", [])), "ltx")
+    )
+    add_trace_metadata(
+        step=5,
+        stage="product_demo",
+        item_id=item.id,
+        attempt=item.attempts,
+        tier=product_demo_tier,
+    )
     run = await execute_stage_tool(
         config,
         tool_ctx,
@@ -1053,7 +1075,10 @@ async def node_product_demo(state: Any, config: RunnableConfig) -> dict[str, Any
         tool_name="generate_clip",
         tool_fn=generate_clip_tool,
         with_attempts=True,
-        item_id=f"{item.id}:demo", tier="ltx", seconds=seconds, attempt=item.attempts,
+        item_id=f"{item.id}:demo",
+        tier=product_demo_tier,
+        seconds=seconds,
+        attempt=item.attempts,
         system_prompt=_video_prompt(item, run_cfg.get("video_prompt"), stage="product-demo"),
         reference_image_uri=item.creator_image_uri,
         stage="product_demo",
@@ -1111,6 +1136,86 @@ async def node_qc(state: Any, config: RunnableConfig) -> dict[str, Any]:
         return {"qc": qc}
     return {"qc": qc, "attempts": item.attempts + 1}
 
+
+def _narration_text(script: str) -> str:
+    """Render only spoken copy, without internal HOOK/BODY/CTA labels."""
+    spoken: list[str] = []
+    for raw_line in script.splitlines():
+        label, separator, content = raw_line.partition(":")
+        if separator and label.strip().casefold() in {"hook", "body", "cta"}:
+            value = content.strip()
+        else:
+            value = raw_line.strip()
+        if value:
+            spoken.append(value)
+    return " ".join(spoken)
+
+
+@traced("node.voiceover", run_type="chain", step="voiceover")
+async def node_voiceover(state: Any, config: RunnableConfig) -> dict[str, Any]:
+    """Synthesize and persist the approved narration only after media QC passes."""
+    item = as_item(state)
+    voice_ref = (item.creator_voice_ref or "").strip()
+    text = _narration_text(item.script or "")
+    if not voice_ref:
+        return {
+            "voiceover": None,
+            "error": "voiceover: approved creator voice is missing",
+        }
+    if not text:
+        return {
+            "voiceover": None,
+            "error": "voiceover: approved script is missing",
+        }
+
+    tool_ctx = tool_context_from_config(config)
+    add_trace_metadata(
+        step="voiceover",
+        stage="voiceover",
+        item_id=item.id,
+        characters=len(text),
+    )
+    try:
+        art = await execute_stage_tool(
+            config,
+            tool_ctx,
+            catalog_stage="voiceover",
+            tool_name="synthesize_voiceover",
+            tool_fn=synthesize_voiceover_tool,
+            voice_ref=voice_ref,
+            text=text,
+        )
+    except StageExecutionError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - paid TTS failure must be explicit
+        add_trace_metadata(
+            step="voiceover",
+            stage="voiceover_failed",
+            item_id=item.id,
+            error=str(exc),
+        )
+        return {"voiceover": None, "error": f"voiceover: {exc}"}
+
+    cost_usd = round(
+        item.cost_usd + float(art.meta.get("cost_usd", 0.0)),
+        6,
+    )
+    updated = item.model_copy(
+        update={"voiceover": art, "cost_usd": cost_usd, "error": None}
+    )
+    persisted = await media_store.persist_item_media(
+        updated,
+        run_id=config["configurable"].get("thread_id", "run"),
+        videos_root=default_videos_path(),
+        **_persistence(config, storage_key="videos_storage"),
+    )
+    return {
+        "voiceover": persisted.voiceover,
+        "cost_usd": persisted.cost_usd,
+        "error": None,
+    }
+
+
 async def _mock_assembled(item: Item, *, platform: str, system_prompt: str) -> Artifact:
     """Vídeo final mock para o fallback opt-in de assembly, marcado como degradado."""
     from orchestrator.adapters.mock import MockAdapter
@@ -1120,6 +1225,27 @@ async def _mock_assembled(item: Item, *, platform: str, system_prompt: str) -> A
     )
     meta = {**mock_art.meta, "provider": "mock", "fallback_reason": "assembly_gateway_rejected"}
     return mock_art.model_copy(update={"meta": meta})
+
+
+def _resolve_local_assembly_paths(item: Item) -> Item:
+    """Map public ``/videos`` URLs back to guarded runtime paths for FFmpeg."""
+    root = default_videos_path().resolve()
+
+    def _artifact(artifact: Artifact | None) -> Artifact | None:
+        if artifact is None or not artifact.uri.startswith("/videos/"):
+            return artifact
+        relative = artifact.uri.removeprefix("/videos/")
+        candidate = (root / relative).resolve()
+        if not candidate.is_relative_to(root) or not candidate.is_file():
+            return artifact
+        return artifact.model_copy(update={"uri": str(candidate)})
+
+    return item.model_copy(
+        update={
+            "clips": [_artifact(clip) for clip in item.clips],
+            "voiceover": _artifact(item.voiceover),
+        }
+    )
 
 
 @traced("node.assembly", run_type="chain", step=8)
@@ -1141,9 +1267,16 @@ async def node_assembly(state: Any, config: RunnableConfig) -> dict[str, Any]:
 
     reason: Optional[str] = None
     try:
+        assembly_payload = await resolve_signed_uris(
+            item.model_dump(mode="json"),
+            storage=config["configurable"].get("videos_storage"),
+        )
+        assembly_item = _resolve_local_assembly_paths(
+            Item.model_validate(assembly_payload)
+        )
         art = await execute_stage_tool(
             config,
-            tool_ctx, item=item, platform=platform, system_prompt=system_prompt,
+            tool_ctx, item=assembly_item, platform=platform, system_prompt=system_prompt,
             catalog_stage="assembly",
             tool_name="assemble_video",
             tool_fn=assemble_video_tool,
@@ -1167,12 +1300,33 @@ async def node_assembly(state: Any, config: RunnableConfig) -> dict[str, Any]:
 
     run_id = config["configurable"].get("thread_id", "run")
     videos_root = default_videos_path()
-    updated = item.model_copy(update={"assembled": art})
+    cost_usd = round(item.cost_usd + float(art.meta.get("cost_usd", 0.0)), 4)
+    if isinstance(art, RenderedMedia):
+        canonical_art = await media_store.persist_artifact_bytes(
+            art.data,
+            run_id=run_id,
+            item_id=item.id,
+            basename="assembled",
+            kind="video",
+            content_type=art.content_type,
+            meta=art.meta,
+            videos_root=videos_root,
+            **_persistence(config, storage_key="videos_storage"),
+        )
+    else:
+        canonical_art = art
+    updated = item.model_copy(
+        update={"assembled": canonical_art, "cost_usd": cost_usd}
+    )
     persisted = await media_store.persist_item_media(
         updated, run_id=run_id, videos_root=videos_root,
         **_persistence(config, storage_key="videos_storage"),
     )
-    return {"assembled": persisted.assembled, "error": None}
+    return {
+        "assembled": persisted.assembled,
+        "cost_usd": persisted.cost_usd,
+        "error": None,
+    }
 
 
 @traced("node.upscale", run_type="chain", step=8)

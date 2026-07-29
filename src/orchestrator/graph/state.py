@@ -65,6 +65,7 @@ class Item(BaseModel):
     id: str = Field(default_factory=lambda: uuid.uuid4().hex)
     concept: dict[str, Any]
     creator_ref: Optional[str] = None
+    creator_voice_ref: Optional[str] = None
     creator_image_uri: Optional[str] = None
     creator_image_local_path: Optional[str] = None
     script: Optional[str] = None
@@ -72,6 +73,7 @@ class Item(BaseModel):
     clips: list[Artifact] = Field(default_factory=list)
     qc: Optional[QCResult] = None
     attempts: int = 0
+    voiceover: Optional[Artifact] = None
     assembled: Optional[Artifact] = None
     dropped: bool = False
     error: Optional[str] = None
@@ -81,6 +83,7 @@ class Item(BaseModel):
 def new_item(
     concept: dict[str, Any],
     creator_ref: Optional[str] = None,
+    creator_voice_ref: Optional[str] = None,
     creator_image_uri: Optional[str] = None,
     creator_image_local_path: Optional[str] = None,
 ) -> Item:
@@ -88,6 +91,7 @@ def new_item(
     return Item(
         concept=concept,
         creator_ref=creator_ref,
+        creator_voice_ref=creator_voice_ref,
         creator_image_uri=creator_image_uri,
         creator_image_local_path=creator_image_local_path,
     )

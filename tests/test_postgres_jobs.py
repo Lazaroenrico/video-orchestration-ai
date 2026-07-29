@@ -5,8 +5,10 @@ import asyncio
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
+import httpx
 import pytest
 from fastapi import BackgroundTasks
+from replicate.exceptions import ReplicateError
 
 from orchestrator.db import (
     CancelledGateError,
@@ -438,7 +440,7 @@ async def test_default_worker_executes_mock_pipeline_and_persists_run(
     assert run.summary["produced"] == 1
 
 
-async def test_creator_gate_survives_worker_restart_and_http_resolution(
+async def test_review_gate_survives_worker_restart_and_http_resolution(
     postgresql,
     monkeypatch,
 ):
@@ -447,13 +449,15 @@ async def test_creator_gate_survives_worker_restart_and_http_resolution(
     monkeypatch.setenv("ORCH_ORGANIZATION_SLUG", "approval-worker")
     monkeypatch.setenv("ORCH_ORGANIZATION_NAME", "Approval Worker")
     monkeypatch.setenv("ORCH_USER_SUBJECT", "oidc|reviewer")
-    response = await web_server.start_run(
-        web_server.RunRequest(
-            offer="serum X",
-            batch=1,
+    response = await web_server.start_run_v2(
+        web_server.RunV2Request(
+            campaign={
+                "offer": "serum X",
+                "audience": "Adults with dry skin",
+                "batch_size": 1,
+                "platform": "tiktok",
+            },
             config_dir="config-mock",
-            approve_creators=True,
-            edit_concepts=False,
         ),
         BackgroundTasks(),
     )
@@ -469,24 +473,25 @@ async def test_creator_gate_survives_worker_restart_and_http_resolution(
         )
 
     assert gate is not None
-    assert gate.gate_type == "approve_creators"
-    assert waiting_run is not None and waiting_run.phase == "awaiting"
-    approved_id = gate.payload["creators"][0]["id"]
-    resolved = await web_server.approve(
+    assert gate.gate_type == "review_creative_plan"
+    assert waiting_run is not None and waiting_run.phase == "review"
+    resolved = await web_server.review_run_v2(
         response["run_id"],
-        web_server.ApproveRequest(
+        web_server.ReviewV2Request(
+            action="approve",
             gate_id=str(gate.gate_id),
             version=gate.version,
-            approved=[approved_id],
+            gate_type="review_creative_plan",
         ),
     )
     with pytest.raises(web_server.HTTPException) as stale:
-        await web_server.approve(
+        await web_server.review_run_v2(
             response["run_id"],
-            web_server.ApproveRequest(
+            web_server.ReviewV2Request(
+                action="approve",
                 gate_id=str(gate.gate_id),
                 version=gate.version,
-                approved=[],
+                gate_type="review_creative_plan",
             ),
         )
 
@@ -506,7 +511,7 @@ async def test_creator_gate_survives_worker_restart_and_http_resolution(
     assert finished_run is not None and finished_run.phase == "done"
 
 
-async def test_concept_gate_resumes_from_versioned_http_decision(
+async def test_review_gate_resumes_from_versioned_edited_http_decision(
     postgresql,
     monkeypatch,
 ):
@@ -515,13 +520,15 @@ async def test_concept_gate_resumes_from_versioned_http_decision(
     monkeypatch.setenv("ORCH_ORGANIZATION_SLUG", "concept-worker")
     monkeypatch.setenv("ORCH_ORGANIZATION_NAME", "Concept Worker")
     monkeypatch.setenv("ORCH_USER_SUBJECT", "oidc|editor")
-    response = await web_server.start_run(
-        web_server.RunRequest(
-            offer="serum X",
-            batch=1,
+    response = await web_server.start_run_v2(
+        web_server.RunV2Request(
+            campaign={
+                "offer": "serum X",
+                "audience": "Adults with dry skin",
+                "batch_size": 1,
+                "platform": "tiktok",
+            },
             config_dir="config-mock",
-            approve_creators=False,
-            edit_concepts=True,
         ),
         BackgroundTasks(),
     )
@@ -533,24 +540,27 @@ async def test_concept_gate_resumes_from_versioned_http_decision(
             response["run_id"]
         )
 
-    assert gate is not None and gate.gate_type == "edit_concepts"
-    concepts = gate.payload["concepts"]
-    concepts[0]["script"] = "edited script"
-    resolved = await web_server.submit_concepts(
+    assert gate is not None and gate.gate_type == "review_creative_plan"
+    concept_id = gate.payload["concepts"][0]["id"]
+    resolved = await web_server.review_run_v2(
         response["run_id"],
-        web_server.ConceptEditRequest(
+        web_server.ReviewV2Request(
+            action="approve",
             gate_id=str(gate.gate_id),
             version=gate.version,
-            concepts=concepts,
+            gate_type="review_creative_plan",
+            concepts=[{"id": concept_id, "script": "edited script"}],
         ),
     )
     with pytest.raises(web_server.HTTPException) as stale:
-        await web_server.submit_concepts(
+        await web_server.review_run_v2(
             response["run_id"],
-            web_server.ConceptEditRequest(
+            web_server.ReviewV2Request(
+                action="approve",
                 gate_id=str(gate.gate_id),
                 version=gate.version,
-                concepts=concepts,
+                gate_type="review_creative_plan",
+                concepts=[{"id": concept_id, "script": "edited script"}],
             ),
         )
     await run_worker_once(worker_id="runner-after-edit")
@@ -559,7 +569,7 @@ async def test_concept_gate_resumes_from_versioned_http_decision(
         tenant = await database.ensure_tenant(TenantIdentity.from_env())
         run = await PostgresRunRepository(database, tenant).get(response["run_id"])
 
-    assert resolved["count"] == 1
+    assert resolved["ok"] is True
     assert "job_id" in resolved
     assert stale.value.status_code == 409
     assert run is not None and run.phase == "done"
@@ -827,6 +837,202 @@ async def test_worker_stops_heartbeat_without_cancelling_inflight_renew(monkeypa
     assert worked is True
     assert completed is True
     assert renew_cancelled is False
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        ReplicateError(status=402, detail="Payment Required"),
+        httpx.ReadTimeout("prediction response timed out"),
+    ],
+)
+async def test_worker_does_not_retry_permanent_or_ambiguous_provider_failure(
+    monkeypatch,
+    failure,
+):
+    job = Job(
+        job_id=UUID("00000000-0000-0000-0000-000000000002"),
+        run_id="run-provider-terminal",
+        kind="execute_run",
+        status="running",
+        payload={},
+        attempt=1,
+        max_attempts=3,
+        available_at=NOW,
+        lease_expires_at=None,
+        worker_id="runner-provider-terminal",
+        error=None,
+    )
+    failure_retryable = None
+
+    class FakeJobs:
+        def __init__(self, *_args):
+            pass
+
+        async def claim(self, *_args, **_kwargs):
+            return [job]
+
+        async def renew(self, *_args, **_kwargs):
+            return job
+
+        async def complete(self, *_args, **_kwargs):
+            raise AssertionError("job should not complete")
+
+        async def fail(self, *_args, retryable, **_kwargs):
+            nonlocal failure_retryable
+            failure_retryable = retryable
+            return job
+
+    async def fail_provider(_job):
+        raise failure
+
+    monkeypatch.setattr(worker_module, "PostgresJobRepository", FakeJobs)
+
+    worked = await run_worker_once(
+        worker_id="runner-provider-terminal",
+        execute=fail_provider,
+        heartbeat_seconds=30,
+        database=object(),
+        tenant=object(),
+    )
+
+    assert worked is True
+    assert failure_retryable is False
+
+
+def test_worker_retries_retryable_http_status_failures():
+    request = httpx.Request("POST", "https://provider.invalid/jobs")
+    response = httpx.Response(503, request=request)
+    failure = httpx.HTTPStatusError(
+        "provider unavailable",
+        request=request,
+        response=response,
+    )
+
+    assert worker_module._job_failure_is_retryable(failure) is True
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"seed_creator": {"id": "creator-0"}, "approve_creators": True},
+        {"seed_creator": {"image_uri": "mock://image"}},
+    ],
+)
+async def test_seed_creator_recording_ignores_noncanonical_or_gated_payloads(payload):
+    await worker_module._record_seed_creator_for_run(
+        "run-seed",
+        payload,
+        database=object(),
+        tenant=object(),
+    )
+
+
+async def test_worker_renews_a_positive_interval_heartbeat(monkeypatch):
+    job = Job(
+        job_id=UUID("00000000-0000-0000-0000-000000000008"),
+        run_id="run-positive-heartbeat",
+        kind="execute_run",
+        status="running",
+        payload={},
+        attempt=1,
+        max_attempts=1,
+        available_at=NOW,
+        lease_expires_at=None,
+        worker_id="runner-positive-heartbeat",
+        error=None,
+    )
+    renewed = asyncio.Event()
+
+    class FakeJobs:
+        def __init__(self, *_args):
+            pass
+
+        async def claim(self, *_args, **_kwargs):
+            return [job]
+
+        async def renew(self, *_args, **_kwargs):
+            renewed.set()
+            return job
+
+        async def complete(self, *_args, **_kwargs):
+            return job
+
+        async def fail(self, *_args, **_kwargs):
+            raise AssertionError("job should not fail")
+
+    async def finish_after_renew(_job):
+        await asyncio.wait_for(renewed.wait(), timeout=1)
+
+    monkeypatch.setattr(worker_module, "PostgresJobRepository", FakeJobs)
+
+    worked = await run_worker_once(
+        worker_id="runner-positive-heartbeat",
+        execute=finish_after_renew,
+        heartbeat_seconds=0.001,
+        database=object(),
+        tenant=object(),
+    )
+
+    assert worked is True
+    assert renewed.is_set()
+
+
+async def test_worker_zero_interval_heartbeat_observes_stop_before_renew(
+    monkeypatch,
+):
+    job = Job(
+        job_id=UUID("00000000-0000-0000-0000-000000000009"),
+        run_id="run-zero-heartbeat-stop",
+        kind="execute_run",
+        status="running",
+        payload={},
+        attempt=1,
+        max_attempts=1,
+        available_at=NOW,
+        lease_expires_at=None,
+        worker_id="runner-zero-heartbeat-stop",
+        error=None,
+    )
+    execution_done = asyncio.Event()
+    original_sleep = asyncio.sleep
+
+    class FakeJobs:
+        def __init__(self, *_args):
+            pass
+
+        async def claim(self, *_args, **_kwargs):
+            return [job]
+
+        async def renew(self, *_args, **_kwargs):
+            return job
+
+        async def complete(self, *_args, **_kwargs):
+            return job
+
+        async def fail(self, *_args, **_kwargs):
+            raise AssertionError("job should not fail")
+
+    async def controlled_sleep(_seconds):
+        await execution_done.wait()
+        await original_sleep(0)
+
+    async def finish_immediately(_job):
+        execution_done.set()
+
+    monkeypatch.setattr(worker_module, "PostgresJobRepository", FakeJobs)
+    monkeypatch.setattr(worker_module.asyncio, "sleep", controlled_sleep)
+
+    worked = await run_worker_once(
+        worker_id="runner-zero-heartbeat-stop",
+        execute=finish_immediately,
+        heartbeat_seconds=0,
+        database=object(),
+        tenant=object(),
+    )
+
+    assert worked is True
 
 
 async def test_worker_cancels_execution_immediately_when_heartbeat_loses_lease(

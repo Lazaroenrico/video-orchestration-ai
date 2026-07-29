@@ -59,6 +59,11 @@ def test_campaign_input_rejects_invalid_or_unknown_fields(payload: dict) -> None
         CampaignInput.model_validate(payload)
 
 
+def test_campaign_input_rejects_whitespace_only_required_text() -> None:
+    with pytest.raises(ValidationError):
+        CampaignInput(offer="   ", audience="Adults")
+
+
 def test_materialize_concepts_assigns_server_owned_ids_and_offer() -> None:
     campaign = CampaignInput(offer="Serum X", audience="Adults", batch_size=2)
     submissions = [
@@ -93,6 +98,13 @@ def test_materialize_concepts_assigns_server_owned_ids_and_offer() -> None:
         "concept-6aae88f0",
     ]
     assert all(concept.offer == "Serum X" for concept in concepts)
+
+
+def test_materialize_concepts_requires_the_server_owned_batch_size() -> None:
+    campaign = CampaignInput(offer="Serum X", audience="Adults", batch_size=2)
+
+    with pytest.raises(ValueError, match="expected 2 concepts"):
+        materialize_concepts([], campaign=campaign, run_id="run-123")
 
 
 def test_concept_submission_cannot_control_server_fields() -> None:
@@ -151,6 +163,34 @@ def test_legacy_script_text_is_mirrored_into_a_typed_draft() -> None:
         "body",
         "cta",
     ]
+
+
+def test_legacy_script_rejects_blank_text_and_normalizes_unlabelled_lines() -> None:
+    with pytest.raises(ValueError, match="must not be blank"):
+        script_result_from_text(" \n ", run_id="run-1", concept_id="concept-1")
+
+    result = script_result_from_text(
+        "HOOK: Start here\nBODY:\nUnlabelled explanation",
+        run_id="run-1",
+        concept_id="concept-alpha",
+    )
+
+    assert [beat.section for beat in result.script_draft.spoken_beats] == [
+        "hook",
+        "body",
+    ]
+    assert result.script_draft.spoken_beats[1].text == "Unlabelled explanation"
+
+
+def test_legacy_script_keeps_a_nonempty_punctuation_only_fallback() -> None:
+    result = script_result_from_text(
+        ":",
+        run_id="run-1",
+        concept_id="concept-alpha",
+    )
+
+    assert result.script_draft.spoken_beats[0].text == ":"
+    assert result.script_draft.spoken_beats[0].section == "body"
 
 
 def test_creator_roster_is_exactly_two_and_assignments_reference_known_concepts() -> None:

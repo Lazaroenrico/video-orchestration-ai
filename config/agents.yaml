@@ -43,6 +43,10 @@ stages:
     executor: tool
     tools: [qc_check]
     agent_enabled: false
+  voiceover:
+    executor: tool
+    tools: [synthesize_voiceover]
+    agent_enabled: false
   assembly:
     executor: tool
     tools: [assemble_video]

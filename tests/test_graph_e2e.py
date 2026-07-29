@@ -2,8 +2,43 @@
 import pytest
 
 from orchestrator import runner
+from orchestrator.graph.state import Artifact, Item
 
 PROVIDERS = {"adapters": {"video": "mock"}}
+
+
+def test_summary_breaks_out_voiceover_cost():
+    item = Item(
+        id="item-1",
+        concept={"hook": "h"},
+        clips=[
+            Artifact(
+                kind="clip",
+                uri="mock://clip",
+                meta={"tier": "pruna", "cost_usd": 0.16},
+            )
+        ],
+        voiceover=Artifact(
+            kind="voiceover",
+            uri="mock://voice",
+            meta={"cost_usd": 0.0042},
+        ),
+        assembled=Artifact(
+            kind="video",
+            uri="mock://final",
+            meta={"provider": "ffmpeg", "cost_usd": 0.0},
+        ),
+        cost_usd=0.1642,
+    )
+
+    summary = runner.summarize({"results": [item]})
+
+    assert summary["cost_by_stage"] == {
+        "video": 0.16,
+        "voiceover": 0.0042,
+        "assembly": 0.0,
+    }
+    assert summary["total_cost_usd"] == pytest.approx(0.1642)
 
 
 def test_clean_task_error_variants():

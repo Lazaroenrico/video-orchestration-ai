@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from orchestrator.adapters.base import VoiceProfile
+from orchestrator.adapters.base import RenderedMedia, VoiceProfile
 from orchestrator.graph.state import Artifact, QCResult, new_item
 
 
@@ -261,6 +261,41 @@ async def test_assemble_video_tool_delegates_and_coerces_artifact_dict():
     ]
 
 
+async def test_assemble_video_tool_preserves_rendered_media_bytes():
+    from orchestrator.tools.assembly import assemble_video_tool
+    from orchestrator.tools.base import tool_context_from_config
+
+    item = new_item({"id": "concept-1", "hook": "h"})
+    rendered = RenderedMedia(
+        data=b"mp4",
+        content_type="video/mp4",
+        meta={"provider": "ffmpeg"},
+    )
+    adapter = _SpyAdapter(rendered)
+    ctx = tool_context_from_config(_config(adapter))
+
+    result = await assemble_video_tool(ctx, item=item, platform="tiktok")
+
+    assert result is rendered
+
+
+async def test_assemble_video_tool_rejects_empty_rendered_media():
+    from orchestrator.tools.assembly import assemble_video_tool
+    from orchestrator.tools.base import tool_context_from_config
+
+    adapter = _SpyAdapter(
+        RenderedMedia(data=b"", content_type="video/mp4", meta={})
+    )
+    ctx = tool_context_from_config(_config(adapter))
+
+    with pytest.raises(ValueError, match="empty rendered media"):
+        await assemble_video_tool(
+            ctx,
+            item=new_item({"id": "concept-1"}),
+            platform="tiktok",
+        )
+
+
 async def test_upscale_video_tool_delegates_and_requires_non_empty_uri():
     from orchestrator.tools.assembly import upscale_video_tool
     from orchestrator.tools.base import tool_context_from_config
@@ -382,6 +417,7 @@ def test_tool_registry_lists_static_tool_specs():
         "build_creator",
         "generate_clip",
         "qc_check",
+        "synthesize_voiceover",
         "assemble_video",
         "upscale_video",
     }
@@ -555,6 +591,7 @@ async def test_stage_nodes_delegate_to_tools(monkeypatch, tmp_path):
     pipeline = {
         "batch": {"default_size": 2},
         "clip": {"duration_seconds": 8},
+        "video": {"product_demo_tier": "seedance"},
         "qc": {"fail_rate": 0.34},
         "roster": {"creators": 1},
     }
@@ -638,3 +675,5 @@ async def test_stage_nodes_delegate_to_tools(monkeypatch, tmp_path):
         "assembly",
         "upscale",
     ]
+    clip_calls = [kwargs for name, kwargs in calls if name == "clip"]
+    assert [call["tier"] for call in clip_calls] == ["ltx", "seedance"]

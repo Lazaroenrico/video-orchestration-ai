@@ -59,6 +59,43 @@ def test_custom_creative_progress_exposes_completed_and_total_units():
     }
 
 
+def test_custom_creative_progress_rejects_malformed_or_unknown_payloads():
+    translator = ProgressEventTranslator()
+
+    assert translator.translate(
+        {"event": "on_custom_event", "name": "other", "data": {}}
+    ) is None
+    assert translator.translate(
+        {
+            "event": "on_custom_event",
+            "name": "creative_progress",
+            "data": "invalid",
+        }
+    ) is None
+    assert translator.translate(
+        {
+            "event": "on_custom_event",
+            "name": "creative_progress",
+            "data": {
+                "stage_id": "unknown",
+                "completed_units": 1,
+                "total_units": 1,
+            },
+        }
+    ) is None
+    assert translator.translate(
+        {
+            "event": "on_custom_event",
+            "name": "creative_progress",
+            "data": {
+                "stage_id": "scripts",
+                "completed_units": 2,
+                "total_units": 1,
+            },
+        }
+    ) is None
+
+
 def test_progress_snapshot_applies_granular_script_counter():
     progress = build_progress(
         [
@@ -184,6 +221,26 @@ def test_activity_formats_operational_events_and_deduplicates_replay():
     assert activity[3]["stage_id"] == "creator_previews"
     assert activity[5]["item_id"] == "creator-a"
     assert activity[6]["item_id"] == "clip-a"
+
+
+def test_activity_handles_legacy_concept_gate_and_ignores_invalid_progress_counts():
+    activity = build_activity(
+        [
+            {
+                "type": "progress_event",
+                "event_id": "invalid-progress",
+                "stage_id": "scripts",
+                "status": "progress",
+                "completed_units": "one",
+                "total_units": 2,
+            },
+            {"type": "awaiting_concept_edit", "event_id": "legacy-gate"},
+        ]
+    )
+
+    assert [(entry["event_id"], entry["stage_id"]) for entry in activity] == [
+        ("legacy-gate", "scripts"),
+    ]
 
 
 def test_activity_collapses_internal_nodes_into_canonical_stage_transitions():
@@ -321,6 +378,36 @@ def test_progress_surfaces_queue_wait_failure_and_parent_failure():
     assert errored["execution_status"] == "failed"
     assert errored_stages["assembly"]["status"] == "failed"
     assert errored_stages["assembly"]["active_units"] == 0
+
+
+def test_cancelled_execution_and_failed_creative_child_propagate_to_public_progress():
+    cancelled = build_progress([], phase="cancelled")
+    creative_failed = build_progress(
+        [
+            {
+                "type": "progress_event",
+                "operation_id": "concepts-failed",
+                "stage_id": "concepts",
+                "node": "concepts",
+                "status": "failed",
+            },
+            {
+                "type": "progress_event",
+                "operation_id": "malformed-counter",
+                "stage_id": "scripts",
+                "node": "scripts",
+                "status": "progress",
+                "completed_units": "one",
+                "total_units": 2,
+            },
+        ],
+        phase="running",
+    )
+
+    stages = {stage["id"]: stage for stage in creative_failed["stages"]}
+    assert cancelled["execution_status"] == "cancelled"
+    assert stages["concepts"]["status"] == "failed"
+    assert stages["creative_plan"]["status"] == "failed"
 
 
 def test_public_progress_has_five_objective_phases_and_visible_internal_work():

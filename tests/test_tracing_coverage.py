@@ -76,6 +76,7 @@ def test_concrete_adapter_methods_have_trace_markers():
     from orchestrator.adapters.replicate_video import ReplicateVideoAdapter
     from orchestrator.adapters.replicate_voice import ReplicateVoiceAdapter
     from orchestrator.adapters.topaz_upscale import TopazUpscaleAdapter
+    from orchestrator.adapters.vercel_gateway_video import VercelGatewayVideoAdapter
 
     expected = {
         MockAdapter.generate_concepts: "adapter.mock.generate_concepts",
@@ -91,6 +92,7 @@ def test_concrete_adapter_methods_have_trace_markers():
         TopazUpscaleAdapter.upscale: "adapter.topaz.upscale",
         ElevenLabsVoiceAdapter.create_voice: "adapter.elevenlabs.create_voice",
         ReplicateVideoAdapter.generate_clip: "adapter.replicate_video.generate_clip",
+        VercelGatewayVideoAdapter.generate_clip: "adapter.vercel_gateway_video.generate_clip",
         ReplicateUpscaleAdapter.upscale: "adapter.replicate_upscale.upscale",
         ReplicateVoiceAdapter.create_voice: "adapter.replicate_voice.create_voice",
     }
@@ -98,6 +100,7 @@ def test_concrete_adapter_methods_have_trace_markers():
     assert {_trace_name(fn) for fn in expected} == set(expected.values())
     assert MockAdapter.generate_clip.__trace_metadata__["step"] == "video"
     assert ReplicateVideoAdapter.generate_clip.__trace_metadata__["step"] == "video"
+    assert VercelGatewayVideoAdapter.generate_clip.__trace_metadata__["step"] == "video"
 
 
 def test_anthropic_client_is_used_directly_without_wrapping(monkeypatch):

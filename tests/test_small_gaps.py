@@ -12,6 +12,7 @@ import pytest
 
 from orchestrator import creator_store, feedback_store, media_store, prompt_store
 from orchestrator.adapters import integrity_qc, mock, replicate_voice
+from orchestrator.adapters._agent_loop import AgentRunResult, ToolAttempt, ToolCall
 from orchestrator.adapters.base import VoiceProfile
 from orchestrator.graph.state import Artifact, Item
 from orchestrator.graph.routing import select_tier
@@ -84,6 +85,45 @@ def test_build_mock_adapter_passes_latency():
     assert adapter.latency == 0.5
 
 
+def test_mock_agent_brain_includes_the_configured_system_prompt():
+    brain = mock._MockAgentBrain(lambda *_args: None, system_prompt="safe prompt")
+
+    messages = brain.initial_messages(
+        "concepts",
+        {},
+        [{"name": "submit_concepts"}],
+    )
+
+    assert messages[0]["system_prompt"] == "safe prompt"
+
+
+def test_mock_terminal_submission_rejects_an_unknown_stage():
+    with pytest.raises(ValueError, match="unsupported terminal mock stage"):
+        mock._terminal_submission("unknown", {})
+
+
+async def test_mock_creative_outputs_change_deterministically_for_persona_and_revision():
+    adapter = mock.MockAdapter(tiers=[])
+
+    concepts = await adapter.generate_concepts(
+        offer="Serum X",
+        n=1,
+        seed="run-1",
+        revision="shorter",
+    )
+    script = await adapter.write_script(
+        concepts[0],
+        "creator-0",
+        "tiktok",
+        persona="Busy parent",
+        revision="shorter",
+    )
+
+    assert concepts[0]["id"].startswith("concept-")
+    assert "PERSONA_CONTEXT[" in script
+    assert "REVISED[" in script
+
+
 # ------------------------------------------------------------------ #
 # adapters/replicate_voice                                          #
 # ------------------------------------------------------------------ #
@@ -131,6 +171,102 @@ def test_configure_logging_adds_file_handler(monkeypatch, tmp_path):
         for h in [h for h in root.handlers if getattr(h, "_orchestrator_handler", False)]:
             root.removeHandler(h)
             h.close()
+
+
+def test_plain_logging_handler_uses_the_human_readable_formatter(monkeypatch):
+    from orchestrator import logging_config
+
+    monkeypatch.delenv("ORCHESTRATOR_LOG_FORMAT", raising=False)
+    handler = logging_config._make_handler(logging.StreamHandler())
+
+    assert handler.formatter is not None
+    assert "%(levelname)-7s" in handler.formatter._fmt
+
+
+# ------------------------------------------------------------------ #
+# trace sanitization                                                #
+# ------------------------------------------------------------------ #
+
+def test_trace_sanitizer_redacts_a_direct_creative_field(monkeypatch):
+    from orchestrator.tracing import _sanitize_trace_payload
+
+    monkeypatch.setenv("LANGSMITH_REDACT_PROMPTS", "true")
+
+    assert _sanitize_trace_payload(
+        "https://private.invalid/image.png",
+        key="image_url",
+    ) == "<redacted>"
+
+
+# ------------------------------------------------------------------ #
+# creator public media contract                                     #
+# ------------------------------------------------------------------ #
+
+def test_playable_voice_uri_accepts_audio_data_and_rejects_opaque_schemes():
+    from orchestrator.creators import _is_playable_voice_uri
+
+    assert _is_playable_voice_uri("data:audio/wav;base64,AAAA") is True
+    assert _is_playable_voice_uri("voice-id:opaque") is False
+
+
+# ------------------------------------------------------------------ #
+# graph review routing                                              #
+# ------------------------------------------------------------------ #
+
+@pytest.mark.parametrize(
+    ("target", "expected"),
+    [
+        ("concepts", "concepts"),
+        ("scripts", "scripts"),
+        ("creators", "creator_profiles"),
+    ],
+)
+async def test_review_regeneration_routes_to_the_requested_creative_stage(target, expected):
+    from orchestrator.graph.builder import route_after_review
+
+    assert await route_after_review(
+        {"review_approved": False, "revision_request": {"target": target}}
+    ) == expected
+
+
+# ------------------------------------------------------------------ #
+# video-agent take settlement                                       #
+# ------------------------------------------------------------------ #
+
+def test_settle_takes_records_paid_superseded_outputs():
+    from orchestrator.nodes.stages import _settle_takes
+
+    first = Artifact(kind="clip", uri="mock://take-1", meta={"cost_usd": 0.1})
+    final = Artifact(kind="clip", uri="mock://take-2", meta={"cost_usd": 0.2})
+    run = AgentRunResult(
+        result=final,
+        attempts=(
+            ToolAttempt(
+                call=ToolCall(
+                    id="one",
+                    name="generate_clip",
+                    arguments={"revision": "fix hands"},
+                ),
+                result=first,
+            ),
+            ToolAttempt(
+                call=ToolCall(id="two", name="generate_clip"),
+                result=final,
+            ),
+        ),
+    )
+
+    settled, cost = _settle_takes(run)
+
+    assert cost == 0.3
+    assert settled.meta["agent_takes"] == 2
+    assert settled.meta["superseded_takes"] == [
+        {
+            "uri": "mock://take-1",
+            "cost_usd": 0.1,
+            "revision": "fix hands",
+        }
+    ]
 
 
 # ------------------------------------------------------------------ #

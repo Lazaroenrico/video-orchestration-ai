@@ -10,41 +10,36 @@ qc:
   required_clip_count: 2    # live: talking-head + product demo precisam existir antes da montagem
 
 video:
-  allow_mock_fallback: false # live: tiers sem adapter real falham explicitamente em vez de gerar mock
+  allow_mock_fallback: false # live: falha do provider é explícita; nunca gera mock
+  product_demo_tier: pruna
 
 # Roteamento + custo por tier (Step 4 / "The Cost at Scale" do Context.md).
-# No fluxo atual, tentativas de QC permanecem em LTX; tiers premium ficam listados
-# para configuração futura, mas não são escolhidos automaticamente pelo roteador.
+# Talking-head, regenerações de QC e product demo usam P-Video no Replicate.
 tiers:
-  - name: ltx
-    model: lightricks/ltx-2.3-fast
+  - name: pruna
+    model: prunaai/p-video
     cost_per_second: 0.01
-    max_concurrency: 16     # barato: alta concorrência (bulk de testes)
-  - name: kling
-    model: kling-3.0
-    cost_per_second: 0.10
-    max_concurrency: 6      # sinal: reprodução mais limpa
-  - name: seedance
-    model: seedance-2.0
-    cost_per_second: 0.168
-    max_concurrency: 2      # premium: vencedores, baixa concorrência
+    max_concurrency: 1      # o throttle global também serializa voz e vídeo no Replicate
 
 clip:
   duration_seconds: 8
   resolution: 1080p
   aspect_ratio: "9:16"
-  fps: 25
+  fps: 24
+  draft: true              # validação E2E de menor custo: 1080p draft = US$ 0,01/s
   camera_motion: static
   generate_audio: false
+  timeout_ms: 900000
 
 assembly:
-  model: bytedance/seedance-2.0
-  duration_seconds: 8
-  resolution: 1080x1920
-  aspect_ratio: "9:16"
-  generate_audio: false
-  timeout_ms: 900000
-  allow_mock_fallback: false # live: falha de montagem surfa o erro no item (com clips); on = final mock degradado
+  final_duration_seconds: 16
+  narration_target_seconds: 14
+  narration_max_words: 35
+  audio_speedup_max: 1.10
+  resolution: "1080x1920"
+  fps: 24
+  timeout_seconds: 300
+  allow_mock_fallback: false # live: falha do FFmpeg surfa o erro no item (com clips + locução)
 
 roster:
   creators: 2               # quantos creators reutilizáveis no roster (Step 3)
@@ -54,3 +49,7 @@ roster:
 agent:
   max_steps: 2              # one decision plus bounded recovery
   max_tool_calls: 1         # each creative agent submits exactly one typed result
+  max_steps_by_stage:
+    scripts: 3
+  max_tool_calls_by_stage:
+    scripts: 2              # permite corrigir uma submissão que exceda 14s/35 palavras

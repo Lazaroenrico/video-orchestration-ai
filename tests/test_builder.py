@@ -50,7 +50,16 @@ def test_sub_config_propagates_trace_lineage_and_drops_checkpoint_keys():
 def test_item_graph_has_expected_nodes(pipeline_cfg):
     app = build_item_graph(pipeline_cfg)
     nodes = set(app.get_graph().nodes)
-    for n in ("ltx", "kling", "seedance", "product_demo", "qc", "assembly", "drop"):
+    for n in (
+        "ltx",
+        "kling",
+        "seedance",
+        "product_demo",
+        "qc",
+        "voiceover",
+        "assembly",
+        "drop",
+    ):
         assert n in nodes
     # O script agora é gerado em nível de batch (antes do creator); o subgrafo
     # per-item recebe o Item com o script já pronto, sem um node "script".
@@ -115,6 +124,24 @@ async def test_fan_out_attaches_creator_image_uri_from_roster():
     assert item_payload["creator_image_local_path"] == "/tmp/run/creator-0/image.png"
 
 
+async def test_fan_out_attaches_stable_creator_voice_reference():
+    fan_out = make_fan_out_node()
+    sends = await fan_out(
+        {
+            "concepts": [{"id": "concept-1", "hook": "h"}],
+            "roster": [
+                {
+                    "id": "creator-0",
+                    "voice_model_ref": "Rachel",
+                    "voice_id": "r2://ugc/run/creator-0/voice.mp3",
+                }
+            ],
+        }
+    )
+
+    assert sends[0].arg["creator_voice_ref"] == "Rachel"
+
+
 async def test_fan_out_moves_concept_script_into_item():
     """O script gerado em batch (concept["script"]) vira Item.script; concept fica limpo."""
     fan_out = make_fan_out_node()
@@ -138,6 +165,7 @@ async def test_item_subgraph_runs_one_item_to_assembly(adapter, pipeline_cfg):
     item = Item(
         concept={"hook": "h", "hook_style": "problem", "offer": "x"},
         creator_ref="creator-0",
+        creator_voice_ref="voice-0",
         script="HOOK: h\nBODY: ...\nCTA: ...",
     )
     out = await asyncio.wait_for(app.ainvoke(item.model_dump(), cfg), timeout=5)

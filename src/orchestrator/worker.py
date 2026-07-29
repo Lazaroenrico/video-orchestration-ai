@@ -8,6 +8,9 @@ from pathlib import Path
 from typing import Any
 from typing import Awaitable, Callable
 
+import httpx
+from replicate.exceptions import ReplicateError
+
 from orchestrator import runner
 from orchestrator.config import (
     default_db_path,
@@ -16,6 +19,7 @@ from orchestrator.config import (
     load_pipeline,
     load_providers,
 )
+from orchestrator.creators import normalize_creator_payload
 from orchestrator.db import (
     Database,
     Job,
@@ -32,6 +36,30 @@ from orchestrator.registry import ROLES
 
 JobExecutor = Callable[[Job], Awaitable[None]]
 
+_AMBIGUOUS_POST_SEND_ERRORS = (
+    httpx.ReadError,
+    httpx.ReadTimeout,
+    httpx.WriteError,
+    httpx.WriteTimeout,
+)
+
+
+def _job_failure_is_retryable(exc: BaseException) -> bool:
+    """Evita repetir efeitos pagos quando a falha é permanente ou pós-envio."""
+    if isinstance(exc, _AMBIGUOUS_POST_SEND_ERRORS):
+        return False
+    status = None
+    if isinstance(exc, ReplicateError):
+        status = getattr(exc, "status", None)
+    elif isinstance(exc, httpx.HTTPStatusError):
+        status = exc.response.status_code
+    if isinstance(status, int):
+        if status == 429 or status >= 500:
+            return True
+        if 400 <= status < 500:
+            return False
+    return True
+
 
 def _plain(value: Any) -> Any:
     if hasattr(value, "model_dump"):
@@ -41,6 +69,19 @@ def _plain(value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         return [_plain(item) for item in value]
     return value
+
+
+def _public_gate_payload(interrupt: dict[str, Any]) -> dict[str, Any]:
+    """Remove internal creator aliases before persisting a public human gate."""
+    payload = _plain(interrupt)
+    creators = payload.get("creators")
+    if isinstance(creators, list):
+        payload["creators"] = [
+            normalize_creator_payload(creator)
+            for creator in creators
+            if isinstance(creator, dict)
+        ]
+    return payload
 
 
 async def _record_seed_creator_for_run(
@@ -144,21 +185,6 @@ async def _execute_pipeline_job(
             run_options["seed_creator"],
             storage=storage,
         )
-    if job.kind == "resume_run" and payload.get("gate_type") == "approve_creators":
-        gate_payload = payload.get("gate")
-        resolution = payload.get("resolution")
-        if isinstance(gate_payload, dict) and isinstance(resolution, dict):
-            creators = gate_payload.get("creators")
-            approved = resolution.get("approved")
-            if isinstance(creators, list) and isinstance(approved, list):
-                await PostgresCreatorRepository(database, tenant).record_creators(
-                    job.run_id,
-                    [_plain(creator) for creator in creators],
-                    approved_ids=[str(creator_id) for creator_id in approved],
-                    creator_prompt=run_payload.get("creator_prompt"),
-                    video_prompt=run_payload.get("video_prompt"),
-                    offer=run_payload.get("offer"),
-                )
     if job.kind == "resume_run" and payload.get("gate_type") == "review_creative_plan":
         gate_payload = payload.get("gate")
         resolution = payload.get("resolution")
@@ -235,7 +261,7 @@ async def _execute_pipeline_job(
         await PostgresJobRepository(database, tenant).open_gate(
             job.run_id,
             gate_type=str(interrupt.get("type") or "unknown"),
-            payload=_plain(interrupt),
+            payload=_public_gate_payload(interrupt),
         )
         return
     await runs.save(
@@ -355,6 +381,7 @@ async def _run_worker_once_with_database(
             job.job_id,
             worker_id=worker_id,
             error=str(exc),
+            retryable=_job_failure_is_retryable(exc),
             now=now,
         )
     else:

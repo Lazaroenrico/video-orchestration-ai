@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from typing import Optional
 
+from orchestrator.adapters.base import RenderedMedia
 from orchestrator.graph.state import Artifact, Item
 from orchestrator.tools.base import (
     ToolContext,
@@ -25,7 +26,7 @@ async def assemble_video_tool(
     item: Item,
     platform: str,
     system_prompt: Optional[str] = None,
-) -> Artifact:
+) -> Artifact | RenderedMedia:
     add_trace_metadata(
         tool_name="assemble_video",
         role="assembly",
@@ -36,7 +37,37 @@ async def assemble_video_tool(
     art = await ctx.adapter.assemble(
         item=item, platform=platform, system_prompt=system_prompt,
     )
+    if isinstance(art, RenderedMedia):
+        if not art.data or not art.content_type:
+            raise ValueError("assemble_video_tool received empty rendered media")
+        return art
     return require_artifact(art, tool_name="assemble_video_tool")
+
+
+@traced(
+    "tool.synthesize_voiceover",
+    run_type="tool",
+    tool_name="synthesize_voiceover",
+    role="creator",
+    stage="voiceover",
+)
+async def synthesize_voiceover_tool(
+    ctx: ToolContext,
+    *,
+    voice_ref: str,
+    text: str,
+) -> Artifact:
+    add_trace_metadata(
+        tool_name="synthesize_voiceover",
+        role="creator",
+        stage="voiceover",
+        run_id=ctx.run_id,
+    )
+    art = await ctx.adapter.synthesize_voiceover(
+        voice_ref=voice_ref,
+        text=text,
+    )
+    return require_artifact(art, tool_name="synthesize_voiceover_tool")
 
 
 @traced(

@@ -18,6 +18,14 @@ class _NoInnerLlm:
         raise AssertionError("agent submission must not call the LLM adapter again")
 
 
+class _LegacyLlm:
+    async def generate_concepts(self, **_kwargs):
+        return [{"hook": "Hook", "angle": "Angle"}]
+
+    async def write_script(self, **_kwargs):
+        return "HOOK: Hook\nCTA: See the offer"
+
+
 def _ctx() -> ToolContext:
     return ToolContext(
         adapter=_NoInnerLlm(),
@@ -76,6 +84,57 @@ async def test_script_submission_is_structured_without_an_inner_llm_call() -> No
     assert result.script.startswith("HOOK: Try this")
 
 
+async def test_script_submission_rejects_narration_longer_than_the_server_budget() -> None:
+    with pytest.raises(ValueError, match="narration exceeds 14 seconds"):
+        await write_script_tool(
+            _ctx(),
+            concept={"id": "concept-1", "hook": "Try this", "angle": "Routine"},
+            creator_ref="creator",
+            platform="tiktok",
+            target_duration_seconds=14,
+            max_spoken_words=35,
+            draft={
+                "spoken_beats": [
+                    {"section": "hook", "text": "Try this first.", "seconds": 4},
+                    {
+                        "section": "body",
+                        "text": "This explanation deliberately takes too long.",
+                        "seconds": 11,
+                    },
+                ],
+                "visual_beats": ["Creator to camera"],
+                "on_screen_text": [],
+                "call_to_action": "See the offer",
+                "estimated_duration": 15,
+            },
+        )
+
+
+async def test_script_submission_rejects_more_than_the_server_word_budget() -> None:
+    with pytest.raises(ValueError, match="narration exceeds 5 spoken words"):
+        await write_script_tool(
+            _ctx(),
+            concept={"id": "concept-1", "hook": "Try this", "angle": "Routine"},
+            creator_ref="creator",
+            platform="tiktok",
+            target_duration_seconds=14,
+            max_spoken_words=5,
+            draft={
+                "spoken_beats": [
+                    {
+                        "section": "hook",
+                        "text": "One two three four five six.",
+                        "seconds": 3,
+                    },
+                ],
+                "visual_beats": ["Creator to camera"],
+                "on_screen_text": [],
+                "call_to_action": "See it",
+                "estimated_duration": 3,
+            },
+        )
+
+
 async def test_creator_profile_tool_builds_exactly_two_server_owned_profiles() -> None:
     result = await design_creator_roster_tool(
         _ctx(),
@@ -128,4 +187,92 @@ async def test_creator_profile_tool_rejects_unknown_assignment() -> None:
                 },
             ],
             assignments=[{"concept_id": "unknown", "creator_index": 0}],
+        )
+
+
+async def test_agent_tools_require_their_terminal_structured_submissions() -> None:
+    with pytest.raises(ValueError, match="submit proposals"):
+        await generate_concepts_tool(
+            _ctx(),
+            offer="Serum X",
+            n=1,
+            seed="run-agent",
+            agent_submission=True,
+        )
+
+    with pytest.raises(ValueError, match="structured draft"):
+        await write_script_tool(
+            _ctx(),
+            concept={"id": "concept-1"},
+            creator_ref="creator",
+            platform="tiktok",
+            agent_submission=True,
+        )
+
+    with pytest.raises(ValueError, match="submit creators and assignments"):
+        await design_creator_roster_tool(
+            _ctx(),
+            campaign={"offer": "Serum X", "audience": "Adults", "batch_size": 1},
+            concept_ids=["concept-1"],
+            agent_submission=True,
+        )
+
+
+async def test_legacy_tools_forward_persona_and_enforce_server_owned_campaign_fields() -> None:
+    ctx = ToolContext(
+        adapter=_LegacyLlm(),
+        pipeline={},
+        run={},
+        run_id="run-agent",
+    )
+
+    concepts = await generate_concepts_tool(
+        ctx,
+        offer="Serum X",
+        n=1,
+        seed="run-agent",
+        campaign={"offer": "Serum X", "audience": "Adults", "batch_size": 1},
+        persona="Busy parent",
+    )
+    script = await write_script_tool(
+        ctx,
+        concept=concepts[0],
+        creator_ref="creator",
+        platform="tiktok",
+        persona="Busy parent",
+    )
+
+    assert script.startswith("HOOK:")
+    untyped = await generate_concepts_tool(
+        ctx,
+        offer="Serum X",
+        n=1,
+        seed="run-agent",
+        persona="Busy parent",
+    )
+    assert untyped[0]["hook"] == "Hook"
+    with pytest.raises(ValueError, match="server-owned"):
+        await generate_concepts_tool(
+            ctx,
+            offer="Different offer",
+            n=1,
+            seed="run-agent",
+            campaign={"offer": "Serum X", "audience": "Adults", "batch_size": 1},
+        )
+
+
+async def test_script_tool_requires_a_server_owned_concept_id() -> None:
+    ctx = ToolContext(
+        adapter=_LegacyLlm(),
+        pipeline={},
+        run={},
+        run_id="run-agent",
+    )
+
+    with pytest.raises(ValueError, match="concept id is required"):
+        await write_script_tool(
+            ctx,
+            concept={"hook": "Hook"},
+            creator_ref="creator",
+            platform="tiktok",
         )

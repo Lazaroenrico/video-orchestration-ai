@@ -53,6 +53,7 @@ NODE_STAGE: dict[str, str] = {
     "product_demo": "product_demo",
     "qc": "qc",
     "drop": "qc",
+    "voiceover": "assembly",
     "assembly": "assembly",
     "upscale": "assembly",
 }
@@ -65,6 +66,7 @@ _ITEM_NODES = frozenset({
     "product_demo",
     "qc",
     "drop",
+    "voiceover",
     "assembly",
     "upscale",
 })

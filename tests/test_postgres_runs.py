@@ -387,7 +387,7 @@ async def test_failed_run_remains_available_over_http_after_restart(
     assert run_id in index_response.json()["errored"]
 
 
-async def test_concept_gate_is_persisted_while_waiting_for_decision(
+async def test_review_gate_is_persisted_while_waiting_for_decision(
     postgresql,
     monkeypatch,
     tmp_path,
@@ -399,15 +399,16 @@ async def test_concept_gate_is_persisted_while_waiting_for_decision(
     monkeypatch.setenv("ORCH_USER_SUBJECT", "oidc|alice")
     monkeypatch.setenv("ORCH_MEDIA", str(tmp_path / "media"))
     monkeypatch.setenv("ORCH_VIDEOS", str(tmp_path / "videos"))
-    response = await web_server.start_run(
-        web_server.RunRequest(
-            offer="serum X",
-            batch=1,
-            platform="tiktok",
+    response = await web_server.start_run_v2(
+        web_server.RunV2Request(
+            campaign={
+                "offer": "serum X",
+                "audience": "Adults with dry skin",
+                "batch_size": 1,
+                "platform": "tiktok",
+            },
             config_dir="config-mock",
             db=str(tmp_path / "checkpoint.sqlite"),
-            approve_creators=False,
-            edit_concepts=True,
         ),
         web_server.BackgroundTasks(),
     )
@@ -422,23 +423,26 @@ async def test_concept_gate_is_persisted_while_waiting_for_decision(
         gate = await jobs.get_pending_gate(run_id)
 
     assert persisted is not None
-    assert persisted.phase == "editing"
+    assert persisted.phase == "review"
     assert gate is not None
+    assert gate.gate_type == "review_creative_plan"
     pending = gate.payload["concepts"]
     assert persisted.state["concepts"] == pending
+    assert len(gate.payload["creators"]) == 2
 
-    await web_server.submit_concepts(
+    await web_server.review_run_v2(
         run_id,
-        web_server.ConceptEditRequest(
-            concepts=pending,
+        web_server.ReviewV2Request(
+            action="approve",
             gate_id=str(gate.gate_id),
             version=gate.version,
+            gate_type="review_creative_plan",
         ),
     )
     await run_worker_once(worker_id="runner-after-edit")
 
 
-async def test_creator_gate_is_persisted_while_waiting_for_approval(
+async def test_review_gate_persists_creators_until_approval(
     postgresql,
     monkeypatch,
     tmp_path,
@@ -450,15 +454,16 @@ async def test_creator_gate_is_persisted_while_waiting_for_approval(
     monkeypatch.setenv("ORCH_USER_SUBJECT", "oidc|alice")
     monkeypatch.setenv("ORCH_MEDIA", str(tmp_path / "media"))
     monkeypatch.setenv("ORCH_VIDEOS", str(tmp_path / "videos"))
-    response = await web_server.start_run(
-        web_server.RunRequest(
-            offer="serum X",
-            batch=1,
-            platform="tiktok",
+    response = await web_server.start_run_v2(
+        web_server.RunV2Request(
+            campaign={
+                "offer": "serum X",
+                "audience": "Adults with dry skin",
+                "batch_size": 1,
+                "platform": "tiktok",
+            },
             config_dir="config-mock",
             db=str(tmp_path / "checkpoint.sqlite"),
-            approve_creators=True,
-            edit_concepts=False,
         ),
         web_server.BackgroundTasks(),
     )
@@ -473,17 +478,19 @@ async def test_creator_gate_is_persisted_while_waiting_for_approval(
         gate = await jobs.get_pending_gate(run_id)
 
     assert persisted is not None
-    assert persisted.phase == "awaiting"
+    assert persisted.phase == "review"
     assert gate is not None
+    assert gate.gate_type == "review_creative_plan"
     pending = gate.payload["creators"]
     assert pending and all(creator["id"] for creator in pending)
 
-    await web_server.approve(
+    await web_server.review_run_v2(
         run_id,
-        web_server.ApproveRequest(
-            approved=[creator["id"] for creator in pending],
+        web_server.ReviewV2Request(
+            action="approve",
             gate_id=str(gate.gate_id),
             version=gate.version,
+            gate_type="review_creative_plan",
         ),
     )
     await run_worker_once(worker_id="runner-after-approval")

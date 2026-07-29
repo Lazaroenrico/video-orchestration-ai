@@ -9,10 +9,11 @@ from __future__ import annotations
 import pytest
 
 from orchestrator.adapters import base
-from orchestrator.adapters.base import VoiceProfile
+from orchestrator.adapters.base import RenderedMedia, VoiceProfile
 from orchestrator.adapters.mock import MockAdapter
 from orchestrator.graph.state import Artifact, Item, QCResult, new_item
 from orchestrator.nodes import stages
+from orchestrator.storage.base import StoredObject
 
 
 # ------------------------------------------------------------------ #
@@ -256,6 +257,66 @@ async def test_node_approval_rejects_all_when_selection_empty(monkeypatch):
     assert result["roster"] == []
 
 
+async def test_node_approval_is_a_passthrough_when_the_legacy_gate_is_disabled():
+    config = {"configurable": {"run": {"approve_creators": False}}}
+
+    assert await stages.node_approval(
+        {"roster": [{"id": "creator-0"}]},
+        config,
+    ) == {}
+
+
+async def test_creative_progress_propagates_unexpected_runtime_errors(monkeypatch):
+    async def fail(*_args, **_kwargs):
+        raise RuntimeError("event transport failed")
+
+    monkeypatch.setattr(stages, "adispatch_custom_event", fail)
+
+    with pytest.raises(RuntimeError, match="event transport failed"):
+        await stages._report_creative_progress(
+            {"configurable": {}},
+            stage_id="scripts",
+            completed_units=1,
+            total_units=1,
+        )
+
+
+def test_apply_roster_updates_normalizes_image_and_voice_preview_aliases():
+    roster = [{"id": "creator-0", "upscaled_base": "mock://old"}]
+
+    updated = stages.apply_roster_updates(
+        roster,
+        [
+            {
+                "id": "creator-0",
+                "image_uri": "mock://new",
+                "voice_preview": "data:audio/wav;base64,AAAA",
+            }
+        ],
+    )
+
+    assert updated[0]["upscaled_base"] == "mock://new"
+    assert updated[0]["image"] == "mock://new"
+    assert updated[0]["voice_preview_uri"] == "data:audio/wav;base64,AAAA"
+
+
+def test_review_creator_updates_reject_unknown_fields():
+    roster = [{"id": "creator-0"}, {"id": "creator-1"}]
+
+    with pytest.raises(ValueError, match="unsupported creator review fields"):
+        stages.apply_review_creator_updates(
+            roster,
+            [
+                {"id": "creator-0", "system_prompt": "leak"},
+                {"id": "creator-1"},
+            ],
+        )
+
+
+def test_prompt_with_persona_accepts_persona_without_an_operator_prompt():
+    assert stages._prompt_with_persona(" Busy parent ", None) == "Busy parent"
+
+
 # ------------------------------------------------------------------ #
 # _assembly_prompt com run_prompt + node_drop                        #
 # ------------------------------------------------------------------ #
@@ -402,6 +463,184 @@ async def test_node_scripts_writes_script_per_concept():
     assert all(ref == "creator" and plat == "reels" for _, ref, plat in seen)
 
 
+async def test_node_scripts_accepts_a_serialized_script_contract(monkeypatch):
+    async def execute(*_args, **_kwargs):
+        return {
+            "script": "HOOK: Serialized\nCTA: Buy",
+            "script_draft": {
+                "id": "run-script-01",
+                "concept_id": "c-0",
+                "spoken_beats": [
+                    {"section": "hook", "text": "Serialized", "seconds": 2},
+                    {"section": "cta", "text": "Buy", "seconds": 2},
+                ],
+                "visual_beats": ["Creator to camera"],
+                "on_screen_text": [],
+                "call_to_action": "Buy",
+                "estimated_duration": 4,
+            },
+        }
+
+    monkeypatch.setattr(stages, "execute_stage_tool", execute)
+    config = {
+        "configurable": {
+            "adapter": object(),
+            "run": {"platform": "tiktok"},
+        }
+    }
+    state = {
+        "run_id": "run",
+        "campaign": {
+            "offer": "Serum X",
+            "audience": "Adults",
+            "batch_size": 1,
+        },
+        "concepts": [{"id": "c-0", "hook": "Hook"}],
+    }
+
+    result = await stages.node_scripts(state, config)
+
+    assert result["concepts"][0]["script_draft"]["id"] == "run-script-01"
+
+
+async def test_node_scripts_applies_server_owned_narration_budget(monkeypatch):
+    captured: dict = {}
+
+    async def execute(*_args, **kwargs):
+        captured.update(kwargs)
+        return {
+            "script": "HOOK: Short\nCTA: Rent now",
+            "script_draft": {
+                "id": "run-script-01",
+                "concept_id": "c-0",
+                "spoken_beats": [
+                    {"section": "hook", "text": "Short", "seconds": 2},
+                    {"section": "cta", "text": "Rent now", "seconds": 2},
+                ],
+                "visual_beats": ["Creator to camera"],
+                "on_screen_text": [],
+                "call_to_action": "Rent now",
+                "estimated_duration": 4,
+            },
+        }
+
+    monkeypatch.setattr(stages, "execute_stage_tool", execute)
+    config = {
+        "configurable": {
+            "adapter": object(),
+            "pipeline": {
+                "assembly": {
+                    "narration_target_seconds": 14,
+                    "narration_max_words": 35,
+                },
+            },
+            "run": {"platform": "tiktok"},
+        },
+    }
+    state = {
+        "run_id": "run",
+        "campaign": {
+            "offer": "Chair rental",
+            "audience": "Adults",
+            "batch_size": 1,
+        },
+        "concepts": [{"id": "c-0", "hook": "Hook"}],
+    }
+
+    await stages.node_scripts(state, config)
+
+    assert captured["target_duration_seconds"] == 14
+    assert captured["max_spoken_words"] == 35
+
+
+async def test_node_creator_profiles_accepts_a_serialized_roster(monkeypatch):
+    async def execute(*_args, **_kwargs):
+        return {
+            "creators": [
+                {
+                    "id": "creator-0",
+                    "archetype": "Guide",
+                    "visual_brief": "Adult guide",
+                    "voice_brief": "Warm",
+                    "performance_style": "Calm",
+                    "exclusions": [],
+                },
+                {
+                    "id": "creator-1",
+                    "archetype": "Tester",
+                    "visual_brief": "Adult tester",
+                    "voice_brief": "Direct",
+                    "performance_style": "Fast",
+                    "exclusions": [],
+                },
+            ],
+            "assignments": [
+                {"concept_id": "c-0", "creator_id": "creator-0"},
+            ],
+        }
+
+    monkeypatch.setattr(stages, "execute_stage_tool", execute)
+    config = {"configurable": {"adapter": object(), "run": {}}}
+    state = {
+        "campaign": {
+            "offer": "Serum X",
+            "audience": "Adults",
+            "batch_size": 1,
+        },
+        "concepts": [{"id": "c-0"}],
+    }
+
+    result = await stages.node_creator_profiles(state, config)
+
+    assert [creator["id"] for creator in result["creator_profiles"]] == [
+        "creator-0",
+        "creator-1",
+    ]
+
+
+async def test_node_review_routes_regeneration_and_rejects_invalid_decisions(monkeypatch):
+    config = {"configurable": {"run": {"review_plan": True}}}
+    state = {
+        "concepts": [{"id": "concept-1"}],
+        "roster": [{"id": "creator-0"}, {"id": "creator-1"}],
+    }
+
+    monkeypatch.setattr(
+        stages,
+        "interrupt",
+        lambda _payload: {
+            "action": "regenerate",
+            "target": "scripts",
+            "ids": ["concept-1"],
+            "feedback": "Shorter hook",
+        },
+    )
+    assert await stages.node_review(state, config) == {
+        "review_approved": False,
+        "revision_request": {
+            "target": "scripts",
+            "ids": ["concept-1"],
+            "feedback": "Shorter hook",
+        },
+    }
+
+    monkeypatch.setattr(
+        stages,
+        "interrupt",
+        lambda _payload: {"action": "regenerate", "target": "unknown"},
+    )
+    with pytest.raises(ValueError, match="regenerate target"):
+        await stages.node_review(state, config)
+
+    monkeypatch.setattr(
+        stages,
+        "interrupt",
+        lambda _payload: {"action": "delete"},
+    )
+    with pytest.raises(ValueError, match="review action"):
+        await stages.node_review(state, config)
+
+
 # ------------------------------------------------------------------ #
 # node_concept_review — gate de edição (passthrough / resume / exclude)#
 # ------------------------------------------------------------------ #
@@ -469,6 +708,109 @@ def _assembly_config(adapter, *, allow_mock_fallback: bool = False) -> dict:
     }
 
 
+def test_narration_text_removes_script_section_labels():
+    assert stages._narration_text(
+        "HOOK: Isso mudou minha rotina.\n"
+        "BODY: Agora eu mostro como funciona.\n"
+        "CTA: Veja a oferta."
+    ) == (
+        "Isso mudou minha rotina. "
+        "Agora eu mostro como funciona. "
+        "Veja a oferta."
+    )
+
+
+async def test_node_voiceover_uses_approved_voice_persists_audio_and_adds_cost(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setattr(stages, "default_videos_path", lambda: tmp_path)
+
+    class _VoiceoverAdapter:
+        def __init__(self):
+            self.calls = []
+
+        async def synthesize_voiceover(self, **kwargs):
+            self.calls.append(kwargs)
+            return Artifact(
+                kind="voiceover",
+                uri="data:audio/mpeg;base64,SUQz",
+                meta={"provider": "replicate", "cost_usd": 0.0042},
+            )
+
+    adapter = _VoiceoverAdapter()
+    item = _assembly_item().model_copy(
+        update={
+            "creator_voice_ref": "Rachel",
+            "script": "HOOK: Isso mudou.\nBODY: Veja como.\nCTA: Saiba mais.",
+            "cost_usd": 0.16,
+        }
+    )
+
+    result = await stages.node_voiceover(item, _assembly_config(adapter))
+
+    assert adapter.calls == [
+        {
+            "voice_ref": "Rachel",
+            "text": "Isso mudou. Veja como. Saiba mais.",
+        }
+    ]
+    assert result["voiceover"].uri.endswith("/voiceover.mp3")
+    assert result["cost_usd"] == pytest.approx(0.1642)
+    assert result["error"] is None
+
+
+async def test_node_voiceover_fails_explicitly_without_approved_voice():
+    result = await stages.node_voiceover(
+        _assembly_item().model_copy(update={"script": "HOOK: Texto"}),
+        _assembly_config(object()),
+    )
+
+    assert result["voiceover"] is None
+    assert "approved creator voice" in result["error"]
+
+
+async def test_node_voiceover_fails_explicitly_without_approved_script():
+    result = await stages.node_voiceover(
+        _assembly_item().model_copy(
+            update={"creator_voice_ref": "Rachel", "script": None}
+        ),
+        _assembly_config(object()),
+    )
+
+    assert result["voiceover"] is None
+    assert "approved script" in result["error"]
+
+
+async def test_node_voiceover_surfaces_provider_failure():
+    class _BrokenVoiceover:
+        async def synthesize_voiceover(self, **kwargs):
+            raise RuntimeError("TTS unavailable")
+
+    result = await stages.node_voiceover(
+        _assembly_item().model_copy(
+            update={"creator_voice_ref": "Rachel", "script": "HOOK: Texto"}
+        ),
+        _assembly_config(_BrokenVoiceover()),
+    )
+
+    assert result["voiceover"] is None
+    assert result["error"] == "voiceover: TTS unavailable"
+
+
+async def test_node_voiceover_propagates_stage_configuration_error(monkeypatch):
+    async def misconfigured(*args, **kwargs):
+        raise stages.StageExecutionError("voiceover stage is not configured")
+
+    monkeypatch.setattr(stages, "execute_stage_tool", misconfigured)
+    item = _assembly_item().model_copy(
+        update={"creator_voice_ref": "Rachel", "script": "HOOK: Texto"}
+    )
+
+    with pytest.raises(stages.StageExecutionError, match="not configured"):
+        await stages.node_voiceover(item, _assembly_config(object()))
+
+
 class _BoomAssembler:
     async def assemble(self, **kwargs):
         raise RuntimeError(
@@ -499,6 +841,166 @@ async def test_node_assembly_success_clears_error(monkeypatch, tmp_path):
     result = await stages.node_assembly(_assembly_item(), _assembly_config(MockAdapter(tiers=[])))
     assert result["assembled"] is not None
     assert result.get("error") is None
+
+
+async def test_node_assembly_adds_provider_cost_to_item_total(monkeypatch, tmp_path):
+    monkeypatch.setattr(stages, "default_videos_path", lambda: tmp_path)
+
+    class _CostedAssembler:
+        async def assemble(self, **kwargs):
+            return Artifact(
+                kind="video",
+                uri="data:video/mp4;base64,AAAA",
+                meta={"provider": "replicate", "cost_usd": 0.08},
+            )
+
+    item = _assembly_item().model_copy(update={"cost_usd": 0.16})
+    result = await stages.node_assembly(item, _assembly_config(_CostedAssembler()))
+
+    assert result["cost_usd"] == pytest.approx(0.24)
+
+
+async def test_node_assembly_persists_ffmpeg_bytes_without_exposing_them_in_state(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setattr(stages, "default_videos_path", lambda: tmp_path)
+
+    class _RenderedAssembler:
+        async def assemble(self, **kwargs):
+            return RenderedMedia(
+                data=b"\x00\x00\x00\x18ftypmp42-final",
+                content_type="video/mp4",
+                meta={
+                    "provider": "ffmpeg",
+                    "video_codec": "h264",
+                    "audio_codec": "aac",
+                    "cost_usd": 0.0,
+                },
+            )
+
+    item = _assembly_item().model_copy(
+        update={
+            "voiceover": Artifact(
+                kind="voiceover",
+                uri="data:audio/mpeg;base64,SUQz",
+            ),
+            "cost_usd": 0.1642,
+        }
+    )
+
+    result = await stages.node_assembly(
+        item,
+        _assembly_config(_RenderedAssembler()),
+    )
+
+    assert result["assembled"].uri == f"/videos/run-x/items/{item.id}/assembled.mp4"
+    assert result["assembled"].meta["provider"] == "ffmpeg"
+    assert result["assembled"].meta["audio_codec"] == "aac"
+    assert result["cost_usd"] == pytest.approx(0.1642)
+    assert (
+        tmp_path / "run-x" / "items" / item.id / "assembled.mp4"
+    ).read_bytes() == b"\x00\x00\x00\x18ftypmp42-final"
+
+
+async def test_node_assembly_signs_r2_inputs_but_persists_only_canonical_pointer():
+    class _R2Storage:
+        backend = "r2"
+
+        async def get_signed_url(self, key, *, ttl_seconds=900):
+            return f"https://signed.example/{key}"
+
+        async def put_bytes(self, data, *, key_base, content_type):
+            key = f"{key_base}.mp4"
+            return StoredObject(
+                backend="r2",
+                key=key,
+                uri=f"r2://ugc/{key}",
+                content_type=content_type,
+                size_bytes=len(data),
+                sha256="abc",
+            )
+
+        async def put_from_url(self, uri, *, key_base, client=None):
+            return None
+
+    class _InspectingAssembler:
+        def __init__(self):
+            self.item = None
+
+        async def assemble(self, *, item, **kwargs):
+            self.item = item
+            return RenderedMedia(
+                data=b"final",
+                content_type="video/mp4",
+                meta={"provider": "ffmpeg", "cost_usd": 0.0},
+            )
+
+    adapter = _InspectingAssembler()
+    storage = _R2Storage()
+    item = _assembly_item().model_copy(
+        update={
+            "clips": [
+                Artifact(kind="clip", uri="r2://ugc/run/item/clip-0.mp4"),
+                Artifact(kind="clip", uri="r2://ugc/run/item/clip-1.mp4"),
+            ],
+            "voiceover": Artifact(
+                kind="voiceover",
+                uri="r2://ugc/run/item/voiceover.mp3",
+            ),
+        }
+    )
+    config = _assembly_config(adapter)
+    config["configurable"]["videos_storage"] = storage
+
+    result = await stages.node_assembly(item, config)
+
+    assert [clip.uri for clip in adapter.item.clips] == [
+        "https://signed.example/run/item/clip-0.mp4",
+        "https://signed.example/run/item/clip-1.mp4",
+    ]
+    assert (
+        adapter.item.voiceover.uri
+        == "https://signed.example/run/item/voiceover.mp3"
+    )
+    assert result["assembled"].uri.startswith("r2://ugc/")
+    assert "signed.example" not in result["assembled"].model_dump_json()
+
+
+async def test_node_assembly_resolves_local_video_urls_to_runtime_files(
+    monkeypatch,
+    tmp_path,
+):
+    clip_path = tmp_path / "run-x" / "items" / "item-x" / "clip-0.mp4"
+    voice_path = tmp_path / "run-x" / "items" / "item-x" / "voiceover.mp3"
+    clip_path.parent.mkdir(parents=True)
+    clip_path.write_bytes(b"clip")
+    voice_path.write_bytes(b"voice")
+    monkeypatch.setattr(stages, "default_videos_path", lambda: tmp_path)
+
+    item = _assembly_item().model_copy(
+        update={
+            "clips": [
+                Artifact(
+                    kind="clip",
+                    uri="/videos/run-x/items/item-x/clip-0.mp4",
+                ),
+                Artifact(
+                    kind="clip",
+                    uri="/videos/run-x/items/item-x/clip-0.mp4",
+                ),
+            ],
+            "voiceover": Artifact(
+                kind="voiceover",
+                uri="/videos/run-x/items/item-x/voiceover.mp3",
+            ),
+        }
+    )
+
+    resolved = stages._resolve_local_assembly_paths(item)
+
+    assert resolved.clips[0].uri == str(clip_path)
+    assert resolved.voiceover.uri == str(voice_path)
 
 
 async def test_node_assembly_accepts_dict_shaped_artifact(monkeypatch, tmp_path):

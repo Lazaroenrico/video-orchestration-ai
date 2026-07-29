@@ -32,7 +32,8 @@ def normalize_creator_fields(creator: dict[str, Any]) -> dict[str, Any]:
         or creator.get("upscaled_base")
     )
     voice_ref = (
-        creator.get("voice_ref")
+        creator.get("voice_model_ref")
+        or creator.get("voice_ref")
         or creator.get("voice")
         or creator.get("voice_id")
     )
@@ -52,3 +53,27 @@ def normalize_creator_fields(creator: dict[str, Any]) -> dict[str, Any]:
         "angles": list(creator.get("angles") or []),
         "voice_reroll_count": creator.get("voice_reroll_count"),
     }
+
+
+def normalize_creator_payload(creator: dict[str, Any]) -> dict[str, Any]:
+    """Project an internal creator into the public HTTP/SSE media contract."""
+    fields = normalize_creator_fields(creator)
+    normalized = {
+        "id": creator.get("id") or creator.get("creator_id"),
+        "image_uri": fields["image_uri"],
+        "voice_ref": fields["voice_ref"],
+        "voice_preview_uri": fields["voice_preview_uri"],
+        "image": fields["image"],
+        "voice": fields["voice"],
+        "angles": fields["angles"],
+    }
+    for key in (
+        "archetype",
+        "visual_brief",
+        "voice_brief",
+        "performance_style",
+        "exclusions",
+    ):
+        if key in creator:
+            normalized[key] = creator[key]
+    return normalized

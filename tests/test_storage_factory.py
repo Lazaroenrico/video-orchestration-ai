@@ -188,6 +188,22 @@ def test_runtime_env_can_switch_the_same_image_to_aws_storage(tmp_path, monkeypa
     assert storage is marker
 
 
+def test_dev_storage_override_takes_precedence_over_runtime_and_profile(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("ORCH_DEV_STORAGE_BACKEND", "local")
+    monkeypatch.setenv("STORAGE_BACKEND", "s3")
+
+    storage = build_media_storage(
+        {"storage": {"backend": "r2"}},
+        root=tmp_path,
+        web_prefix="/media",
+    )
+
+    assert isinstance(storage, LocalMediaStorage)
+
+
 def test_s3_backend_fails_fast_without_role_region_or_bucket(tmp_path, monkeypatch):
     monkeypatch.delenv("S3_BUCKET", raising=False)
     monkeypatch.delenv("AWS_REGION", raising=False)

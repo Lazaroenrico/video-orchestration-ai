@@ -54,6 +54,8 @@ class Database:
             max_size=max_size,
             open=False,
         )
+        self._resolved_tenants: dict[TenantIdentity, TenantContext] = {}
+        self._resolved_tenants_lock = asyncio.Lock()
 
     @classmethod
     def from_env(cls) -> "Database":
@@ -127,8 +129,6 @@ class Database:
         tenant: TenantContext | None = None,
     ) -> AsyncIterator[AsyncConnection]:
         async with self._pool.connection() as connection:
-            transaction = connection.transaction()
-            await transaction.__aenter__()
             try:
                 if tenant is not None:
                     await connection.execute(
@@ -140,32 +140,12 @@ class Database:
                         (str(tenant.user_id),),
                     )
                 yield connection
-            except asyncio.CancelledError as exc:
-                try:
-                    await asyncio.shield(
-                        transaction.__aexit__(
-                            type(exc),
-                            exc,
-                            exc.__traceback__,
-                        )
-                    )
-                except BaseException:
-                    pass
+            except asyncio.CancelledError:
                 try:
                     await asyncio.shield(connection.close())
                 except Exception:
                     pass
                 raise
-            except BaseException as exc:
-                suppress = await transaction.__aexit__(
-                    type(exc),
-                    exc,
-                    exc.__traceback__,
-                )
-                if not suppress:
-                    raise
-            else:
-                await transaction.__aexit__(None, None, None)
 
     async def ensure_tenant(self, identity: TenantIdentity) -> TenantContext:
         """Materializa organização, usuário e membership de modo idempotente."""
@@ -236,4 +216,12 @@ class Database:
         """Bootstrap local; em Access exige provisionamento administrativo prévio."""
         if os.environ.get("ORCH_AUTH_MODE", "disabled") == "cloudflare_access":
             return await self.authorize_tenant(identity)
-        return await self.ensure_tenant(identity)
+        cached = self._resolved_tenants.get(identity)
+        if cached is not None:
+            return cached
+        async with self._resolved_tenants_lock:
+            cached = self._resolved_tenants.get(identity)
+            if cached is None:
+                cached = await self.ensure_tenant(identity)
+                self._resolved_tenants[identity] = cached
+        return cached

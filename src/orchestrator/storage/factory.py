@@ -25,6 +25,17 @@ from orchestrator.storage.s3 import S3MediaStorage
 _DEFAULT_BACKEND = "local"
 
 
+def resolve_storage_backend(providers: Optional[dict[str, Any]]) -> str:
+    """Resolve o backend efetivo com o override de desenvolvimento primeiro."""
+    storage_config = (providers or {}).get("storage") or {}
+    return (
+        os.environ.get("ORCH_DEV_STORAGE_BACKEND")
+        or os.environ.get("STORAGE_BACKEND")
+        or storage_config.get("backend")
+        or _DEFAULT_BACKEND
+    )
+
+
 def build_media_storage(
     providers: Optional[dict[str, Any]],
     *,
@@ -37,10 +48,7 @@ def build_media_storage(
     serve os bytes do disco); o R2 deriva tudo das envs e ignora ambos.
     """
     storage_config = (providers or {}).get("storage") or {}
-    backend = os.environ.get("STORAGE_BACKEND") or storage_config.get(
-        "backend",
-        _DEFAULT_BACKEND,
-    )
+    backend = resolve_storage_backend(providers)
 
     if backend == "local":
         return LocalMediaStorage(root, web_prefix=web_prefix)

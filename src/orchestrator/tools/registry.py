@@ -223,6 +223,14 @@ TOOL_REGISTRY: tuple[ToolSpec, ...] = (
         capabilities=("quality_control", "structured_evaluation"),
     ),
     ToolSpec(
+        name="synthesize_voiceover",
+        description="Synthesize the approved full script with the approved creator voice.",
+        role="creator",
+        stage="voiceover",
+        function_path="orchestrator.tools.assembly.synthesize_voiceover_tool",
+        capabilities=("text_to_speech", "artifact_generation"),
+    ),
+    ToolSpec(
         name="assemble_video",
         description="Assemble approved item material into the final video artifact.",
         role="assembly",

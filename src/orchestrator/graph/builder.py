@@ -15,7 +15,11 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, Send
 
-from orchestrator.graph.routing import route_after_qc, route_after_script
+from orchestrator.graph.routing import (
+    route_after_qc,
+    route_after_script,
+    route_after_voiceover,
+)
 from orchestrator.graph.state import BatchState, Item, new_item
 from orchestrator.nodes.base import as_item, tier_names
 from orchestrator.nodes.stages import (
@@ -34,6 +38,7 @@ from orchestrator.nodes.stages import (
     node_review,
     node_scripts,
     node_upscale,
+    node_voiceover,
 )
 from orchestrator.tracing import add_trace_metadata, traced
 
@@ -43,7 +48,7 @@ def build_item_graph(pipeline: dict[str, Any]):
     tns = tier_names(pipeline)
     max_attempts = int(pipeline.get("qc", {}).get("max_attempts", 3))
     qc_map: dict[str, str] = {t: t for t in tns}
-    qc_map.update({"assembly": "assembly", "drop": "drop"})
+    qc_map.update({"voiceover": "voiceover", "drop": "drop"})
 
     sg = StateGraph(Item)
     for t in tns:
@@ -51,6 +56,7 @@ def build_item_graph(pipeline: dict[str, Any]):
     sg.add_node("product_demo", node_product_demo)
 
     sg.add_node("qc", make_qc_route_node(tns, max_attempts), destinations=qc_map)
+    sg.add_node("voiceover", node_voiceover)
     sg.add_node("assembly", node_assembly)
     sg.add_node("upscale", node_upscale)
     sg.add_node("drop", node_drop)
@@ -63,6 +69,11 @@ def build_item_graph(pipeline: dict[str, Any]):
     for t in tns:
         sg.add_edge(t, "product_demo")
     sg.add_edge("product_demo", "qc")
+    sg.add_conditional_edges(
+        "voiceover",
+        lambda state: route_after_voiceover(as_item(state)),
+        {"assembly": "assembly", "end": END},
+    )
     sg.add_edge("assembly", "upscale")
     sg.add_edge("upscale", END)
     sg.add_edge("drop", END)
@@ -176,6 +187,11 @@ def make_fan_out_node():
             item = new_item(
                 concept=concept_data,
                 creator_ref=creator.get("id"),
+                creator_voice_ref=(
+                    creator.get("voice_model_ref")
+                    or creator.get("voice_ref")
+                    or creator.get("voice_id")
+                ),
                 creator_image_uri=creator_image_uri,
                 creator_image_local_path=creator.get("image_local_path"),
             )

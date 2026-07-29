@@ -333,10 +333,27 @@ def summarize(out: dict[str, Any]) -> dict[str, Any]:
     dropped = [r for r in results if r.dropped]
     in_flight = [r for r in results if r.assembled is None and not r.dropped]
     tier_cost: dict[str, float] = {}
+    stage_cost = {"video": 0.0, "voiceover": 0.0, "assembly": 0.0}
     for r in results:
         for clip in r.clips:
             t = str(clip.meta.get("tier", "?"))
-            tier_cost[t] = round(tier_cost.get(t, 0.0) + float(clip.meta.get("cost_usd", 0.0)), 4)
+            clip_cost = float(clip.meta.get("cost_usd", 0.0))
+            superseded_cost = sum(
+                float(take.get("cost_usd") or 0.0)
+                for take in clip.meta.get("superseded_takes", [])
+                if isinstance(take, dict)
+            )
+            full_clip_cost = clip_cost + superseded_cost
+            tier_cost[t] = round(tier_cost.get(t, 0.0) + full_clip_cost, 4)
+            stage_cost["video"] += full_clip_cost
+        if r.voiceover is not None:
+            stage_cost["voiceover"] += float(
+                r.voiceover.meta.get("cost_usd", 0.0)
+            )
+        if r.assembled is not None:
+            stage_cost["assembly"] += float(
+                r.assembled.meta.get("cost_usd", 0.0)
+            )
     return {
         "run_id": out.get("run_id"),
         "produced": len(results),
@@ -346,6 +363,10 @@ def summarize(out: dict[str, Any]) -> dict[str, Any]:
         "total_attempts": sum(r.attempts for r in results),
         "total_cost_usd": round(sum(r.cost_usd for r in results), 4),
         "cost_by_tier": tier_cost,
+        "cost_by_stage": {
+            stage: round(cost, 6)
+            for stage, cost in stage_cost.items()
+        },
         "winning_styles": (out.get("feedback") or {}).get("winning_styles", []),
     }
 
@@ -359,7 +380,7 @@ def format_report(out: dict[str, Any]) -> str:
         f"  descartados: {s['dropped']}",
         f"  em andamento: {s['in_flight']}",
         f"  tentativas : {s['total_attempts']}",
-        f"  custo mock : ${s['total_cost_usd']:.2f}  {s['cost_by_tier']}",
+        f"  custo total: ${s['total_cost_usd']:.4f}  {s['cost_by_stage']}",
         f"  hooks top  : {s['winning_styles']}",
     ]
     return "\n".join(lines)

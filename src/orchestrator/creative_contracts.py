@@ -5,7 +5,7 @@ import hashlib
 import re
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class StrictModel(BaseModel):
@@ -37,14 +37,6 @@ class CampaignInput(StrictModel):
     objective: Literal["conversion", "awareness", "consideration"] = "conversion"
     batch_size: int = Field(default=6, ge=1, le=48)
     performance: PerformanceSnapshot | None = None
-
-    @field_validator("offer", "audience")
-    @classmethod
-    def reject_blank_required_text(cls, value: str) -> str:
-        if not value.strip():
-            raise ValueError("must not be blank")
-        return value
-
 
 class ConceptSubmission(StrictModel):
     hook: str = Field(min_length=1, max_length=500)
