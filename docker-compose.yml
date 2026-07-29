@@ -1,71 +1,85 @@
+# Ambiente dev completo: PostgreSQL local, API/runner e Vite com hot reload.
+# Credenciais de providers vêm de .env; as URLs do banco são sempre sobrescritas
+# abaixo para que nenhum container use Neon por engano.
+
+x-orchestrator-service: &orchestrator-service
+  build:
+    context: .
+  image: orchestrator:dev
+  env_file:
+    - "${ORCH_DEV_ENV_FILE:-.env}"
+  environment: &orchestrator-environment
+    DATABASE_URL: "postgresql://orchestrator:orchestrator@postgres:5432/orchestrator"
+    MIGRATION_DATABASE_URL: "postgresql://orchestrator:orchestrator@postgres:5432/orchestrator"
+    ORCH_CONFIG_DIR: "${ORCH_DEV_CONFIG_DIR:-config}"
+    ORCH_AUTH_MODE: "disabled"
+    ORCH_ENABLE_PAID_ADAPTERS: "true"
+    ORCH_WEB_EMBEDDED_RUNNER: "true"
+    ORCH_ORGANIZATION_SLUG: "local"
+    ORCH_ORGANIZATION_NAME: "Local Development"
+    ORCH_USER_SUBJECT: "local|developer"
+    ORCH_DEV_STORAGE_BACKEND: "${ORCH_DEV_STORAGE_BACKEND:-r2}"
+    STORAGE_BACKEND: "${STORAGE_BACKEND:-r2}"
+    ORCH_SERVE_LOCAL_MEDIA: "1"
+    TMPDIR: "/tmp/orchestrator"
+  volumes:
+    - orchestrator-state:/app/.orchestrator
+    - orchestrator-tmp:/tmp/orchestrator
+
 services:
-  app:
-    build:
-      context: .
-    image: orchestrator:dev
-    command: ["api", "--host", "0.0.0.0", "--port", "8000"]
-    ports:
-      - "8000:8000"
-    environment:
-      # Servir mídia do disco local no dev (em prod fica 0 → URL assinada R2).
-      ORCH_SERVE_LOCAL_MEDIA: "1"
-      # Storage via MinIO (backend r2 do providers.yaml apontando p/ o endpoint local).
-      R2_ENDPOINT_URL: "http://minio:9000"
-      R2_ACCOUNT_ID: "local"
-      R2_ACCESS_KEY_ID: "minioadmin"
-      R2_SECRET_ACCESS_KEY: "minioadmin"
-      R2_BUCKET: "ugc-dev"
-      # Fundação PostgreSQL/RLS da Fase 2.
-      DATABASE_URL: "postgresql://orchestrator:orchestrator@postgres:5432/orchestrator"
-      ORCH_ORGANIZATION_SLUG: "local"
-      ORCH_ORGANIZATION_NAME: "Local Development"
-      ORCH_USER_SUBJECT: "local|developer"
-    volumes:
-      - orchestrator-state:/app/.orchestrator
-    depends_on:
-      - minio
-      - postgres
-
-  minio:
-    image: minio/minio:latest
-    command: server /data --console-address ":9001"
-    environment:
-      MINIO_ROOT_USER: "minioadmin"
-      MINIO_ROOT_PASSWORD: "minioadmin"
-    ports:
-      - "9000:9000"   # API S3
-      - "9001:9001"   # console web
-    volumes:
-      - minio-data:/data
-
-  # PostgreSQL 16 usado pelas migrações e repositórios da Fase 2.
   postgres:
     image: postgres:16
     environment:
-      POSTGRES_USER: "postgres"
-      POSTGRES_PASSWORD: "postgres"
-      POSTGRES_HOST_AUTH_METHOD: "trust"
+      POSTGRES_USER: "orchestrator"
+      POSTGRES_PASSWORD: "orchestrator"
       POSTGRES_DB: "orchestrator"
     ports:
-      - "5432:5432"
+      - "127.0.0.1:55432:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
-      - ./infra/postgres/10-app-role.sql:/docker-entrypoint-initdb.d/10-app-role.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U orchestrator -d orchestrator"]
+      interval: 2s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+
+  migrate:
+    <<: *orchestrator-service
+    command: ["migrate"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    <<: *orchestrator-service
+    command: ["api", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  front:
+    image: node:22.22.3-bookworm-slim
+    working_dir: /app/front
+    command: ["sh", "-c", "npm ci && npm run dev -- --host 0.0.0.0"]
+    environment:
+      VITE_DEV_API_BASE_URL: "http://api:8000"
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./front:/app/front
+      - front-node-modules:/app/front/node_modules
+    depends_on:
+      api:
+        condition: service_started
 
 volumes:
-  orchestrator-state:
-  minio-data:
   postgres-data:
-
-
-
-# ============================================================================
-# Ambiente de desenvolvimento local (ADR-D36, Fases 1-2).
-# Sobe a mesma imagem OCI de produção + um S3-compatible (MinIO) + PostgreSQL.
-#
-#   docker compose up --build
-#   → dashboard/API em http://localhost:8000/  (health: /healthz e /readyz)
-#
-# O modo mock sem DATABASE_URL continua em SQLite. Com DATABASE_URL, `migrate`
-# aplica Alembic; os repositórios de negócio são ligados incrementalmente na Fase 2.
-# ============================================================================
+  orchestrator-state:
+  orchestrator-tmp:
+  front-node-modules:

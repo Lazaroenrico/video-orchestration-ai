@@ -24,6 +24,11 @@ RUN npm run build   # gera /front/dist
 # --- Stage 2: runtime Python 3.12 + Node LTS --------------------------------
 FROM python:3.12-slim-bookworm AS runtime
 
+# Montagem final determinística e validação de streams.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
 # Node LTS copiado da imagem oficial (mesma base bookworm → glibc compatível),
 # evitando um apt/nodesource extra. O bridge Seedance precisa dele em runtime.
 COPY --from=front-build /usr/local/bin/node /usr/local/bin/node
@@ -51,6 +56,8 @@ RUN npm ci --omit=dev
 COPY config/ ./config/
 COPY config-mock/ ./config-mock/
 COPY config-staging/ ./config-staging/
+COPY alembic.ini ./alembic.ini
+COPY migrations/ ./migrations/
 COPY scripts/ ./scripts/
 COPY --from=front-build /front/dist ./front/dist
 

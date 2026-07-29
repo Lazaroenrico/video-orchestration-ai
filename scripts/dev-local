@@ -1,0 +1,156 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+project_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+compose_file="$project_root/docker-compose.yml"
+env_file="${ORCH_DEV_ENV_FILE:-$project_root/.env}"
+
+if [[ "$env_file" != /* ]]; then
+  env_file="$project_root/$env_file"
+fi
+
+export ORCH_DEV_ENV_FILE="$env_file"
+export ORCH_DEV_CONFIG_DIR="${ORCH_DEV_CONFIG_DIR:-config}"
+export ORCH_DEV_STORAGE_BACKEND="${ORCH_DEV_STORAGE_BACKEND:-r2}"
+
+die() {
+  printf 'dev-local: %s\n' "$*" >&2
+  exit 1
+}
+
+usage() {
+  cat >&2 <<'EOF'
+Uso:
+  ./scripts/dev-local up
+  ./scripts/dev-local down
+  ./scripts/dev-local reset --yes
+EOF
+  exit 2
+}
+
+detect_compose() {
+  if command -v docker >/dev/null 2>&1 \
+    && docker compose version >/dev/null 2>&1; then
+    compose_command=(docker compose)
+    compose_v1=false
+    return
+  fi
+  if command -v docker-compose >/dev/null 2>&1 \
+    && docker-compose version >/dev/null 2>&1; then
+    compose_command=(docker-compose)
+    compose_v1=true
+    return
+  fi
+  die "Docker Compose não encontrado (instale Docker Compose V2 ou docker-compose V1)."
+}
+
+env_has_value() {
+  local name="$1"
+  local inherited="${!name-}"
+  local value
+  if [[ -n "${inherited//[[:space:]]/}" ]]; then
+    return 0
+  fi
+  [[ -f "$env_file" ]] || return 1
+  value="$(
+    awk -v key="$name" '
+      $0 ~ "^[[:space:]]*" key "[[:space:]]*=" {
+        value = $0
+        sub("^[[:space:]]*" key "[[:space:]]*=[[:space:]]*", "", value)
+        sub("\r$", "", value)
+        if ((substr(value, 1, 1) == "\"" && substr(value, length(value), 1) == "\"") ||
+            (substr(value, 1, 1) == "\047" && substr(value, length(value), 1) == "\047")) {
+          value = substr(value, 2, length(value) - 2)
+        }
+        print value
+        exit
+      }
+    ' "$env_file"
+  )"
+  [[ -n "${value//[[:space:]]/}" ]]
+}
+
+validate_config() {
+  local config_path="$ORCH_DEV_CONFIG_DIR"
+  local required_file
+  if [[ "$config_path" != /* ]]; then
+    config_path="$project_root/$config_path"
+  fi
+  [[ -d "$config_path" ]] || die "configuração não encontrada: $ORCH_DEV_CONFIG_DIR"
+  for required_file in pipeline.yaml providers.yaml agents.yaml judge.yaml; do
+    [[ -f "$config_path/$required_file" ]] \
+      || die "configuração incompleta: $ORCH_DEV_CONFIG_DIR/$required_file"
+  done
+}
+
+validate_credentials() {
+  local required=()
+  local missing=()
+  local name
+
+  if [[ "$ORCH_DEV_CONFIG_DIR" == "config" ]]; then
+    required+=(
+      AI_GATEWAY_API_KEY
+      REPLICATE_API_TOKEN
+      REPLICATE_ELEVENLABS_MODEL
+    )
+  fi
+  if [[ "$ORCH_DEV_STORAGE_BACKEND" == "r2" ]]; then
+    required+=(
+      R2_ACCOUNT_ID
+      R2_ACCESS_KEY_ID
+      R2_SECRET_ACCESS_KEY
+      R2_BUCKET
+    )
+  fi
+  for name in "${required[@]}"; do
+    env_has_value "$name" || missing+=("$name")
+  done
+  if ((${#missing[@]})); then
+    die "credenciais obrigatórias ausentes em $env_file: ${missing[*]}"
+  fi
+}
+
+run_compose() {
+  "${compose_command[@]}" \
+    --env-file "$env_file" \
+    -f "$compose_file" \
+    "$@"
+}
+
+main() {
+  local action="${1-}"
+  detect_compose
+  case "$action" in
+    up)
+      [[ $# -eq 1 ]] || usage
+      [[ -f "$env_file" ]] || die "arquivo de ambiente não encontrado: $env_file"
+      validate_config
+      validate_credentials
+      printf '%s\n' \
+        "Frontend: http://localhost:5173" \
+        "API:      http://localhost:8000" \
+        "Postgres: 127.0.0.1:55432"
+      # Compose V1 quebra ao recriar containers produzidos por uma imagem anterior
+      # (KeyError: ContainerConfig). Derrubar os containers antes do build preserva
+      # os named volumes e torna `up` repetível sem tocar no PostgreSQL ou no R2.
+      if [[ "$compose_v1" == "true" ]]; then
+        run_compose down --remove-orphans
+      fi
+      run_compose up --build
+      ;;
+    down)
+      [[ $# -eq 1 ]] || usage
+      run_compose down --remove-orphans
+      ;;
+    reset)
+      [[ $# -eq 2 && "${2-}" == "--yes" ]] || usage
+      run_compose down --volumes --remove-orphans
+      ;;
+    *)
+      usage
+      ;;
+  esac
+}
+
+main "$@"
