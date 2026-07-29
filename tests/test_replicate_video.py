@@ -7,7 +7,7 @@ import httpx
 import pytest
 
 from orchestrator.adapters.replicate_video import ReplicateVideoAdapter
-from orchestrator.graph.state import Artifact
+from orchestrator.graph.state import Artifact, Item
 
 TIERS = [
     {
@@ -72,6 +72,177 @@ async def test_generate_clip_calls_ltx_model_with_reference_image_and_no_audio()
     assert artifact.meta["has_reference_image"] is True
 
 
+async def test_generate_clip_calls_pruna_p_video_with_its_public_input_contract():
+    calls: list[dict[str, Any]] = []
+
+    async def fake_runner(ref: str, input: dict[str, Any]):
+        calls.append({"ref": ref, "input": input})
+        return "https://cdn.replicate.com/pruna.mp4"
+
+    adapter = ReplicateVideoAdapter(
+        tiers=[
+            {
+                "name": "pruna",
+                "model": "prunaai/p-video",
+                "cost_per_second": 0.04,
+                "max_concurrency": 1,
+            }
+        ],
+        runner=fake_runner,
+        clip={"resolution": "1080p", "aspect_ratio": "9:16", "fps": 24},
+        allow_mock_fallback=False,
+    )
+
+    artifact = await adapter.generate_clip(
+        "item-pruna",
+        "pruna",
+        8,
+        0,
+        system_prompt="Creator demonstrates the product.",
+        reference_image_uri="data:image/png;base64,abc",
+    )
+
+    assert calls == [
+        {
+            "ref": "prunaai/p-video",
+            "input": {
+                "prompt": "Creator demonstrates the product.",
+                "duration": 8,
+                "resolution": "1080p",
+                "aspect_ratio": "9:16",
+                "fps": 24,
+                "draft": False,
+                "save_audio": False,
+                "prompt_upsampling": False,
+                "image": "data:image/png;base64,abc",
+            },
+        }
+    ]
+    assert artifact.uri == "https://cdn.replicate.com/pruna.mp4"
+    assert artifact.meta["provider"] == "replicate"
+    assert artifact.meta["model"] == "prunaai/p-video"
+    assert artifact.meta["cost_usd"] == pytest.approx(0.32)
+
+
+async def test_assemble_calls_pruna_p_video_in_low_cost_draft_mode():
+    calls: list[dict[str, Any]] = []
+
+    async def fake_runner(ref: str, input: dict[str, Any]):
+        calls.append({"ref": ref, "input": input})
+        return "https://cdn.replicate.com/pruna-final.mp4"
+
+    adapter = ReplicateVideoAdapter(
+        tiers=[
+            {
+                "name": "pruna",
+                "model": "prunaai/p-video",
+                "cost_per_second": 0.01,
+                "max_concurrency": 1,
+            }
+        ],
+        runner=fake_runner,
+        clip={"resolution": "1080p", "aspect_ratio": "9:16", "fps": 24, "draft": True},
+        assembly={
+            "model": "prunaai/p-video",
+            "duration_seconds": 8,
+            "resolution": "1080p",
+            "aspect_ratio": "9:16",
+            "fps": 24,
+            "draft": True,
+            "generate_audio": False,
+            "cost_per_second": 0.01,
+        },
+        allow_mock_fallback=False,
+    )
+    item = Item(
+        id="item-pruna",
+        concept={"id": "item-pruna", "hook": "Demonstrate the product"},
+        creator_image_uri="data:image/png;base64,abc",
+        script="HOOK: demonstrate the product",
+        clips=[
+            Artifact(kind="clip", uri="r2://bucket/talking-head.mp4"),
+            Artifact(kind="clip", uri="r2://bucket/product-demo.mp4"),
+        ],
+    )
+
+    artifact = await adapter.assemble(
+        item=item,
+        platform="tiktok",
+        system_prompt="Create the final vertical UGC ad.",
+    )
+
+    assert calls == [
+        {
+            "ref": "prunaai/p-video",
+            "input": {
+                "prompt": "Create the final vertical UGC ad.",
+                "duration": 8,
+                "resolution": "1080p",
+                "aspect_ratio": "9:16",
+                "fps": 24,
+                "draft": True,
+                "save_audio": False,
+                "prompt_upsampling": False,
+                "image": "data:image/png;base64,abc",
+            },
+        }
+    ]
+    assert artifact.kind == "video"
+    assert artifact.uri == "https://cdn.replicate.com/pruna-final.mp4"
+    assert artifact.meta == {
+        "provider": "replicate",
+        "model": "prunaai/p-video",
+        "platform": "tiktok",
+        "duration": 8,
+        "aspect_ratio": "9:16",
+        "resolution": "1080p",
+        "generate_audio": False,
+        "draft": True,
+        "cost_usd": 0.08,
+        "source_clips": 2,
+        "has_reference_image": True,
+    }
+
+
+async def test_assemble_rejects_an_unconfigured_model():
+    adapter, _ = _make_adapter(
+        assembly={"model": "other/video-model"},
+        allow_mock_fallback=False,
+    )
+    item = Item(id="item-abc", concept={"id": "item-abc", "hook": "h"})
+
+    with pytest.raises(RuntimeError, match="requires model.*prunaai/p-video"):
+        await adapter.assemble(item=item, platform="tiktok")
+
+
+async def test_assemble_uses_default_prompt_and_local_creator_image(tmp_path):
+    calls: list[dict[str, Any]] = []
+
+    async def fake_runner(ref: str, input: dict[str, Any]):
+        calls.append({"ref": ref, "input": input})
+        return "https://cdn.replicate.com/final.mp4"
+
+    image_path = tmp_path / "creator.png"
+    image_path.write_bytes(b"png")
+    adapter = ReplicateVideoAdapter(
+        tiers=TIERS,
+        runner=fake_runner,
+        assembly={"model": "prunaai/p-video"},
+    )
+    item = Item(
+        id="item-abc",
+        concept={"id": "item-abc", "hook": "h"},
+        script="HOOK: explain the offer",
+        creator_image_local_path=str(image_path),
+    )
+
+    await adapter.assemble(item=item, platform="instagram")
+
+    assert calls[0]["input"]["image"] == image_path
+    assert "final vertical UGC ad for instagram" in calls[0]["input"]["prompt"]
+    assert "HOOK: explain the offer" in calls[0]["input"]["prompt"]
+
+
 async def test_generate_clip_omits_image_when_reference_missing():
     adapter, calls = _make_adapter()
 
@@ -127,7 +298,7 @@ async def test_generate_clip_retries_transport_errors_then_succeeds():
     assert calls == 2
 
 
-async def test_non_ltx_tiers_fallback_to_mock_clip():
+async def test_unsupported_models_fallback_to_mock_clip():
     adapter, calls = _make_adapter()
 
     artifact = await adapter.generate_clip("item-abc", "kling", 8, 1)
@@ -139,7 +310,7 @@ async def test_non_ltx_tiers_fallback_to_mock_clip():
     assert artifact.meta["tier"] == "kling"
 
 
-async def test_non_ltx_tiers_raise_when_mock_fallback_disabled():
+async def test_unsupported_models_raise_when_mock_fallback_disabled():
     adapter, calls = _make_adapter(allow_mock_fallback=False)
 
     with pytest.raises(RuntimeError, match="mock fallback disabled"):

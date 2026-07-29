@@ -1,7 +1,9 @@
 """CompositeAdapter: roteamento por papel + default mock (integração dos adapters reais)."""
 from orchestrator.adapters.gateway_llm import GatewayLLMAdapter
 from orchestrator.adapters.integrity_qc import IntegrityQCAdapter
+from orchestrator.adapters.ffmpeg_assembly import FfmpegAssemblyAdapter
 from orchestrator.adapters.mock import MockAdapter
+from orchestrator.adapters.vercel_gateway_video import VercelGatewayVideoAdapter
 from orchestrator.adapters.vercel_seedance_assembly import VercelSeedanceAssemblyAdapter
 from orchestrator.registry import (
     ROLES,
@@ -51,10 +53,11 @@ def test_vercel_gateway_llm_routes_only_llm_role(monkeypatch, pipeline_cfg):
     assert isinstance(comp._by_role["assembly"], MockAdapter)
 
 
-def test_live_qc_and_seedance_assembly_adapters_are_registered(pipeline_cfg):
+def test_live_video_qc_and_seedance_assembly_adapters_are_registered(pipeline_cfg):
     comp = build_adapter_from_providers(
         {
             "adapters": {
+                "video": "vercel_gateway_video",
                 "qc": "integrity_qc",
                 "assembly": "vercel_seedance_assembly",
             }
@@ -62,9 +65,19 @@ def test_live_qc_and_seedance_assembly_adapters_are_registered(pipeline_cfg):
         pipeline_cfg,
     )
 
+    assert isinstance(comp._by_role["video"], VercelGatewayVideoAdapter)
     assert isinstance(comp._by_role["qc"], IntegrityQCAdapter)
     assert isinstance(comp._by_role["assembly"], VercelSeedanceAssemblyAdapter)
     assert isinstance(comp._by_role["llm"], MockAdapter)
+
+
+def test_ffmpeg_assembly_adapter_is_registered(pipeline_cfg):
+    comp = build_adapter_from_providers(
+        {"adapters": {"assembly": "ffmpeg_assembly"}},
+        pipeline_cfg,
+    )
+
+    assert isinstance(comp._by_role["assembly"], FfmpegAssemblyAdapter)
 
 
 def test_composite_delegates_reroll_creator_voice_when_creator_role_has_it(pipeline_cfg):

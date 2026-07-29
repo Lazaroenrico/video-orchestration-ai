@@ -22,6 +22,7 @@ import replicate
 from orchestrator.adapters.base import VoiceProfile
 from orchestrator.adapters._retry import with_transport_retry
 from orchestrator.adapters._throttle import AsyncThrottle
+from orchestrator.graph.state import Artifact
 from orchestrator.tracing import traced
 
 # Chaves conhecidas onde modelos de áudio costumam expor a saída.
@@ -76,6 +77,7 @@ class ReplicateVoiceAdapter:
         model_id_field: Optional[str] = None,
         base_input: Optional[dict[str, Any]] = None,
         throttle: Optional[AsyncThrottle] = None,
+        cost_per_1000_chars_usd: float = 0.05,
     ) -> None:
         resolved_model = (model or _env("REPLICATE_ELEVENLABS_MODEL")).strip()
         if not resolved_model:
@@ -95,6 +97,7 @@ class ReplicateVoiceAdapter:
             model_id_field or _env("REPLICATE_ELEVENLABS_MODEL_ID_FIELD", "model_id")
         ).strip()
         self.base_input = dict(base_input) if base_input is not None else _load_base_input()
+        self.cost_per_1000_chars_usd = float(cost_per_1000_chars_usd)
         self.model_id = _env("REPLICATE_ELEVENLABS_MODEL_ID")
         # Cada preset é um *pool* (lista) de vozes; a seleção por índice de creator dá
         # variedade determinística (voz distinta por creator do mesmo gênero) sem repetir.
@@ -123,6 +126,53 @@ class ReplicateVoiceAdapter:
             label="replicate.voice",
         )
         return self._coerce_output(output)
+
+    def resolve_voice_ref(
+        self,
+        index: int,
+        voice_profile: Optional[VoiceProfile] = None,
+    ) -> str:
+        """Return the provider-stable voice selected for a creator.
+
+        The preview returned by ``create_voice`` is a temporary media URL.  The
+        selected pool value is the reference that must be sent again when the
+        approved full script is synthesized.
+        """
+        return self._voice_id_for(index, voice_profile)
+
+    @traced(
+        "adapter.replicate_voice.synthesize_voiceover",
+        run_type="tool",
+        step="voiceover",
+        provider="replicate",
+    )
+    async def synthesize_voiceover(self, *, voice_ref: str, text: str) -> Artifact:
+        body = dict(self.base_input)
+        body[self.text_field] = text
+        if voice_ref and self.voice_field:
+            body[self.voice_field] = voice_ref
+        if self.model_id and self.model_id_field:
+            body[self.model_id_field] = self.model_id
+        output = await with_transport_retry(
+            lambda: self._throttled_run(self.model, input=body),
+            max_retries=self.max_retries,
+            backoff_base=self.backoff_base,
+            label="replicate.voiceover",
+        )
+        return Artifact(
+            kind="voiceover",
+            uri=self._coerce_output(output),
+            meta={
+                "provider": "replicate",
+                "model": self.model,
+                "voice_ref": voice_ref,
+                "characters": len(text),
+                "cost_usd": round(
+                    len(text) * self.cost_per_1000_chars_usd / 1000,
+                    6,
+                ),
+            },
+        )
 
     async def _throttled_run(self, ref: str, **kwargs: Any) -> Any:
         """Passa cada tentativa pelo throttle global (quando configurado)."""

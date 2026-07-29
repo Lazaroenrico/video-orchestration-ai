@@ -58,6 +58,19 @@ class VoiceProfile:
         return {"preset": self.preset, "prompt": self.prompt}
 
 
+@dataclass(frozen=True)
+class RenderedMedia:
+    """Provider-neutral media bytes produced by a local renderer.
+
+    Bytes are deliberately transient: the node persists them to the configured
+    storage backend and only the resulting canonical pointer enters graph state.
+    """
+
+    data: bytes
+    content_type: str
+    meta: dict[str, Any]
+
+
 def infer_voice_profile(text: Optional[str]) -> Optional[VoiceProfile]:
     """Infere preset de voz a partir de um briefing humano opcional."""
     prompt = (text or "").strip()
@@ -207,10 +220,17 @@ class VoicePort(Protocol):
         self, index: int, voice_profile: Optional[VoiceProfile] = None
     ) -> str: ...
 
+    async def synthesize_voiceover(
+        self,
+        *,
+        voice_ref: str,
+        text: str,
+    ) -> Artifact: ...
+
 
 @runtime_checkable
 class VideoPort(Protocol):
-    """LTX / Kling / Seedance via plataforma de geração (Steps 4 e 5)."""
+    """Kling / Seedance ou outro modelo configurado para os Steps 4 e 5."""
 
     async def generate_clip(
         self, item_id: str, tier: str, seconds: int, attempt: int,
@@ -243,7 +263,7 @@ class AssemblyPort(Protocol):
 
     async def assemble(
         self, item: Item, platform: str, system_prompt: Optional[str] = None
-    ) -> Artifact: ...
+    ) -> Artifact | RenderedMedia: ...
 
 
 @runtime_checkable

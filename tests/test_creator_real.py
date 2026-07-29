@@ -876,6 +876,10 @@ async def test_persist_item_media_downloads_clips_and_assembled(tmp_path) -> Non
         clips=[
             Artifact(kind="clip", uri="https://cdn.example/clip0.mp4", meta={"tier": "ltx"}),
         ],
+        voiceover=Artifact(
+            kind="voiceover",
+            uri="https://cdn.example/voiceover.mp3",
+        ),
         assembled=Artifact(kind="final", uri="https://cdn.example/final.mp4"),
     )
     client = httpx.AsyncClient(transport=_ok_media_transport(_FAKE_MP4, "video/mp4"))
@@ -888,9 +892,12 @@ async def test_persist_item_media_downloads_clips_and_assembled(tmp_path) -> Non
 
     assert out.clips[0].uri == "/videos/run-9/items/item-1/clip-0.mp4"
     assert out.clips[0].meta["source_uri"] == "https://cdn.example/clip0.mp4"
+    assert out.voiceover.uri == "/videos/run-9/items/item-1/voiceover.mp3"
+    assert out.voiceover.meta["source_uri"] == "https://cdn.example/voiceover.mp3"
     assert out.assembled.uri == "/videos/run-9/items/item-1/assembled.mp4"
     assert out.assembled.meta["source_uri"] == "https://cdn.example/final.mp4"
     assert (videos_root / "run-9" / "items" / "item-1" / "clip-0.mp4").read_bytes() == _FAKE_MP4
+    assert (videos_root / "run-9" / "items" / "item-1" / "voiceover.mp3").read_bytes() == _FAKE_MP4
     assert (videos_root / "run-9" / "items" / "item-1" / "assembled.mp4").read_bytes() == _FAKE_MP4
     assert not (tmp_path / "media").exists()
     # Item devolvido é renderável a partir das novas uris /videos/...
@@ -1031,6 +1038,95 @@ async def test_reroll_creator_voice_requests_next_pool_index() -> None:
     # Metadados de mídia antigos são invalidados para reforçar re-persistência.
     assert update["voice_source_uri"] is None
     assert update["voice_preview_uri"] is None
+
+
+async def test_build_creator_preserves_stable_voice_model_reference() -> None:
+    class _VoiceWithStableRef:
+        async def create_voice(self, index, voice_profile=None):
+            return "https://replicate.delivery/preview.mp3"
+
+        def resolve_voice_ref(self, index, voice_profile=None):
+            return "Rachel"
+
+    adapter = RealCreatorAdapter(
+        image=_FakeImage(),
+        topaz=_OkUpscale(),
+        voice=_VoiceWithStableRef(),
+    )
+
+    creator = await adapter.build_creator(
+        0,
+        voice_profile=VoiceProfile(preset="female", prompt="warm"),
+    )
+
+    assert creator["voice_id"] == "https://replicate.delivery/preview.mp3"
+    assert creator["voice_model_ref"] == "Rachel"
+
+
+async def test_real_creator_delegates_full_voiceover_to_voice_adapter() -> None:
+    expected = Artifact(kind="voiceover", uri="mock://voiceover")
+
+    class _Voice:
+        async def create_voice(self, index, voice_profile=None):
+            return "voice"
+
+        async def synthesize_voiceover(self, **kwargs):
+            assert kwargs == {"voice_ref": "Rachel", "text": "Approved script"}
+            return expected
+
+    adapter = RealCreatorAdapter(
+        image=_FakeImage(),
+        topaz=_OkUpscale(),
+        voice=_Voice(),
+    )
+
+    assert await adapter.synthesize_voiceover(
+        voice_ref="Rachel",
+        text="Approved script",
+    ) is expected
+
+
+async def test_real_creator_rejects_full_voiceover_when_adapter_lacks_it() -> None:
+    class _PreviewOnlyVoice:
+        async def create_voice(self, index, voice_profile=None):
+            return "voice"
+
+    adapter = RealCreatorAdapter(
+        image=_FakeImage(),
+        topaz=_OkUpscale(),
+        voice=_PreviewOnlyVoice(),
+    )
+
+    with pytest.raises(RuntimeError, match="does not support full voiceover"):
+        await adapter.synthesize_voiceover(
+            voice_ref="Rachel",
+            text="Approved script",
+        )
+
+
+async def test_persist_creator_media_does_not_replace_voice_model_reference(tmp_path) -> None:
+    creator = {
+        "id": "creator-0",
+        "upscaled_base": "mock://image",
+        "voice_id": "https://cdn.example/preview.mp3",
+        "voice_model_ref": "Rachel",
+    }
+    client = httpx.AsyncClient(
+        transport=_ok_media_transport(b"preview", "audio/mpeg")
+    )
+
+    persisted = await media_store.persist_creator_media(
+        creator,
+        run_id="run-voice",
+        media_root=tmp_path,
+        client=client,
+    )
+    await client.aclose()
+
+    assert persisted["voice_id"].startswith("/media/")
+    assert persisted["voice_model_ref"] == "Rachel"
+    assert persisted["voice_ref"] == "Rachel"
+    assert persisted["voice_preview_uri"].startswith("/media/")
 
 
 async def test_reroll_creator_voice_shifts_again_on_second_reroll() -> None:

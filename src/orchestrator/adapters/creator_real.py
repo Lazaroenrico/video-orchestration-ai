@@ -103,12 +103,21 @@ class RealCreatorAdapter:
         except Exception as exc:  # noqa: BLE001 — voz é opcional; imagem preservada
             _log.error("voz falhou (creator-%d): %s", index, exc)
             voice_id = ""
+        resolve_voice_ref = getattr(self.voice, "resolve_voice_ref", None)
+        voice_model_ref = (
+            resolve_voice_ref(index, resolved_voice)
+            if callable(resolve_voice_ref)
+            else voice_id
+        )
 
         creator = {
             "id": f"creator-{index}",
             "angles": face["angles"],
             "upscaled_base": primary,
             "voice_id": voice_id,
+            "voice_model_ref": voice_model_ref,
+            "voice_ref": voice_model_ref,
+            "voice_preview_uri": voice_id,
         }
         if resolved_voice is not None:
             creator["voice_profile"] = resolved_voice.as_dict()
@@ -135,13 +144,37 @@ class RealCreatorAdapter:
         voice_id = await self.voice.create_voice(
             index + reroll_count, voice_profile=voice_profile
         )
+        resolve_voice_ref = getattr(self.voice, "resolve_voice_ref", None)
+        voice_model_ref = (
+            resolve_voice_ref(index + reroll_count, voice_profile)
+            if callable(resolve_voice_ref)
+            else voice_id
+        )
         return {
             "voice_id": voice_id,
-            "voice_ref": voice_id,
-            "voice": voice_id,
+            "voice_ref": voice_model_ref,
+            "voice": voice_model_ref,
+            "voice_model_ref": voice_model_ref,
             "voice_source_uri": None,
             "voice_preview_uri": None,
         }
+
+    @traced(
+        "adapter.creator_real.synthesize_voiceover",
+        run_type="tool",
+        step="voiceover",
+        provider="creator_real",
+    )
+    async def synthesize_voiceover(
+        self,
+        *,
+        voice_ref: str,
+        text: str,
+    ) -> Any:
+        synthesize = getattr(self.voice, "synthesize_voiceover", None)
+        if synthesize is None:
+            raise RuntimeError("configured voice adapter does not support full voiceover")
+        return await synthesize(voice_ref=voice_ref, text=text)
 
 
 def build_real_creator_adapter(pipeline: dict[str, Any]) -> RealCreatorAdapter:

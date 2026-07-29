@@ -17,6 +17,7 @@ from orchestrator.adapters.anthropic_llm import (
     build_vercel_gateway_llm_adapter,
 )
 from orchestrator.adapters.gateway_llm import build_gateway_llm_adapter
+from orchestrator.adapters.ffmpeg_assembly import build_ffmpeg_assembly_adapter
 from orchestrator.adapters.creator_real import (
     build_real_creator_adapter,
     build_real_creator_replicate_adapter,
@@ -27,6 +28,9 @@ from orchestrator.adapters.mock import MockAdapter
 from orchestrator.adapters._throttle import get_replicate_throttle
 from orchestrator.adapters.passthrough_upscale import build_passthrough_upscale_adapter
 from orchestrator.adapters.replicate_video import ReplicateVideoAdapter
+from orchestrator.adapters.vercel_gateway_video import (
+    build_vercel_gateway_video_adapter,
+)
 from orchestrator.adapters.vercel_seedance_assembly import (
     build_vercel_seedance_assembly_adapter,
 )
@@ -42,6 +46,7 @@ def _build_replicate(pipeline: dict[str, Any]) -> ReplicateVideoAdapter:
     return ReplicateVideoAdapter(
         tiers=pipeline["tiers"],
         clip=pipeline.get("clip", {}),
+        assembly=pipeline.get("assembly", {}),
         throttle=get_replicate_throttle(),
         allow_mock_fallback=bool(
             pipeline.get("video", {}).get("allow_mock_fallback", True)
@@ -64,7 +69,10 @@ _ADAPTERS: dict[str, Callable[[dict[str, Any]], Any]] = {
     "creator_real": build_real_creator_adapter,
     "creator_real_vercel": build_real_creator_vercel_adapter,
     "creator_real_replicate": build_real_creator_replicate_adapter,
+    "creator_vercel_replicate_voice": build_real_creator_replicate_adapter,
     "integrity_qc": build_integrity_qc_adapter,
+    "ffmpeg_assembly": build_ffmpeg_assembly_adapter,
+    "vercel_gateway_video": build_vercel_gateway_video_adapter,
     "vercel_seedance_assembly": build_vercel_seedance_assembly_adapter,
     "passthrough_upscale": build_passthrough_upscale_adapter,
 }
@@ -132,6 +140,15 @@ class CompositeAdapter:
     @traced("adapter.creator.build_creator", run_type="chain", role="creator", step=3)
     async def build_creator(self, *args: Any, **kwargs: Any) -> Any:
         return await self._by_role["creator"].build_creator(*args, **kwargs)
+
+    @traced(
+        "adapter.creator.synthesize_voiceover",
+        run_type="chain",
+        role="creator",
+        step="voiceover",
+    )
+    async def synthesize_voiceover(self, *args: Any, **kwargs: Any) -> Any:
+        return await self._by_role["creator"].synthesize_voiceover(*args, **kwargs)
 
     # --- video (Steps 4 e 5) ---
     @traced("adapter.video.generate_clip", run_type="chain", role="video", step="video")

@@ -468,6 +468,26 @@ class MockAdapter:
             creator["voice_profile"] = resolved_voice.as_dict()
         return creator
 
+    @traced(
+        "adapter.mock.synthesize_voiceover",
+        run_type="tool",
+        step="voiceover",
+        provider="mock",
+    )
+    async def synthesize_voiceover(self, *, voice_ref: str, text: str) -> Artifact:
+        await self._tick()
+        payload = _wav_data_uri("voiceover", voice_ref, text)
+        return Artifact(
+            kind="voiceover",
+            uri=payload,
+            meta={
+                "provider": "mock",
+                "voice_ref": voice_ref,
+                "characters": len(text),
+                "cost_usd": 0.0,
+            },
+        )
+
     # --- Steps 4/5: vídeo (talking-head / demo) ---
     @traced("adapter.mock.generate_clip", run_type="tool", step="video", provider="mock")
     async def generate_clip(

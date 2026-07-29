@@ -12,6 +12,7 @@ from orchestrator.graph.state import Item, QCResult
 from orchestrator.tracing import traced
 
 _VIDEO_EXTENSIONS = (".mp4", ".webm", ".mov", ".m4v")
+_CANONICAL_STORAGE_SCHEMES = {"r2", "s3"}
 
 
 class IntegrityQCAdapter:
@@ -62,6 +63,10 @@ def _is_video_uri(uri: str) -> bool:
         # detecção de mock/fallback fica com meta.provider/fallback_reason.
         suffix = PurePosixPath(parsed.path).suffix.lower()
         return not suffix or suffix in _VIDEO_EXTENSIONS
+    if parsed.scheme in _CANONICAL_STORAGE_SCHEMES:
+        suffix = PurePosixPath(parsed.path).suffix.lower()
+        has_object = bool(parsed.netloc.strip() and parsed.path.strip("/"))
+        return has_object and suffix in _VIDEO_EXTENSIONS
     if parsed.scheme:
         return False
     return parsed.path.lower().endswith(_VIDEO_EXTENSIONS)

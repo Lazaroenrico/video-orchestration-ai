@@ -35,6 +35,7 @@ from orchestrator.storage.base import (
 )
 from orchestrator.storage.db import ArtifactRecord, ArtifactRepository
 from orchestrator.storage.local import LocalMediaStorage
+from orchestrator.graph.state import Artifact
 
 _log = logging.getLogger(__name__)
 
@@ -42,6 +43,7 @@ __all__ = [
     "data_uri_from_media_path",
     "persist_bytes",
     "persist_creator_media",
+    "persist_artifact_bytes",
     "persist_item_media",
     "persist_media",
 ]
@@ -145,6 +147,52 @@ async def _record(
     )
 
 
+async def persist_artifact_bytes(
+    data: bytes,
+    *,
+    run_id: str,
+    item_id: str,
+    basename: str,
+    kind: str,
+    content_type: str,
+    meta: Optional[dict[str, Any]] = None,
+    videos_root: str | Path | None = None,
+    storage: Optional[MediaStorage] = None,
+    db: Optional[ArtifactRepository] = None,
+) -> Artifact:
+    """Persist renderer-owned bytes and return only their canonical pointer."""
+    backend = _storage_for(
+        storage,
+        videos_root,
+        web_prefix="/videos",
+        required_arg="videos_root",
+    )
+    key_base = f"{run_id}/items/{item_id}/{basename}"
+    stored = await backend.put_bytes(
+        data,
+        key_base=key_base,
+        content_type=content_type,
+    )
+    source_uri = f"generated:{(meta or {}).get('provider') or 'local'}"
+    await _record(
+        db,
+        stored,
+        run_id=run_id,
+        kind=kind,
+        source_uri=source_uri,
+        item_id=item_id,
+    )
+    return Artifact(
+        kind=kind,
+        uri=stored.uri,
+        meta={
+            **(meta or {}),
+            "source_uri": source_uri,
+            **_pointer(stored),
+        },
+    )
+
+
 def _storage_for(
     storage: Optional[MediaStorage],
     root: str | Path | None,
@@ -170,7 +218,7 @@ async def persist_item_media(
     storage: Optional[MediaStorage] = None,
     db: Optional[ArtifactRepository] = None,
 ) -> Any:
-    """Persiste os bytes dos clips e do vídeo montado de um ``Item``.
+    """Persiste os bytes dos clips, locução e vídeo montado de um ``Item``.
 
     - ``clips[n].uri`` http(s)/data: -> persistido sob a key
       ``{run_id}/items/{item_id}/clip-{n}.{ext}``, servido em ``/videos/...``; a uri
@@ -207,6 +255,31 @@ async def persist_item_media(
                 )
         new_clips.append(clip)
     data["clips"] = new_clips
+
+    voiceover = data.get("voiceover")
+    if voiceover:
+        voiceover = dict(voiceover)
+        uri = voiceover.get("uri")
+        if isinstance(uri, str):
+            stored = await backend.put_from_url(
+                uri,
+                key_base=f"{key_prefix}/voiceover",
+                client=client,
+            )
+            if stored:
+                meta = dict(voiceover.get("meta") or {})
+                meta["source_uri"] = uri
+                meta.update(_pointer(stored))
+                voiceover = {**voiceover, "uri": stored.uri, "meta": meta}
+                await _record(
+                    db,
+                    stored,
+                    run_id=run_id,
+                    kind=voiceover.get("kind") or "voiceover",
+                    source_uri=uri,
+                    item_id=item_id,
+                )
+        data["voiceover"] = voiceover
 
     assembled = data.get("assembled")
     if assembled:
@@ -270,8 +343,9 @@ async def persist_creator_media(
         stored = await backend.put_from_url(voice_uri, key_base=f"{key_prefix}/voice", client=client)
         if stored:
             out["voice_id"] = stored.uri
-            out["voice_ref"] = stored.uri
-            out["voice"] = stored.uri
+            stable_voice_ref = out.get("voice_model_ref")
+            out["voice_ref"] = stable_voice_ref or stored.uri
+            out["voice"] = stable_voice_ref or stored.uri
             out["voice_preview_uri"] = stored.uri
             out["voice_source_uri"] = voice_uri
             await _record(

@@ -176,6 +176,7 @@ async def _prepare_reference_image_payload(
     uri: Optional[str],
     *,
     cleanup_paths: Optional[list[Path]] = None,
+    max_bytes: int = GATEWAY_IMAGE_TARGET_BYTES,
 ) -> Optional[dict[str, str]]:
     if not uri:
         return None
@@ -183,8 +184,16 @@ async def _prepare_reference_image_payload(
         path = await _download_reference_image(uri)
         if cleanup_paths is not None:
             cleanup_paths.append(path)
-        return _reference_image_payload(str(path), cleanup_paths=cleanup_paths)
-    return _reference_image_payload(uri, cleanup_paths=cleanup_paths)
+        return _reference_image_payload(
+            str(path),
+            max_bytes=max_bytes,
+            cleanup_paths=cleanup_paths,
+        )
+    return _reference_image_payload(
+        uri,
+        max_bytes=max_bytes,
+        cleanup_paths=cleanup_paths,
+    )
 
 
 async def _download_reference_image(uri: str) -> Path:
@@ -272,14 +281,14 @@ async def _run_node_bridge(payload: dict[str, Any]) -> bytes:
     except json.JSONDecodeError as exc:
         output_path.unlink(missing_ok=True)
         raise RuntimeError(
-            "Seedance bridge returned non-JSON stdout: "
+            "Vercel video bridge returned non-JSON stdout: "
             f"{stdout.decode(errors='replace')}\n{stderr.decode(errors='replace')}"
         ) from exc
 
     if proc.returncode != 0 or not body.get("ok"):
         output_path.unlink(missing_ok=True)
         message = body.get("error") or stderr.decode(errors="replace") or "unknown bridge error"
-        raise RuntimeError(f"Seedance bridge failed: {message}")
+        raise RuntimeError(f"Vercel video bridge failed: {message}")
 
     try:
         return output_path.read_bytes()

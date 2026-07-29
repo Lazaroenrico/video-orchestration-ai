@@ -46,6 +46,69 @@ async def test_create_voice_returns_string():
     assert result == "https://cdn.replicate.com/v.wav"
 
 
+async def test_synthesize_voiceover_uses_the_approved_voice_and_full_script():
+    adapter, captured = _make_adapter(
+        text_field="prompt",
+        voice_field="voice",
+        base_input={"language_code": "pt", "speed": 1.0},
+        cost_per_1000_chars_usd=0.05,
+    )
+    script = "Depois da cirurgia, esta cadeira devolveu minha autonomia."
+
+    artifact = await adapter.synthesize_voiceover(
+        voice_ref="Rachel",
+        text=script,
+    )
+
+    assert captured == [
+        {
+            "ref": FAKE_ELEVENLABS_MODEL,
+            "input": {
+                "language_code": "pt",
+                "speed": 1.0,
+                "prompt": script,
+                "voice": "Rachel",
+            },
+        },
+    ]
+    assert artifact.kind == "voiceover"
+    assert artifact.uri == "https://cdn.replicate.com/voice.wav"
+    assert artifact.meta["provider"] == "replicate"
+    assert artifact.meta["model"] == FAKE_ELEVENLABS_MODEL
+    assert artifact.meta["voice_ref"] == "Rachel"
+    assert artifact.meta["characters"] == len(script)
+    assert artifact.meta["cost_usd"] == pytest.approx(len(script) * 0.05 / 1000)
+
+
+async def test_synthesize_voiceover_includes_optional_model_id(monkeypatch):
+    monkeypatch.setenv(
+        "REPLICATE_ELEVENLABS_MODEL_ID",
+        "eleven_multilingual_v2",
+    )
+    adapter, captured = _make_adapter(
+        text_field="prompt",
+        voice_field="voice",
+        model_id_field="model_id",
+    )
+
+    await adapter.synthesize_voiceover(voice_ref="Rachel", text="Texto")
+
+    assert captured[0]["input"]["model_id"] == "eleven_multilingual_v2"
+
+
+def test_resolve_voice_ref_returns_the_deterministic_pool_entry(monkeypatch):
+    monkeypatch.setenv(
+        "REPLICATE_ELEVENLABS_VOICE_ID_FEMALE",
+        "Alice, Rachel",
+    )
+    adapter, _ = _make_adapter()
+
+    assert adapter.resolve_voice_ref(
+        1,
+        VoiceProfile(preset="female", prompt="natural"),
+    ) == "Rachel"
+
+
 async def test_create_voice_parses_dict_audio_out():
     """Modelos de áudio podem devolver {'audio_out': url}; o adapter extrai a URL."""
     adapter, _ = _make_adapter(output={"audio_out": "https://cdn.replicate.com/voice.wav"})
