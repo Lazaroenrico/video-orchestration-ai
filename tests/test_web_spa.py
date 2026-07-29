@@ -7,11 +7,13 @@ endpoint /api/integrations que lê providers.yaml.
 """
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 import json
 
 import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from psycopg_pool import PoolTimeout
 
 from orchestrator.web import server as web_server
 
@@ -199,6 +201,85 @@ async def test_readyz_ready_defaults_to_local_when_unset(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_readyz_requires_ffmpeg_binaries_for_ffmpeg_assembly(monkeypatch) -> None:
+    _stub_config(monkeypatch, storage_backend="local")
+    monkeypatch.setattr(
+        web_server,
+        "load_pipeline",
+        lambda path=None: {"assembly": {"final_duration_seconds": 16}},
+    )
+    monkeypatch.setattr(
+        web_server,
+        "load_providers",
+        lambda path=None: {
+            "storage": {"backend": "local"},
+            "adapters": {"assembly": "ffmpeg_assembly"},
+        },
+    )
+    monkeypatch.setattr(web_server.shutil, "which", lambda binary: None)
+
+    resp = await web_server.readyz()
+
+    assert resp.status_code == 503
+    assert "ffmpeg" in json.loads(resp.body)["reason"]
+
+
+@pytest.mark.asyncio
+async def test_readyz_requires_final_duration_for_ffmpeg_assembly(monkeypatch) -> None:
+    _stub_config(monkeypatch, storage_backend="local")
+    monkeypatch.setattr(web_server, "load_pipeline", lambda path=None: {})
+    monkeypatch.setattr(
+        web_server,
+        "load_providers",
+        lambda path=None: {
+            "storage": {"backend": "local"},
+            "adapters": {"assembly": "ffmpeg_assembly"},
+        },
+    )
+    monkeypatch.setattr(
+        web_server.shutil,
+        "which",
+        lambda binary: f"/usr/bin/{binary}",
+    )
+
+    resp = await web_server.readyz()
+
+    assert resp.status_code == 503
+    assert "final_duration_seconds" in json.loads(resp.body)["reason"]
+
+
+@pytest.mark.asyncio
+async def test_readyz_honors_dev_local_storage_override(monkeypatch) -> None:
+    _stub_config(monkeypatch, storage_backend="r2")
+    monkeypatch.setenv("ORCH_DEV_STORAGE_BACKEND", "local")
+    for var in ("R2_ACCOUNT_ID", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_BUCKET"):
+        monkeypatch.delenv(var, raising=False)
+
+    resp = await web_server.readyz()
+
+    assert resp.status_code == 200
+    assert json.loads(resp.body) == {"status": "ready", "storage": "local"}
+
+
+@pytest.mark.asyncio
+async def test_readyz_validates_r2_selected_by_dev_override(monkeypatch) -> None:
+    _stub_config(monkeypatch, storage_backend="local")
+    monkeypatch.setenv("ORCH_DEV_STORAGE_BACKEND", "r2")
+    calls: list[str] = []
+    monkeypatch.setattr(
+        web_server.R2MediaStorage,
+        "from_env",
+        classmethod(lambda cls: calls.append("r2")),
+    )
+
+    resp = await web_server.readyz()
+
+    assert resp.status_code == 200
+    assert json.loads(resp.body) == {"status": "ready", "storage": "r2"}
+    assert calls == ["r2"]
+
+
+@pytest.mark.asyncio
 async def test_readyz_not_ready_when_r2_credentials_missing(monkeypatch) -> None:
     _stub_config(monkeypatch, storage_backend="r2")
     for var in ("R2_ACCOUNT_ID", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_BUCKET"):
@@ -225,6 +306,72 @@ async def test_readyz_not_ready_when_config_fails_to_load(monkeypatch) -> None:
     resp = await web_server.readyz()
     assert resp.status_code == 503
     assert "config quebrada" in json.loads(resp.body)["reason"]
+
+
+@pytest.mark.asyncio
+async def test_readyz_not_ready_when_database_is_unavailable(monkeypatch) -> None:
+    _stub_config(monkeypatch, storage_backend="local")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://unit-test")
+
+    class UnavailableDatabase:
+        @asynccontextmanager
+        async def connection(self):
+            raise PoolTimeout("secret database host")
+            yield
+
+    async def unavailable_database():
+        return UnavailableDatabase()
+
+    monkeypatch.setattr(web_server, "get_shared_database", unavailable_database)
+
+    resp = await web_server.readyz()
+
+    assert resp.status_code == 503
+    assert json.loads(resp.body) == {
+        "status": "not-ready",
+        "reason": "database unavailable",
+    }
+    assert "secret database host" not in resp.body.decode()
+
+
+@pytest.mark.asyncio
+async def test_readyz_probes_the_configured_database(monkeypatch) -> None:
+    _stub_config(monkeypatch, storage_backend="local")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://unit-test")
+    statements: list[str] = []
+
+    class Connection:
+        async def execute(self, statement):
+            statements.append(statement)
+
+    class AvailableDatabase:
+        @asynccontextmanager
+        async def connection(self):
+            yield Connection()
+
+    async def available_database():
+        return AvailableDatabase()
+
+    monkeypatch.setattr(web_server, "get_shared_database", available_database)
+
+    resp = await web_server.readyz()
+
+    assert resp.status_code == 200
+    assert statements == ["SELECT 1"]
+
+
+@pytest.mark.asyncio
+async def test_database_unavailable_handler_returns_sanitized_503() -> None:
+    resp = await web_server.database_unavailable(
+        None,
+        PoolTimeout("secret database host"),
+    )
+
+    assert resp.status_code == 503
+    assert json.loads(resp.body) == {
+        "detail": "Persistence temporarily unavailable. Try again shortly."
+    }
+    assert "secret database host" not in resp.body.decode()
 
 
 # --------------------------------------------------------------------------- #

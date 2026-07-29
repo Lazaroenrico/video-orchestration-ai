@@ -452,7 +452,8 @@ def migrate(db, artifacts_db, migration_database_url, legacy_database_url):
     Fase 1 da ADR-D36: cria o schema do checkpointer e do ArtifactDB e os diretórios de
     mídia. Idempotente. Substituído por migrações SQL do PostgreSQL na Fase 2.
     """
-    database_url = migration_database_url or legacy_database_url
+    # O alias explícito de CLI precisa vencer a URL carregada do ambiente/.env.
+    database_url = legacy_database_url or migration_database_url
     if database_url is None and os.environ.get("ORCH_ENV", "local") == "local":
         database_url = os.environ.get("DATABASE_URL")
     if (

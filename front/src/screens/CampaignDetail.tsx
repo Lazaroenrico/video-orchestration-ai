@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useParams, Link, useNavigate } from "react-router";
 import { Card, SectionTitle } from "../components/Card";
 import { Icon } from "../components/Icon";
@@ -13,6 +13,7 @@ import {
   useRerollVoiceMutation,
   useReviewRunV2Mutation,
 } from "../api/queries";
+import { HttpError } from "../api/client";
 import { mediaUrl } from "../api/urls";
 import { creatorVoiceUri } from "../api/media";
 import type { Creator, EditableConcept, GateRef, Item } from "../types";
@@ -56,7 +57,7 @@ function stageLabel(stage: string): string {
     .join(" ");
 }
 
-function CreativeReviewPanel({
+export function CreativeReviewPanel({
   runId,
   initialConcepts,
   initialCreators,
@@ -72,6 +73,11 @@ function CreativeReviewPanel({
   const [creators, setCreators] = useState(initialCreators);
   const [feedback, setFeedback] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const submitLock = useRef(false);
+  const [submission, setSubmission] = useState<
+    "idle" | "submitting" | "accepted" | "refreshing"
+  >("idle");
+  const [activeAction, setActiveAction] = useState<string | null>(null);
 
   function editConcept(index: number, key: string, value: string) {
     setConcepts((current) =>
@@ -93,6 +99,10 @@ function CreativeReviewPanel({
     action: "approve" | "regenerate",
     target?: "concepts" | "scripts" | "creators",
   ) {
+    if (submitLock.current) return;
+    submitLock.current = true;
+    setSubmission("submitting");
+    setActiveAction(action === "approve" ? action : `${action}:${target}`);
     setError(null);
     try {
       await review.mutateAsync({
@@ -103,10 +113,41 @@ function CreativeReviewPanel({
           ? { concepts, creators }
           : { target, feedback: feedback.trim() }),
       });
+      setSubmission("accepted");
     } catch (caught) {
+      if (caught instanceof HttpError && caught.status === 409) {
+        setSubmission("refreshing");
+        return;
+      }
+      submitLock.current = false;
+      setSubmission("idle");
+      setActiveAction(null);
       setError(caught instanceof Error ? caught.message : String(caught));
     }
   }
+
+  if (submission === "accepted" || submission === "refreshing") {
+    const accepted = submission === "accepted";
+    return (
+      <Card className="border-warning-review/30">
+        <div
+          role="status"
+          className="flex min-h-32 items-center gap-3 text-primary"
+        >
+          <Icon name={accepted ? "check_circle" : "sync"} size={24} />
+          <div>
+            <h2 className="font-headline-md text-headline-md">
+              {accepted
+                ? "Revisão enviada. Iniciando a próxima etapa..."
+                : "Esta revisão já foi processada. Atualizando a campanha..."}
+            </h2>
+          </div>
+        </div>
+      </Card>
+    );
+  }
+
+  const controlsLocked = submission === "submitting";
 
   return (
     <Card className="border-warning-review/30">
@@ -211,6 +252,8 @@ function CreativeReviewPanel({
           <Button
             variant="secondary"
             icon="refresh"
+            disabled={controlsLocked}
+            loading={activeAction === "regenerate:concepts"}
             onClick={() => submit("regenerate", "concepts")}
           >
             Regenerar conceitos
@@ -218,6 +261,8 @@ function CreativeReviewPanel({
           <Button
             variant="secondary"
             icon="refresh"
+            disabled={controlsLocked}
+            loading={activeAction === "regenerate:scripts"}
             onClick={() => submit("regenerate", "scripts")}
           >
             Regenerar roteiros
@@ -225,13 +270,16 @@ function CreativeReviewPanel({
           <Button
             variant="secondary"
             icon="refresh"
+            disabled={controlsLocked}
+            loading={activeAction === "regenerate:creators"}
             onClick={() => submit("regenerate", "creators")}
           >
             Regenerar creators
           </Button>
           <Button
             icon="check"
-            loading={review.isPending}
+            disabled={controlsLocked}
+            loading={activeAction === "approve"}
             onClick={() => submit("approve")}
           >
             Aprovar e produzir
@@ -455,6 +503,7 @@ export function CampaignDetail() {
       {run.phase === "review" && run.review && (
         <div className="mb-gutter">
           <CreativeReviewPanel
+            key={`${run.gate?.gate_id ?? "local"}:${run.gate?.version ?? 0}`}
             runId={runId}
             initialConcepts={run.review.concepts}
             initialCreators={run.review.creators}

@@ -464,7 +464,6 @@ function rootReducer(s: RunStreamState, a: Action): RunStreamState {
 export function useRunStream(runId: string | null) {
   const [state, dispatch] = useReducer(rootReducer, initial);
   const esRef = useRef<EventSource | null>(null);
-  const progressRefreshRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const queryClient = useQueryClient();
 
   useEffect(() => {
@@ -501,30 +500,12 @@ export function useRunStream(runId: string | null) {
           queryClient.invalidateQueries({ queryKey: queryKeys.runs() });
           queryClient.invalidateQueries({ queryKey: queryKeys.runState(runId) });
         } else if (
-          ev.type === "item_update" ||
           ev.type === "awaiting_concept_edit" ||
           ev.type === "awaiting_approval" ||
           ev.type === "awaiting_review" ||
           ev.type === "error"
         ) {
           invalidateRunQueries(queryClient, runId);
-        } else if (ev.type === "progress_event") {
-          if (progressRefreshRef.current) clearTimeout(progressRefreshRef.current);
-          progressRefreshRef.current = setTimeout(() => {
-            queryClient
-              .fetchQuery({
-                queryKey: queryKeys.runState(runId),
-                queryFn: () => api.getRunState(runId),
-                staleTime: 0,
-              })
-              .then((detail) => {
-                cacheRunDetail(queryClient, detail);
-                if (!cancelled) dispatch({ kind: "hydrate", detail });
-              })
-              .catch(() => {
-                /* SSE continues to provide the immediate state. */
-              });
-          }, 200);
         } else if (ev.type === "creator_update" || ev.type === "creator_ready") {
           queryClient.invalidateQueries({ queryKey: queryKeys.creators() });
         }
@@ -538,7 +519,6 @@ export function useRunStream(runId: string | null) {
     };
     return () => {
       cancelled = true;
-      if (progressRefreshRef.current) clearTimeout(progressRefreshRef.current);
       es.close();
       esRef.current = null;
     };

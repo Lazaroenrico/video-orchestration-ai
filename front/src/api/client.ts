@@ -15,6 +15,16 @@ import type {
 } from "./contracts";
 import { apiUrl } from "./urls";
 
+export class HttpError extends Error {
+  constructor(
+    readonly status: number,
+    readonly detail: string,
+  ) {
+    super(`${status} ${detail}`);
+    this.name = "HttpError";
+  }
+}
+
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(apiUrl(path), {
     headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
@@ -28,7 +38,7 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
     } catch {
       /* non-JSON error body */
     }
-    throw new Error(`${res.status} ${detail}`);
+    throw new HttpError(res.status, detail);
   }
   return (await res.json()) as T;
 }

@@ -293,7 +293,7 @@ export function useReviewRunV2Mutation() {
             }
           : {}),
       }),
-    onSuccess: (_result, variables) => {
+    onSettled: (_result, _error, variables) => {
       invalidateRunQueries(client, variables.runId);
     },
   });

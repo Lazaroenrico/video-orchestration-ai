@@ -13,6 +13,7 @@ import asyncio
 import json
 import logging
 import os
+import shutil
 import uuid
 from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime
@@ -20,10 +21,12 @@ from pathlib import Path
 from typing import Any, Literal, Optional
 from urllib.parse import urlparse
 
-from fastapi import BackgroundTasks, FastAPI, Header, HTTPException
+from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from psycopg import OperationalError
+from psycopg_pool import PoolTimeout
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from langgraph.types import Command
@@ -45,7 +48,7 @@ from orchestrator.config import (
     load_pipeline,
     load_providers,
 )
-from orchestrator.creators import normalize_creator_fields
+from orchestrator.creators import normalize_creator_payload
 from orchestrator.creative_contracts import CampaignInput
 from orchestrator.db import Database, TenantIdentity, close_shared_database, get_shared_database
 from orchestrator.tracing import run_trace_config
@@ -58,7 +61,7 @@ from orchestrator.nodes.stages import (
 )
 from orchestrator.progress import ProgressEventTranslator, build_activity, build_progress
 from orchestrator.registry import build_adapter_from_providers
-from orchestrator.storage.factory import build_media_storage
+from orchestrator.storage.factory import build_media_storage, resolve_storage_backend
 from orchestrator.storage.r2 import R2MediaStorage
 from orchestrator.storage.resolve import resolve_signed_uris
 from orchestrator.worker import run_worker_once
@@ -166,6 +169,27 @@ async def _app_lifespan(app_: FastAPI):
 app = FastAPI(title="UGC Orchestrator", lifespan=_app_lifespan)
 app.add_middleware(CloudflareAccessMiddleware)
 
+_DATABASE_UNAVAILABLE_ERRORS = (OperationalError, PoolTimeout)
+_DATABASE_READY_ERRORS = _DATABASE_UNAVAILABLE_ERRORS + (asyncio.TimeoutError,)
+
+
+async def database_unavailable(
+    _request: Request | None,
+    exc: Exception,
+) -> JSONResponse:
+    _log.warning("persistência temporariamente indisponível: %s", type(exc).__name__)
+    return JSONResponse(
+        status_code=503,
+        content={
+            "detail": "Persistence temporarily unavailable. Try again shortly."
+        },
+        headers={"Retry-After": "30"},
+    )
+
+
+app.add_exception_handler(OperationalError, database_unavailable)
+app.add_exception_handler(PoolTimeout, database_unavailable)
+
 
 def _cors_origins_from_env() -> list[str]:
     raw = os.environ.get("ORCH_CORS_ORIGINS", "")
@@ -204,16 +228,49 @@ async def readyz() -> JSONResponse:
     """
     try:
         effective_config_dir = _effective_config_dir(None)
-        load_pipeline(effective_config_dir)
+        pipeline = load_pipeline(effective_config_dir)
         providers = load_providers(effective_config_dir)
         load_judge(effective_config_dir)
-        backend = ((providers or {}).get("storage") or {}).get("backend", "local")
+        backend = resolve_storage_backend(providers)
         if backend == "local":
             pass
         elif backend == "r2":
             R2MediaStorage.from_env()  # valida credenciais R2; não faz request de rede
         else:
             raise ValueError(f"unknown storage backend {backend!r}")
+        assembly_adapter = (
+            (providers.get("adapters") or {}).get("assembly")
+            if isinstance(providers, dict)
+            else None
+        )
+        if assembly_adapter == "ffmpeg_assembly":
+            missing = [
+                binary
+                for binary in ("ffmpeg", "ffprobe")
+                if shutil.which(binary) is None
+            ]
+            if missing:
+                raise RuntimeError(
+                    "required media binaries are missing: " + ", ".join(missing)
+                )
+            if not (pipeline.get("assembly") or {}).get(
+                "final_duration_seconds"
+            ):
+                raise RuntimeError(
+                    "assembly.final_duration_seconds is required for FFmpeg"
+                )
+        if os.environ.get("DATABASE_URL"):
+            async def probe_database() -> None:
+                database = await get_shared_database()
+                async with database.connection() as connection:
+                    await connection.execute("SELECT 1")
+
+            await asyncio.wait_for(probe_database(), timeout=3)
+    except _DATABASE_READY_ERRORS:
+        return JSONResponse(
+            status_code=503,
+            content={"status": "not-ready", "reason": "database unavailable"},
+        )
     except Exception as exc:  # readiness: qualquer erro de config = not ready
         return JSONResponse(status_code=503, content={"status": "not-ready", "reason": str(exc)})
     return JSONResponse(status_code=200, content={"status": "ready", "storage": backend})
@@ -343,6 +400,17 @@ async def _emit(run_id: str, event: dict[str, Any]) -> None:
 
 def _persisted_event_payload(event: Any) -> dict[str, Any]:
     data = event.data if isinstance(event.data, dict) else {}
+    if event.event_type in {"awaiting_approval", "awaiting_review"}:
+        creators = data.get("creators")
+        if isinstance(creators, list):
+            data = {
+                **data,
+                "creators": [
+                    _normalize_creator(creator)
+                    for creator in creators
+                    if isinstance(creator, dict)
+                ],
+            }
     return {
         **data,
         "type": event.event_type,
@@ -442,26 +510,7 @@ def _normalize_artifact(art: Any) -> Optional[dict[str, Any]]:
 
 def _normalize_creator(creator: dict[str, Any]) -> dict[str, Any]:
     """Normaliza creator mantendo aliases legados durante a migração da UI."""
-    fields = normalize_creator_fields(creator)
-    normalized = {
-        "id": creator.get("id") or creator.get("creator_id"),
-        "image_uri": fields["image_uri"],
-        "voice_ref": fields["voice_ref"],
-        "voice_preview_uri": fields["voice_preview_uri"],
-        "image": fields["image"],
-        "voice": fields["voice"],
-        "angles": fields["angles"],
-    }
-    for key in (
-        "archetype",
-        "visual_brief",
-        "voice_brief",
-        "performance_style",
-        "exclusions",
-    ):
-        if key in creator:
-            normalized[key] = creator[key]
-    return normalized
+    return normalize_creator_payload(creator)
 
 
 def _normalize_creator_history(creator: dict[str, Any]) -> dict[str, Any]:
@@ -600,12 +649,15 @@ def _artifact_dict(art: Any) -> Optional[dict[str, Any]]:
 
 
 def _extract_artifacts(item: dict[str, Any]) -> list[dict[str, Any]]:
-    """Lista os artefatos gerados (clips + montagem final) com kind e uri."""
+    """Lista clips, locução e montagem final com kind e uri."""
     arts: list[dict[str, Any]] = []
     for clip in item.get("clips", []) or []:
         norm = _artifact_dict(clip)
         if norm:
             arts.append(norm)
+    voiceover = _artifact_dict(item.get("voiceover"))
+    if voiceover:
+        arts.append(voiceover)
     final = _artifact_dict(item.get("assembled"))
     if final:
         arts.append(final)
@@ -1048,84 +1100,9 @@ async def _execute_run(
                                 )
                         resume_input = Command(resume=review_decision)
                         continue
-                    # Gate de edição de concept+script (ANTES do creator).
-                    if intr_payload.get("type") == "edit_concepts":
-                        concepts = [
-                            _safe_serialize(c) for c in intr_payload.get("concepts", [])
-                        ]
-                        await _emit(run_id, {
-                            "type": "awaiting_concept_edit",
-                            "run_id": run_id,
-                            "concepts": concepts,
-                        })
-                        cfut: asyncio.Future = asyncio.get_event_loop().create_future()
-                        run_state_ref = _runs.get(run_id)
-                        if run_state_ref is not None:
-                            run_state_ref["concept_edit"] = cfut
-                            run_state_ref["pending_concepts"] = concepts
-                        persisted_state = _to_plain(dict(snap.values or {}))
-                        persisted_state["pending_concepts"] = concepts
-                        if _run_repository is not None:
-                            await _run_repository.save(
-                                run_id,
-                                phase="editing",
-                                state=persisted_state,
-                                summary=runner.summarize({
-                                    **dict(snap.values or {}),
-                                    "run_id": run_id,
-                                }),
-                                items=[],
-                            )
-                        cdecision = await cfut
-                        resume_input = Command(resume=cdecision)
-                        continue
-                    # NÃO usar **intr_payload aqui: ele carrega seu próprio "type"
-                    # ("approve_creators") que sobrescreveria o "awaiting_approval".
-                    pending_creators = [
-                        _normalize_creator(c)
-                        for c in intr_payload.get("creators", [])
-                    ]
-                    await _emit(run_id, {
-                        "type": "awaiting_approval",
-                        "creators": pending_creators,
-                    })
-                    # Cria Future e aguarda decisão via POST /api/approve
-                    fut: asyncio.Future = asyncio.get_event_loop().create_future()
-                    run_state_ref = _runs.get(run_id)
-                    if run_state_ref is not None:
-                        run_state_ref["approval"] = fut
-                        run_state_ref["pending_creators"] = pending_creators
-                    persisted_state = _to_plain(dict(snap.values or {}))
-                    persisted_state["pending_creators"] = pending_creators
-                    if _run_repository is not None:
-                        await _run_repository.save(
-                            run_id,
-                            phase="awaiting",
-                            state=persisted_state,
-                            summary=runner.summarize({
-                                **dict(snap.values or {}),
-                                "run_id": run_id,
-                            }),
-                            items=[],
-                        )
-                    decision = await fut
-                    # Persiste metadata e ponteiros canônicos; signed URLs nunca entram
-                    # no repositório (D30).
-                    async with creator_store.open_repository(store_path) as creators:
-                        await creators.record_creators(
-                            run_id,
-                            decision.get("creators")
-                            or [
-                                _normalize_creator(c)
-                                for c in intr_payload.get("creators", [])
-                            ],
-                            approved_ids=decision.get("approved", []),
-                            creator_prompt=creator_prompt,
-                            video_prompt=video_prompt,
-                            offer=offer,
-                        )
-                    resume_input = Command(resume=decision)
-                    continue
+                    raise RuntimeError(
+                        f"unsupported human gate: {intr_payload.get('type')!r}"
+                    )
                 # Em fluxos com subgrafo + interrupts, o último evento "LangGraph"
                 # observado em astream_events pode ser um output intermediário. O
                 # snapshot raiz é a fonte correta para o resumo público do run.
@@ -1793,30 +1770,43 @@ async def stream_events(
 
         async def generate_persisted():
             cursor = after_seq
-            while True:
-                async with job_store.open_repository() as jobs:
-                    assert jobs is not None
-                    events = await jobs.list_events(run_id, after_seq=cursor)
-                for event in events:
-                    cursor = event.seq
-                    payload = await resolve_signed_uris(
-                        _persisted_event_payload(event),
-                        storage=storage,
-                    )
-                    yield (
-                        f"id: {event.seq}\n"
-                        f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
-                    )
-                async with run_store.open_repository() as runs:
-                    snapshot = await runs.get(run_id) if runs is not None else None
-                if snapshot is not None and snapshot.phase in {
-                    "done",
-                    "error",
-                    "cancelled",
-                }:
-                    yield 'data: {"type": "stream_end"}\n\n'
-                    return
-                await asyncio.sleep(1)
+            try:
+                while True:
+                    async with job_store.open_repository() as jobs:
+                        assert jobs is not None
+                        events = await jobs.list_events(run_id, after_seq=cursor)
+                    for event in events:
+                        cursor = event.seq
+                        payload = await resolve_signed_uris(
+                            _persisted_event_payload(event),
+                            storage=storage,
+                        )
+                        yield (
+                            f"id: {event.seq}\n"
+                            f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                        )
+                    async with run_store.open_repository() as runs:
+                        snapshot = await runs.get(run_id) if runs is not None else None
+                    if snapshot is not None and snapshot.phase in {
+                        "done",
+                        "error",
+                        "cancelled",
+                    }:
+                        yield 'data: {"type": "stream_end"}\n\n'
+                        return
+                    await asyncio.sleep(1)
+            except asyncio.CancelledError:
+                raise
+            except _DATABASE_UNAVAILABLE_ERRORS as exc:
+                _log.warning(
+                    "stream persistido interrompido: banco indisponível (%s)",
+                    type(exc).__name__,
+                )
+                yield (
+                    "retry: 30000\n"
+                    'data: {"type": "service_unavailable",'
+                    '"detail": "Persistence temporarily unavailable"}\n\n'
+                )
 
         return StreamingResponse(
             generate_persisted(),
@@ -2101,13 +2091,18 @@ async def run_state(run_id: str, config_dir: Optional[str] = None, db: Optional[
             else persisted.state.get("pending_review")
         )
         if isinstance(review_source, dict):
-            review = _safe_serialize(
-                {
-                    key: value
-                    for key, value in review_source.items()
-                    if key != "type"
-                }
-            )
+            review = {
+                key: _safe_serialize(value)
+                for key, value in review_source.items()
+                if key not in {"type", "creators"}
+            }
+            creators_source = review_source.get("creators")
+            if isinstance(creators_source, list):
+                review["creators"] = [
+                    _normalize_creator(creator)
+                    for creator in creators_source
+                    if isinstance(creator, dict)
+                ]
     if runtime_state is not None and phase == "editing":
         edit_concepts = [
             _safe_serialize(c)

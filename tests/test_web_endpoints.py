@@ -16,8 +16,10 @@ from uuid import UUID
 
 import pytest
 from fastapi import BackgroundTasks, HTTPException
+from psycopg_pool import PoolTimeout
 
 from orchestrator import runner
+from orchestrator import worker as worker_module
 from orchestrator.db.jobs import Job, RunGate
 from orchestrator.db.runs import RunSnapshot
 from orchestrator.graph.state import Artifact
@@ -73,6 +75,25 @@ def test_emit_sync_buffers_when_queue_full():
     assert event["event_id"] == "local-1"
     assert datetime.fromisoformat(event["occurred_at"]).tzinfo is not None
     assert q.qsize() == 1  # fila cheia: evento descartado sem erro
+
+
+def test_extract_artifacts_includes_voiceover_between_clips_and_final():
+    item = {
+        "clips": [{"kind": "clip", "uri": "r2://ugc/clip.mp4"}],
+        "voiceover": {
+            "kind": "voiceover",
+            "uri": "r2://ugc/voiceover.mp3",
+        },
+        "assembled": {"kind": "video", "uri": "r2://ugc/final.mp4"},
+    }
+
+    artifacts = web_server._extract_artifacts(item)
+
+    assert [artifact["kind"] for artifact in artifacts] == [
+        "clip",
+        "voiceover",
+        "video",
+    ]
 
 
 # ------------------------------------------------------------------ #
@@ -149,6 +170,87 @@ async def test_embedded_runner_reuses_shared_database(monkeypatch):
 
     assert observed["database"] is shared_database
     assert observed["tenant"] is tenant
+
+
+def test_embedded_runner_poll_interval_falls_back_for_invalid_values(monkeypatch):
+    monkeypatch.setenv("ORCH_WEB_RUNNER_POLL_INTERVAL", "not-a-number")
+
+    assert web_server._web_runner_poll_interval() == 2.0
+
+
+async def test_embedded_runner_survives_job_errors_and_wakes_without_poll_delay(
+    monkeypatch,
+):
+    tenant = object()
+    calls = 0
+    observed_error = asyncio.Event()
+    observed_idle_after_wake = asyncio.Event()
+
+    class SharedDatabase:
+        async def resolve_tenant(self, _identity):
+            return tenant
+
+    async def get_database():
+        return SharedDatabase()
+
+    async def run_worker_once(**_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return True
+        if calls == 2:
+            observed_error.set()
+            raise RuntimeError("transient worker failure")
+        if calls >= 4:
+            observed_idle_after_wake.set()
+        return False
+
+    monkeypatch.setenv("ORCH_WEB_RUNNER_POLL_INTERVAL", "0.001")
+    monkeypatch.setenv("ORCH_ORGANIZATION_SLUG", "embedded-errors")
+    monkeypatch.setenv("ORCH_ORGANIZATION_NAME", "Embedded Errors")
+    monkeypatch.setenv("ORCH_USER_SUBJECT", "oidc|embedded-errors")
+    monkeypatch.setattr(web_server, "get_shared_database", get_database)
+    monkeypatch.setattr(web_server, "run_worker_once", run_worker_once)
+    wake_event = asyncio.Event()
+    wake_event.set()
+
+    task = asyncio.create_task(web_server._web_embedded_runner_loop(wake_event))
+    await asyncio.wait_for(observed_error.wait(), timeout=1)
+    await asyncio.wait_for(observed_idle_after_wake.wait(), timeout=1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert wake_event.is_set() is False
+
+
+async def test_embedded_runner_propagates_cancellation_during_a_claim(monkeypatch):
+    started = asyncio.Event()
+
+    class SharedDatabase:
+        async def resolve_tenant(self, _identity):
+            return object()
+
+    async def get_database():
+        return SharedDatabase()
+
+    async def run_worker_once(**_kwargs):
+        started.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setenv("ORCH_ORGANIZATION_SLUG", "embedded-cancel")
+    monkeypatch.setenv("ORCH_ORGANIZATION_NAME", "Embedded Cancel")
+    monkeypatch.setenv("ORCH_USER_SUBJECT", "oidc|embedded-cancel")
+    monkeypatch.setattr(web_server, "get_shared_database", get_database)
+    monkeypatch.setattr(web_server, "run_worker_once", run_worker_once)
+
+    task = asyncio.create_task(
+        web_server._web_embedded_runner_loop(asyncio.Event())
+    )
+    await asyncio.wait_for(started.wait(), timeout=1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
 
 
 async def test_start_run_defaults_to_staging_config_and_wakes_runner(monkeypatch):
@@ -508,6 +610,47 @@ async def test_submit_concepts_resolves_pending_future():
     assert fut.result() == {"concepts": edited}
 
 
+@pytest.mark.parametrize("endpoint", ["approval", "concepts"])
+async def test_legacy_durable_gate_endpoints_translate_stale_ids(
+    monkeypatch,
+    endpoint,
+):
+    from orchestrator.db import StaleGateError
+
+    class Jobs:
+        async def resolve_gate(self, *_args, **_kwargs):
+            raise StaleGateError("stale gate")
+
+    @asynccontextmanager
+    async def open_jobs():
+        yield Jobs()
+
+    monkeypatch.setenv("DATABASE_URL", "postgresql://unit-test")
+    monkeypatch.setattr(web_server.job_store, "open_repository", open_jobs)
+
+    with pytest.raises(HTTPException) as raised:
+        if endpoint == "approval":
+            await web_server.approve(
+                "run-1",
+                web_server.ApproveRequest(
+                    approved=[],
+                    gate_id="00000000-0000-0000-0000-000000000001",
+                    version=1,
+                ),
+            )
+        else:
+            await web_server.submit_concepts(
+                "run-1",
+                web_server.ConceptEditRequest(
+                    concepts=[],
+                    gate_id="00000000-0000-0000-0000-000000000001",
+                    version=1,
+                ),
+            )
+
+    assert raised.value.status_code == 409
+
+
 # ------------------------------------------------------------------ #
 # stream_events (SSE)                                               #
 # ------------------------------------------------------------------ #
@@ -547,6 +690,16 @@ async def test_stream_events_resumes_local_replay_after_last_event_id():
     assert "stream_end" in body
 
 
+@pytest.mark.parametrize("last_event_id", ["1", "local-not-a-number"])
+async def test_stream_events_rejects_invalid_local_last_event_ids(last_event_id):
+    web_server._runs["r"] = {"buffer": [], "queues": [], "done": True}
+
+    with pytest.raises(HTTPException) as raised:
+        await web_server.stream_events("r", last_event_id=last_event_id)
+
+    assert raised.value.status_code == 400
+
+
 async def test_stream_events_emits_keepalive_on_timeout(monkeypatch):
     web_server._runs["r"] = {"buffer": [], "queues": [], "done": False}
     calls = {"n": 0}
@@ -566,6 +719,84 @@ async def test_stream_events_emits_keepalive_on_timeout(monkeypatch):
 
     assert "keepalive" in body
     assert "stream_end" in body
+
+
+async def test_persisted_stream_reports_database_unavailable_without_traceback(
+    monkeypatch,
+):
+    run_id = "persisted-unavailable"
+
+    class Runs:
+        async def get(self, _run_id):
+            return RunSnapshot(
+                run_id=run_id,
+                phase="running",
+                state={},
+                summary={},
+                items=[],
+            )
+
+    @asynccontextmanager
+    async def open_runs():
+        yield Runs()
+
+    @asynccontextmanager
+    async def unavailable_jobs():
+        raise PoolTimeout("secret database host")
+        yield
+
+    monkeypatch.setenv("DATABASE_URL", "postgresql://unit-test")
+    monkeypatch.setattr(web_server.run_store, "open_repository", open_runs)
+    monkeypatch.setattr(web_server.job_store, "open_repository", unavailable_jobs)
+    monkeypatch.setattr(web_server, "_signing_storage", lambda _config: None)
+
+    resp = await web_server.stream_events(run_id)
+    body = "".join([chunk async for chunk in resp.body_iterator])
+
+    assert "retry: 30000" in body
+    assert '"type": "service_unavailable"' in body
+    assert "secret database host" not in body
+
+
+async def test_persisted_stream_propagates_client_cancellation(monkeypatch):
+    run_id = "persisted-cancelled-client"
+    polling = asyncio.Event()
+
+    class Runs:
+        async def get(self, _run_id):
+            return RunSnapshot(
+                run_id=run_id,
+                phase="running",
+                state={},
+                summary={},
+                items=[],
+            )
+
+    class Jobs:
+        async def list_events(self, *_args, **_kwargs):
+            polling.set()
+            await asyncio.Event().wait()
+
+    @asynccontextmanager
+    async def open_runs():
+        yield Runs()
+
+    @asynccontextmanager
+    async def open_jobs():
+        yield Jobs()
+
+    monkeypatch.setenv("DATABASE_URL", "postgresql://unit-test")
+    monkeypatch.setattr(web_server.run_store, "open_repository", open_runs)
+    monkeypatch.setattr(web_server.job_store, "open_repository", open_jobs)
+    monkeypatch.setattr(web_server, "_signing_storage", lambda _config: None)
+
+    response = await web_server.stream_events(run_id)
+    next_chunk = asyncio.create_task(response.body_iterator.__anext__())
+    await asyncio.wait_for(polling.wait(), timeout=1)
+    next_chunk.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await next_chunk
 
 
 # ------------------------------------------------------------------ #
@@ -1020,6 +1251,81 @@ async def test_run_state_returns_versioned_persisted_concept_gate(monkeypatch, t
     }
 
 
+async def test_run_state_ignores_a_persisted_gate_with_the_wrong_phase_type(
+    monkeypatch,
+    tmp_path,
+):
+    run_id = "persisted-mismatched-gate"
+    gate = RunGate(
+        gate_id=UUID("00000000-0000-0000-0000-000000000011"),
+        run_id=run_id,
+        gate_type="review_creative_plan",
+        version=1,
+        status="pending",
+        payload={"concepts": [{"id": "wrong-source"}], "creators": []},
+        resolution=None,
+    )
+
+    class Runs:
+        async def get(self, _run_id):
+            return RunSnapshot(
+                run_id=run_id,
+                phase="editing",
+                state={"pending_concepts": [{"id": "canonical-source"}]},
+                summary={},
+                items=[],
+            )
+
+    class Jobs:
+        async def get_pending_gate(self, _run_id):
+            return gate
+
+    @asynccontextmanager
+    async def open_runs():
+        yield Runs()
+
+    @asynccontextmanager
+    async def open_jobs():
+        yield Jobs()
+
+    async def no_checkpoint(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setenv("DATABASE_URL", "postgresql://unit-test")
+    monkeypatch.setattr(web_server.runner, "get_status", no_checkpoint)
+    monkeypatch.setattr(web_server.run_store, "open_repository", open_runs)
+    monkeypatch.setattr(web_server.job_store, "open_repository", open_jobs)
+
+    state = await web_server.run_state(
+        run_id,
+        config_dir="config-mock",
+        db=str(tmp_path / "cp.db"),
+    )
+
+    assert state["gate"] is None
+    assert state["edit_concepts"] == [{"id": "canonical-source"}]
+
+
+async def test_run_state_exposes_the_legacy_local_concept_edit_payload(tmp_path):
+    run_id = "runtime-editing"
+    web_server._runs[run_id] = {
+        "queues": [],
+        "buffer": [],
+        "done": False,
+        "concept_edit": asyncio.get_running_loop().create_future(),
+        "pending_concepts": [{"id": "concept-a", "script": "draft"}],
+    }
+
+    state = await web_server.run_state(
+        run_id,
+        config_dir="config-mock",
+        db=str(tmp_path / "cp.db"),
+    )
+
+    assert state["phase"] == "editing"
+    assert state["edit_concepts"] == [{"id": "concept-a", "script": "draft"}]
+
+
 async def test_run_state_returns_versioned_persisted_creator_gate(monkeypatch, tmp_path):
     run_id = "persisted-awaiting"
     gate = RunGate(
@@ -1081,6 +1387,135 @@ async def test_run_state_returns_versioned_persisted_creator_gate(monkeypatch, t
         "version": 1,
         "gate_type": "approve_creators",
     }
+
+
+async def test_run_state_normalizes_creator_image_in_persisted_review_gate(
+    monkeypatch,
+    tmp_path,
+):
+    run_id = "persisted-review"
+    gate = RunGate(
+        gate_id=UUID("00000000-0000-0000-0000-000000000003"),
+        run_id=run_id,
+        gate_type="review_creative_plan",
+        version=1,
+        status="pending",
+        payload={
+            "type": "review_creative_plan",
+            "concepts": [{"id": "concept-a", "script": "draft"}],
+            "creators": [
+                {
+                    "id": "creator-0",
+                    "upscaled_base": "r2://ugc/persisted-review/creator-0/image.png",
+                    "voice_preview_uri": (
+                        "r2://ugc/persisted-review/creator-0/voice.mp3"
+                    ),
+                    "archetype": "Expert",
+                },
+                {
+                    "id": "creator-1",
+                    "upscaled_base": "r2://ugc/persisted-review/creator-1/image.png",
+                    "voice_preview_uri": (
+                        "r2://ugc/persisted-review/creator-1/voice.mp3"
+                    ),
+                    "archetype": "Customer",
+                },
+            ],
+        },
+        resolution=None,
+    )
+
+    class Runs:
+        async def get(self, _run_id):
+            return RunSnapshot(
+                run_id=run_id,
+                phase="review",
+                state={},
+                summary={},
+                items=[],
+            )
+
+    class Jobs:
+        async def get_pending_gate(self, _run_id):
+            return gate
+
+    @asynccontextmanager
+    async def open_runs():
+        yield Runs()
+
+    @asynccontextmanager
+    async def open_jobs():
+        yield Jobs()
+
+    async def no_checkpoint(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setenv("DATABASE_URL", "postgresql://unit-test")
+    monkeypatch.setattr(web_server.runner, "get_status", no_checkpoint)
+    monkeypatch.setattr(web_server.run_store, "open_repository", open_runs)
+    monkeypatch.setattr(web_server.job_store, "open_repository", open_jobs)
+
+    state = await web_server.run_state(
+        run_id,
+        config_dir="config-mock",
+        db=str(tmp_path / "cp.db"),
+    )
+
+    creator = state["review"]["creators"][0]
+    assert creator["image_uri"] == (
+        "r2://ugc/persisted-review/creator-0/image.png"
+    )
+    assert creator["image"] == creator["image_uri"]
+    assert creator["archetype"] == "Expert"
+
+
+def test_persisted_review_event_normalizes_internal_creator_image() -> None:
+    event = SimpleNamespace(
+        seq=12,
+        event_type="awaiting_review",
+        data={
+            "run_id": "persisted-review",
+            "concepts": [],
+            "creators": [
+                {
+                    "id": "creator-0",
+                    "upscaled_base": "r2://ugc/run/creator-0/image.png",
+                }
+            ],
+        },
+        created_at=datetime.fromisoformat("2026-07-29T10:00:00+00:00"),
+    )
+
+    payload = web_server._persisted_event_payload(event)
+
+    assert payload["creators"][0]["image_uri"] == (
+        "r2://ugc/run/creator-0/image.png"
+    )
+    assert "upscaled_base" not in payload["creators"][0]
+
+
+def test_worker_review_gate_uses_public_creator_media_contract() -> None:
+    payload = worker_module._public_gate_payload(
+        {
+            "type": "review_creative_plan",
+            "concepts": [],
+            "creators": [
+                {
+                    "id": "creator-0",
+                    "upscaled_base": "r2://ugc/run/creator-0/image.png",
+                    "voice_id": "r2://ugc/run/creator-0/voice.mp3",
+                    "archetype": "Expert",
+                }
+            ],
+        }
+    )
+
+    assert payload["creators"][0]["image_uri"] == (
+        "r2://ugc/run/creator-0/image.png"
+    )
+    assert payload["creators"][0]["image"] == payload["creators"][0]["image_uri"]
+    assert payload["creators"][0]["archetype"] == "Expert"
+    assert "upscaled_base" not in payload["creators"][0]
 
 
 async def test_retry_failed_persisted_run_creates_clean_fork(monkeypatch):
@@ -1253,6 +1688,48 @@ async def test_retry_failed_run_without_initial_payload_returns_409(monkeypatch)
     assert enqueued == []
 
 
+def test_retry_payload_rejects_missing_server_owned_fields():
+    with pytest.raises(HTTPException) as raised:
+        web_server._retry_payload_fields(
+            {"offer": "", "platform": "tiktok", "batch": True}
+        )
+
+    assert raised.value.status_code == 409
+
+
+async def test_retry_requires_the_durable_job_repository(monkeypatch):
+    class Runs:
+        async def get(self, _run_id):
+            return RunSnapshot(
+                run_id="web-no-jobs",
+                phase="error",
+                offer="serum X",
+                platform="tiktok",
+                batch_size=1,
+                error="adapter failed",
+                summary={},
+                state={},
+                items=[],
+            )
+
+    @asynccontextmanager
+    async def open_runs():
+        yield Runs()
+
+    @asynccontextmanager
+    async def no_jobs():
+        yield None
+
+    monkeypatch.setenv("DATABASE_URL", "postgresql://unit-test")
+    monkeypatch.setattr(web_server.run_store, "open_repository", open_runs)
+    monkeypatch.setattr(web_server.job_store, "open_repository", no_jobs)
+
+    with pytest.raises(HTTPException) as raised:
+        await web_server.retry_run("web-no-jobs")
+
+    assert raised.value.status_code == 409
+
+
 async def test_run_state_returns_checkpoint_items_with_scripts(tmp_path, monkeypatch):
     monkeypatch.setenv("ORCH_MEDIA", str(tmp_path / "media"))
     monkeypatch.setenv("ORCH_CREATORS", str(tmp_path / "creators.json"))
@@ -1390,6 +1867,60 @@ async def test_execute_run_emits_error_on_failure(monkeypatch, tmp_path):
     assert state["done"] is True
     assert any(e.get("type") == "error" for e in state["buffer"])
     assert _drain(q)[-1] is None  # sentinel do finally por último
+
+
+async def test_execute_run_rejects_an_unknown_human_gate(monkeypatch, tmp_path):
+    class Graph:
+        async def astream_events(self, *_args, **_kwargs):
+            if False:
+                yield None
+
+        async def aget_state(self, _config):
+            interrupt = SimpleNamespace(value={"type": "legacy-unknown"})
+            task = SimpleNamespace(interrupts=[interrupt])
+            return SimpleNamespace(
+                next=("legacy",),
+                tasks=[task],
+                values={},
+            )
+
+    @asynccontextmanager
+    async def open_fake_checkpointer(_path):
+        yield object()
+
+    monkeypatch.setattr(web_server, "load_pipeline", lambda _path: {"batch": {}})
+    monkeypatch.setattr(web_server, "load_providers", lambda _path: {})
+    monkeypatch.setattr(web_server, "load_agent_catalog", lambda _path: object())
+    monkeypatch.setattr(
+        web_server,
+        "build_adapter_from_providers",
+        lambda *_args: object(),
+    )
+    monkeypatch.setattr(web_server, "run_trace_config", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(web_server, "open_checkpointer", open_fake_checkpointer)
+    monkeypatch.setattr(web_server, "build_graph", lambda *_args, **_kwargs: Graph())
+    web_server._runs["unknown-gate"] = {
+        "queues": [],
+        "buffer": [],
+        "done": False,
+    }
+
+    await web_server._execute_run(
+        "unknown-gate",
+        offer="Serum X",
+        batch=1,
+        platform="tiktok",
+        config_dir="config-mock",
+        db_path=str(tmp_path / "cp.db"),
+        _run_repository=None,
+    )
+
+    errors = [
+        event
+        for event in web_server._runs["unknown-gate"]["buffer"]
+        if event.get("type") == "error"
+    ]
+    assert "unsupported human gate" in errors[-1]["message"]
 
 
 async def test_local_start_signs_seed_and_can_persist_run_index(
