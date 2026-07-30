@@ -18,6 +18,9 @@ from orchestrator.adapters.anthropic_llm import (
 )
 from orchestrator.adapters.gateway_llm import build_gateway_llm_adapter
 from orchestrator.adapters.ffmpeg_assembly import build_ffmpeg_assembly_adapter
+from orchestrator.adapters.elevenlabs_voice_design import (
+    ElevenLabsVoiceDesignAdapter,
+)
 from orchestrator.adapters.creator_real import (
     build_real_creator_adapter,
     build_real_creator_replicate_adapter,
@@ -75,6 +78,10 @@ _ADAPTERS: dict[str, Callable[[dict[str, Any]], Any]] = {
     "vercel_gateway_video": build_vercel_gateway_video_adapter,
     "vercel_seedance_assembly": build_vercel_seedance_assembly_adapter,
     "passthrough_upscale": build_passthrough_upscale_adapter,
+    "elevenlabs_voice_design": lambda pipeline: ElevenLabsVoiceDesignAdapter(
+        design_model=pipeline.get("voice", {}).get("design_model", "eleven_ttv_v3"),
+        tts_model=pipeline.get("voice", {}).get("tts_model", "eleven_turbo_v2_5"),
+    ),
 }
 
 
@@ -140,6 +147,37 @@ class CompositeAdapter:
     @traced("adapter.creator.build_creator", run_type="chain", role="creator", step=3)
     async def build_creator(self, *args: Any, **kwargs: Any) -> Any:
         return await self._by_role["creator"].build_creator(*args, **kwargs)
+
+    @traced(
+        "adapter.creator.design_voice_candidates",
+        run_type="chain",
+        role="creator",
+        step=3,
+    )
+    async def design_voice_candidates(self, *args: Any, **kwargs: Any) -> Any:
+        creator_adapter = self._by_role["creator"]
+        if hasattr(creator_adapter, "design_voice_candidates"):
+            return await creator_adapter.design_voice_candidates(*args, **kwargs)
+        # Se o adapter do papel creator não implementa, mas tem sub-adapter voice:
+        voice = getattr(creator_adapter, "voice", None)
+        if voice is not None and hasattr(voice, "design_voice_candidates"):
+            return await voice.design_voice_candidates(*args, **kwargs)
+        raise AttributeError("design_voice_candidates")
+
+    @traced(
+        "adapter.creator.finalize_voice",
+        run_type="chain",
+        role="creator",
+        step=3,
+    )
+    async def finalize_voice(self, *args: Any, **kwargs: Any) -> Any:
+        creator_adapter = self._by_role["creator"]
+        if hasattr(creator_adapter, "finalize_voice"):
+            return await creator_adapter.finalize_voice(*args, **kwargs)
+        voice = getattr(creator_adapter, "voice", None)
+        if voice is not None and hasattr(voice, "finalize_voice"):
+            return await voice.finalize_voice(*args, **kwargs)
+        raise AttributeError("finalize_voice")
 
     @traced(
         "adapter.creator.synthesize_voiceover",

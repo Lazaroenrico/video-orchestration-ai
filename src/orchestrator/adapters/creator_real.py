@@ -159,6 +159,16 @@ class RealCreatorAdapter:
             "voice_preview_uri": None,
         }
 
+    async def design_voice_candidates(self, *args: Any, **kwargs: Any) -> Any:
+        if hasattr(self.voice, "design_voice_candidates"):
+            return await self.voice.design_voice_candidates(*args, **kwargs)
+        raise AttributeError("self.voice has no design_voice_candidates")
+
+    async def finalize_voice(self, *args: Any, **kwargs: Any) -> Any:
+        if hasattr(self.voice, "finalize_voice"):
+            return await self.voice.finalize_voice(*args, **kwargs)
+        raise AttributeError("self.voice has no finalize_voice")
+
     @traced(
         "adapter.creator_real.synthesize_voiceover",
         run_type="tool",
