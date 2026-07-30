@@ -19,6 +19,12 @@ from orchestrator.adapters._agent_loop import (
     run_agent_loop,
 )
 from orchestrator.adapters.base import StageToolRunner, VoiceProfile, resolve_voice_profile
+from orchestrator.creative_contracts import (
+    CreatorVoiceSpec,
+    FinalizedVoice,
+    VoiceCandidate,
+    VoiceDesignBatch,
+)
 from orchestrator.graph.state import Artifact, Item, QCResult
 from orchestrator.tools.registry import tool_call_schemas
 from orchestrator.tracing import add_trace_metadata, traced
@@ -486,6 +492,85 @@ class MockAdapter:
                 "characters": len(text),
                 "cost_usd": 0.0,
             },
+        )
+
+    @traced(
+        "adapter.mock.design_voice_candidates",
+        run_type="tool",
+        step="voice_candidates",
+        provider="mock",
+    )
+    async def design_voice_candidates(
+        self,
+        spec: CreatorVoiceSpec | dict[str, Any],
+        *,
+        preview_text: str | None = None,
+    ) -> VoiceDesignBatch:
+        await self._tick()
+        spec_obj = (
+            spec
+            if isinstance(spec, CreatorVoiceSpec)
+            else CreatorVoiceSpec.model_validate(spec)
+        )
+        spec_hash = hashlib.sha256(spec_obj.model_dump_json().encode()).hexdigest()[:10]
+        candidates: list[VoiceCandidate] = []
+        for i in range(3):
+            cand_id = f"cand-mock-{spec_hash}-{i}"
+            payload = _wav_data_uri("mock-candidate", cand_id, spec_obj.vocal_presentation)
+            artifact = Artifact(
+                kind="voice_preview",
+                uri=payload,
+                meta={"candidate_id": cand_id, "provider": "mock"},
+            )
+            candidates.append(
+                VoiceCandidate(
+                    candidate_id=cand_id,
+                    preview=artifact,
+                    duration_seconds=5.0,
+                    media_type="audio/mpeg",
+                )
+            )
+        return VoiceDesignBatch(
+            provider="elevenlabs",
+            design_model="eleven_ttv_v3",
+            description_hash=spec_hash,
+            prompt_version="voice-match-v1",
+            candidates=candidates,
+            cost_usd=0.0,
+        )
+
+    @traced(
+        "adapter.mock.finalize_voice",
+        run_type="tool",
+        step="finalize_voices",
+        provider="mock",
+    )
+    async def finalize_voice(
+        self,
+        candidate_id: str,
+        *,
+        batch: VoiceDesignBatch | dict[str, Any],
+        creator_id: str,
+        organization_id: str,
+    ) -> FinalizedVoice:
+        await self._tick()
+        batch_obj = (
+            batch
+            if isinstance(batch, VoiceDesignBatch)
+            else VoiceDesignBatch.model_validate(batch)
+        )
+        cand = next(
+            (c for c in batch_obj.candidates if c.candidate_id == candidate_id),
+            batch_obj.candidates[0],
+        )
+        voice_ref = f"voice-mock-{creator_id}-{candidate_id[:8]}"
+        return FinalizedVoice(
+            provider="elevenlabs",
+            voice_ref=voice_ref,
+            selected_candidate_id=candidate_id,
+            preview_uri=cand.preview.uri,
+            design_model=batch_obj.design_model,
+            tts_model="eleven_turbo_v2_5",
         )
 
     # --- Steps 4/5: vídeo (talking-head / demo) ---

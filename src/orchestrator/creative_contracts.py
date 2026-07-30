@@ -7,6 +7,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from orchestrator.graph.state import Artifact
+
 
 class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
@@ -238,3 +240,42 @@ def materialize_creator_roster(
         for assignment in submission.assignments
     ]
     return CreatorRoster(creators=creators, assignments=assignments)
+
+
+class CreatorVoiceSpec(StrictModel):
+    language_code: str = Field(default="pt-BR", min_length=2, max_length=10)
+    accent: str = Field(default="neutral", min_length=1, max_length=50)
+    vocal_presentation: Literal["feminine", "masculine", "androgynous", "neutral"]
+    vocal_age: Literal["young_adult", "adult", "mature"]
+    timbre: Literal["light", "clear", "warm", "full", "deep"]
+    pace: Literal["calm", "conversational", "energetic"]
+    energy: Literal["low", "balanced", "high"]
+    warmth: float = Field(default=0.5, ge=0.0, le=1.0)
+    expressiveness: float = Field(default=0.5, ge=0.0, le=1.0)
+    use_case: Literal["ugc_social"] = "ugc_social"
+    rationale: str = Field(default="Derived voice spec for creator", max_length=500)
+
+
+class VoiceCandidate(StrictModel):
+    candidate_id: str = Field(min_length=1, max_length=200)
+    preview: Artifact
+    duration_seconds: float = Field(ge=0.0)
+    media_type: str = Field(default="audio/mpeg", max_length=100)
+
+
+class VoiceDesignBatch(StrictModel):
+    provider: Literal["elevenlabs"] = "elevenlabs"
+    design_model: str = Field(default="eleven_ttv_v3", min_length=1, max_length=100)
+    description_hash: str = Field(min_length=1, max_length=200)
+    prompt_version: str = Field(default="voice-match-v1", min_length=1, max_length=100)
+    candidates: list[VoiceCandidate] = Field(min_length=1, max_length=3)
+    cost_usd: float = Field(default=0.0, ge=0.0)
+
+
+class FinalizedVoice(StrictModel):
+    provider: Literal["elevenlabs"] = "elevenlabs"
+    voice_ref: str = Field(min_length=1, max_length=200)
+    selected_candidate_id: str = Field(min_length=1, max_length=200)
+    preview_uri: str = Field(min_length=1, max_length=2000)
+    design_model: str = Field(default="eleven_ttv_v3", min_length=1, max_length=100)
+    tts_model: str = Field(default="eleven_turbo_v2_5", min_length=1, max_length=100)

@@ -415,6 +415,9 @@ def test_tool_registry_lists_static_tool_specs():
         "write_script",
         "design_creator_roster",
         "build_creator",
+        "derive_creator_voice_spec",
+        "design_creator_voice",
+        "finalize_creator_voice",
         "generate_clip",
         "qc_check",
         "synthesize_voiceover",
@@ -677,3 +680,41 @@ async def test_stage_nodes_delegate_to_tools(monkeypatch, tmp_path):
     ]
     clip_calls = [kwargs for name, kwargs in calls if name == "clip"]
     assert [call["tier"] for call in clip_calls] == ["ltx", "seedance"]
+
+
+async def test_voice_design_tools_delegate_to_adapter() -> None:
+    from orchestrator.tools.base import tool_context_from_config
+    from orchestrator.tools.creators import (
+        derive_creator_voice_spec_tool,
+        design_creator_voice_tool,
+        finalize_creator_voice_tool,
+    )
+    from orchestrator.adapters.mock import MockAdapter
+
+    adapter = MockAdapter(tiers=[{"name": "standard", "rate": 0.01}])
+    cfg = _config(adapter)
+    ctx = tool_context_from_config(cfg)
+
+    profile = {
+        "id": "creator-0",
+        "archetype": "woman skincare reviewer",
+        "visual_brief": "warm lighting bathroom",
+        "voice_brief": "female warm conversational voice",
+        "performance_style": "energetic upbeat",
+    }
+
+    spec = await derive_creator_voice_spec_tool(ctx, profile=profile)
+    assert spec["vocal_presentation"] == "feminine"
+    assert spec["energy"] == "high"
+
+    batch = await design_creator_voice_tool(ctx, spec=spec)
+    assert len(batch["candidates"]) == 3
+
+    finalized = await finalize_creator_voice_tool(
+        ctx,
+        candidate_id=batch["candidates"][0]["candidate_id"],
+        batch=batch,
+        creator_id="creator-0",
+    )
+    assert finalized["selected_candidate_id"] == batch["candidates"][0]["candidate_id"]
+    assert "creator-0" in finalized["voice_ref"]

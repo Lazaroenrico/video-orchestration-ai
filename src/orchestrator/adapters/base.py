@@ -214,11 +214,39 @@ class CreatorPort(Protocol):
 
 @runtime_checkable
 class VoicePort(Protocol):
-    """Sub-adapter de voz do creator."""
+    """Sub-adapter de voz do creator (legado)."""
 
     async def create_voice(
         self, index: int, voice_profile: Optional[VoiceProfile] = None
     ) -> str: ...
+
+    async def synthesize_voiceover(
+        self,
+        *,
+        voice_ref: str,
+        text: str,
+    ) -> Artifact: ...
+
+
+@runtime_checkable
+class VoiceDesignPort(Protocol):
+    """Sub-adapter para Voice Design + síntese ElevenLabs."""
+
+    async def design_voice_candidates(
+        self,
+        spec: Any,
+        *,
+        preview_text: str | None = None,
+    ) -> Any: ...
+
+    async def finalize_voice(
+        self,
+        candidate_id: str,
+        *,
+        batch: Any,
+        creator_id: str,
+        organization_id: str,
+    ) -> Any: ...
 
     async def synthesize_voiceover(
         self,
