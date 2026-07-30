@@ -48,7 +48,12 @@ from orchestrator.tools.assembly import (
 )
 from orchestrator.tools.base import tool_context_from_config
 from orchestrator.tools.concepts import generate_concepts_tool
-from orchestrator.tools.creators import build_creator_tool
+from orchestrator.tools.creators import (
+    build_creator_tool,
+    derive_creator_voice_spec_tool,
+    design_creator_voice_tool,
+    finalize_creator_voice_tool,
+)
 from orchestrator.tools.creator_profiles import design_creator_roster_tool
 from orchestrator.tools.persona import write_persona_tool
 from orchestrator.tools.qc import qc_check_tool
@@ -302,6 +307,7 @@ _REVIEW_CREATOR_FIELDS = frozenset({
     "image_uri",
     "voice_ref",
     "voice_preview_uri",
+    "selected_voice_candidate_id",
     "image",
     "voice",
     "angles",
@@ -315,6 +321,7 @@ _EDITABLE_CREATOR_FIELDS = frozenset({
     "voice_brief",
     "performance_style",
     "exclusions",
+    "selected_voice_candidate_id",
 })
 
 
@@ -615,15 +622,45 @@ async def node_roster(state: dict[str, Any], config: RunnableConfig) -> dict[str
         )
         if creative_profile:
             creator = {**creator, **creative_profile, "id": creative_profile["id"]}
+
+        candidates = []
+        if hasattr(tool_ctx.adapter, "design_voice_candidates"):
+            voice_spec = await execute_stage_tool(
+                config,
+                tool_ctx,
+                catalog_stage="voice_spec",
+                tool_name="derive_creator_voice_spec",
+                tool_fn=derive_creator_voice_spec_tool,
+                profile=creator,
+            )
+            voice_batch = await execute_stage_tool(
+                config,
+                tool_ctx,
+                catalog_stage="voice_candidates",
+                tool_name="design_creator_voice",
+                tool_fn=design_creator_voice_tool,
+                spec=voice_spec,
+            )
+            candidates_raw = voice_batch.get("candidates") if isinstance(voice_batch, dict) else getattr(voice_batch, "candidates", [])
+            candidates = [c.model_dump() if hasattr(c, "model_dump") else c for c in candidates_raw]
+            creator["voice_spec"] = voice_spec if isinstance(voice_spec, dict) else voice_spec.model_dump()
+            creator["voice_candidates"] = candidates
+            if candidates and not creator.get("selected_voice_candidate_id"):
+                creator["selected_voice_candidate_id"] = candidates[0].get("candidate_id")
+
         # Baixa e persiste os bytes (imagem/voz) e reescreve as URIs para caminhos
         # locais servíveis. No-op para mock:// / voice_id (sem rede, sem disco).
         creator = await media_store.persist_creator_media(
             creator, run_id=run_id, media_root=media_root,
             **_persistence(config, storage_key="media_storage"),
         )
-        creator["voice_preview_uri"] = await _build_voice_preview(
-            tool_ctx.adapter, creator, run_id=run_id, media_root=media_root,
-        )
+        if candidates:
+            first_preview = candidates[0].get("preview") if isinstance(candidates[0], dict) else candidates[0]
+            creator["voice_preview_uri"] = first_preview.get("uri") if isinstance(first_preview, dict) else getattr(first_preview, "uri", None)
+        else:
+            creator["voice_preview_uri"] = await _build_voice_preview(
+                tool_ctx.adapter, creator, run_id=run_id, media_root=media_root,
+            )
         # Emite assim que cada creator fica pronto, com a mídia real (imagem + voz),
         # para feedback imediato na UI. No-op fora do contexto de streaming web.
         stream_bus.emit_token({
@@ -843,8 +880,8 @@ async def node_review(state: dict[str, Any], config: RunnableConfig) -> dict[str
     action = decision.get("action", "approve")
     if action == "regenerate":
         target = decision.get("target")
-        if target not in {"concepts", "scripts", "creators"}:
-            raise ValueError("regenerate target must be concepts, scripts, or creators")
+        if target not in {"concepts", "scripts", "creators", "voices"}:
+            raise ValueError("regenerate target must be concepts, scripts, creators, or voices")
         return {
             "review_approved": False,
             "revision_request": {
@@ -871,6 +908,67 @@ async def node_review(state: dict[str, Any], config: RunnableConfig) -> dict[str
         "review_approved": True,
         "revision_request": {},
     }
+
+
+@traced("node.finalize_voices", run_type="chain", step=3)
+async def node_finalize_voices(state: dict[str, Any], config: RunnableConfig) -> dict[str, Any]:
+    """Cria permanentemente a voz aprovada no ElevenLabs para cada creator do roster."""
+    tool_ctx = tool_context_from_config(config)
+    roster = list(state.get("roster") or [])
+    updated_roster = []
+    org_id = config["configurable"].get("organization_id", "default")
+
+    for creator in roster:
+        creator_dict = dict(creator)
+        if creator_dict.get("voice_ref") and creator_dict.get("voice_id"):
+            updated_roster.append(creator_dict)
+            continue
+
+        cand_id = creator_dict.get("selected_voice_candidate_id")
+        candidates = creator_dict.get("voice_candidates") or []
+        if not cand_id and candidates:
+            first = candidates[0]
+            cand_id = first.get("candidate_id") if isinstance(first, dict) else getattr(first, "candidate_id", None)
+
+        desc_hash = hashlib.sha256(str(creator_dict.get("id")).encode()).hexdigest()[:10]
+        batch = {
+            "provider": "elevenlabs",
+            "design_model": "eleven_ttv_v3",
+            "description_hash": desc_hash,
+            "prompt_version": "voice-match-v1",
+            "candidates": candidates,
+            "cost_usd": 0.0,
+        }
+
+        if cand_id and candidates and hasattr(tool_ctx.adapter, "finalize_voice"):
+            finalized = await execute_stage_tool(
+                config,
+                tool_ctx,
+                catalog_stage="finalize_voices",
+                tool_name="finalize_creator_voice",
+                tool_fn=finalize_creator_voice_tool,
+                candidate_id=cand_id,
+                batch=batch,
+                creator_id=creator_dict.get("id", "creator-0"),
+                organization_id=org_id,
+            )
+            voice_ref = (
+                finalized.get("voice_ref")
+                if isinstance(finalized, dict)
+                else getattr(finalized, "voice_ref", f"voice-mock-{creator_dict.get('id')}")
+            )
+        else:
+            voice_ref = (
+                creator_dict.get("voice_id")
+                or creator_dict.get("voice_ref")
+                or f"voice-mock-{creator_dict.get('id')}"
+            )
+
+        creator_dict["voice_ref"] = voice_ref
+        creator_dict["voice_id"] = voice_ref
+        updated_roster.append(creator_dict)
+
+    return {"roster": updated_roster}
 
 
 @traced("node.concept_review", run_type="chain", step=2)

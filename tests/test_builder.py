@@ -95,7 +95,7 @@ def test_top_graph_routes_review_via_conditional_send(pipeline_cfg):
     edges = app.get_graph().edges
     matching = [
         edge for edge in edges
-        if edge.source == "review" and edge.target == "process_item"
+        if edge.source == "finalize_voices" and edge.target == "process_item"
     ]
     assert len(matching) == 1
     assert matching[0].conditional is True

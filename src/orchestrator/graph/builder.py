@@ -31,6 +31,7 @@ from orchestrator.nodes.stages import (
     node_creator_profiles,
     node_drop,
     node_feedback,
+    node_finalize_voices,
     node_persona,
     node_product_demo,
     node_qc,
@@ -205,14 +206,15 @@ def make_fan_out_node():
     return fan_out
 
 
-async def route_after_review(state: dict[str, Any]) -> str | list[Send]:
+async def route_after_review(state: dict[str, Any]) -> str:
     if state.get("review_approved"):
-        return await make_fan_out_node()(state)
+        return "finalize_voices"
     target = (state.get("revision_request") or {}).get("target")
     return {
         "concepts": "concepts",
         "scripts": "scripts",
         "creators": "creator_profiles",
+        "voices": "roster",
     }.get(target, "review")
 
 
@@ -226,11 +228,12 @@ def build_graph(pipeline: dict[str, Any], checkpointer: Optional[Any] = None):
     g.add_node("creator_profiles", node_creator_profiles)
     g.add_node("roster", node_roster)
     g.add_node("review", node_review)
+    g.add_node("finalize_voices", node_finalize_voices)
 
     g.add_node("process_item", make_process_item_node(item_app))
     g.add_node("feedback", node_feedback)
 
-    # Setup -> creative agents -> previews -> one human review -> production fan-out.
+    # Setup -> creative agents -> previews -> one human review -> finalize voices -> production fan-out.
     g.add_edge(START, "concepts")
     g.add_edge("concepts", "scripts")
     g.add_edge("scripts", "creator_profiles")
@@ -240,8 +243,9 @@ def build_graph(pipeline: dict[str, Any], checkpointer: Optional[Any] = None):
     g.add_conditional_edges(
         "review",
         route_after_review,
-        ["concepts", "scripts", "creator_profiles", "review", "process_item"],
+        ["concepts", "scripts", "creator_profiles", "roster", "review", "finalize_voices"],
     )
+    g.add_conditional_edges("finalize_voices", make_fan_out_node(), ["process_item"])
     g.add_edge("process_item", "feedback")
     g.add_edge("feedback", END)
     return g.compile(checkpointer=checkpointer)
