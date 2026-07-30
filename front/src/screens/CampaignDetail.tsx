@@ -97,7 +97,7 @@ export function CreativeReviewPanel({
 
   async function submit(
     action: "approve" | "regenerate",
-    target?: "concepts" | "scripts" | "creators",
+    target?: "concepts" | "scripts" | "creators" | "voices",
   ) {
     if (submitLock.current) return;
     submitLock.current = true;
@@ -275,6 +275,15 @@ export function CreativeReviewPanel({
             onClick={() => submit("regenerate", "creators")}
           >
             Regenerar creators
+          </Button>
+          <Button
+            variant="secondary"
+            icon="refresh"
+            disabled={controlsLocked}
+            loading={activeAction === "regenerate:voices"}
+            onClick={() => submit("regenerate", "voices")}
+          >
+            Regenerar vozes
           </Button>
           <Button
             icon="check"

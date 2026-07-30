@@ -278,7 +278,7 @@ export function useReviewRunV2Mutation() {
       action: "approve" | "regenerate";
       concepts?: EditableConcept[];
       creators?: Creator[];
-      target?: "concepts" | "scripts" | "creators";
+      target?: "concepts" | "scripts" | "creators" | "voices";
       ids?: string[];
       feedback?: string;
       gate?: GateRef | null;

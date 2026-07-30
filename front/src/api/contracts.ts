@@ -16,11 +16,20 @@ export interface QC {
   reasons: string[];
 }
 
+export interface VoiceCandidate {
+  candidate_id: string;
+  preview: Artifact;
+  duration_seconds: number;
+  media_type: string;
+}
+
 export interface Creator {
   id: string;
   image_uri?: string | null;
   voice_ref?: string | null;
   voice_preview_uri?: string | null;
+  voice_candidates?: VoiceCandidate[] | null;
+  selected_voice_candidate_id?: string | null;
   image?: string | null;
   voice?: string | null;
   angles: string[];

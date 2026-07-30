@@ -1217,6 +1217,7 @@ class ReviewCreatorPatch(BaseModel):
     image_uri: Optional[str] = None
     voice_ref: Optional[str] = None
     voice_preview_uri: Optional[str] = None
+    selected_voice_candidate_id: Optional[str] = None
     image: Optional[str] = None
     voice: Optional[str] = None
     angles: Optional[list[str]] = Field(default=None, max_length=20)
@@ -1245,9 +1246,9 @@ class ReviewV2Request(BaseModel):
                 raise ValueError("approve does not accept regeneration fields")
             return self
         if self.action == "regenerate":
-            if self.target not in {"concepts", "scripts", "creators"}:
+            if self.target not in {"concepts", "scripts", "creators", "voices"}:
                 raise ValueError(
-                    "regenerate requires target concepts, scripts, or creators"
+                    "regenerate requires target concepts, scripts, creators, or voices"
                 )
             if self.concepts is not None or self.creators is not None:
                 raise ValueError("regenerate does not accept review edits")

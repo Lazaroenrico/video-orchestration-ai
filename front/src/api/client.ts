@@ -65,7 +65,7 @@ export const api = {
       action: "approve" | "regenerate";
       concepts?: EditableConcept[];
       creators?: Creator[];
-      target?: "concepts" | "scripts" | "creators";
+      target?: "concepts" | "scripts" | "creators" | "voices";
       ids?: string[];
       feedback?: string;
       gate_id?: string;
