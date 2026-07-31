@@ -1,138 +1,194 @@
 # UGC Orchestrator
 
-Motor de orquestração para a pipeline de **AI UGC em escala** (500+ vídeos/semana)
-descrita em `Context.md`. O motor é construído via **TDD** sobre **LangGraph /
-LangChain / LangSmith** e permite misturar adapters reais e mock por papel.
+Motor de orquestração para a pipeline de **AI UGC em escala** (500+ vídeos/semana) descrita em `Context.md`. O motor é construído via **TDD** sobre **LangGraph / LangChain / LangSmith** e permite alternar ou misturar adapters reais e mock por papel.
 
-- `config-mock/` roda dry-run determinístico, sem chamadas externas e custo zero.
-- `config/` é o perfil live atual: LLM + creator + clips PrunaAI P-Video,
-  locução ElevenLabs e montagem FFmpeg + QC de integridade, sem mock nos papéis runtime.
+A API/UI V2 expõe a pipeline em **5 Fases Operacionais**:
+1. **Configuração** — Parâmetros iniciais da campanha, oferta, platforming e batch size.
+2. **Plano Criativo** — Geração de conceitos e scripts via LLM + definição da persona/aparência do criador.
+3. **Revisão (Human Gate V2)** — Gate único de aprovação criativa com edição de conceitos e preview/reroll de vozes dos criadores.
+4. **Produção e QC** — Geração paralela de vídeos com tier routing de modelos (custo vs. qualidade) e QC automatizado de áudio/vídeo.
+5. **Montagem** — Síntese final da locução (ElevenLabs) e montagem de áudio/vídeo (FFmpeg) gerando o produto final em estado `assembled`.
 
-## Pipeline (9 passos)
+*(Nota: Distribuição e postagem automática em redes sociais estão fora do escopo do orquestrador; o estado terminal aprovado do vídeo é `assembled`.)*
 
-1. Conceitos (Claude) · 2. Scripts (Claude) · 3. Creator reutilizável (GPT Image 2 + ElevenLabs) ·
-4. Talking-head (PrunaAI P-Video) · 5. Product demo (PrunaAI P-Video) · 6. Execução paralela ·
-7. QC · 8. Locução (ElevenLabs Turbo v2.5) · 9. Montagem (FFmpeg) · 10. Loop de feedback.
+---
 
-O motor termina em **montagem**: item aprovado é item que passou no QC e gerou
-`assembled`. Distribuição/postagem saiu do escopo do produto.
+## Perfis de Configuração (`config*`)
 
-Cada passo é um node num `StateGraph` do LangGraph. Os adapters de provedores são
-abstraídos por protocols e ligados por `config/providers.yaml`, sem mexer no grafo.
+O orquestrador suporta três perfis de execução configuráveis:
 
-## Setup
+- **`config-mock/`** — Execução determinística local, sem chamadas de rede externas e custo zero (ideal para desenvolvimento offline e suíte de testes).
+- **`config-staging/`** — Provedores AI em modo mock, porém utilizando a infraestrutura real de persistência e filas (PostgreSQL, R2/S3, outbox e Runner worker). Usado por padrão no desenvolvimento local durável.
+- **`config/`** — Perfil live completo com adapters reais de LLM (Vercel AI Gateway / OpenAI / Claude), Criadores (GPT Image 2 + Topaz + ElevenLabs), Vídeo (PrunaAI P-Video / Replicate), QC de áudio/vídeo e Montagem local via FFmpeg. Em ambiente durável, adapters pagos exigem a variável `ORCH_ENABLE_PAID_ADAPTERS=true`.
+
+---
+
+## Setup e Requisitos
+
+### Pré-requisitos
+- Python 3.12+
+- `uv` (gerenciador de pacotes Python)
+- Node.js LTS + `npm` (para a SPA em `front/`)
+- Docker & Docker Compose (para ambiente local durável com PostgreSQL 16)
+
+### Instalação
 
 ```bash
+# Clone o repositório e configure a venv
 uv venv --python 3.12
 uv pip install -e ".[dev]"
-npm install  # necessário apenas se habilitar o adapter de vídeo Vercel opt-in
+
+# Instale dependências do frontend (opcional para rodar somente a CLI)
+cd front && npm install && npm run build && cd ..
 ```
 
-## Uso
+---
+
+## Desenvolvimento Local com um Comando
+
+O projeto inclui o utilitário `./scripts/dev-local` para subir toda a stack em containers (PostgreSQL 16, migrações Alembic, API FastAPI com Runner embutido e dev server do Vite com hot-reload):
 
 ```bash
-orchestrator run --batch 12 --offer "serum X" --config-dir config-mock  # dry-run sem rede
-orchestrator status <run_id> --config-dir config-mock                   # relatório do run
-orchestrator resume <run_id> --config-dir config-mock                   # retoma no mesmo thread_id
-orchestrator list                                                   # lista runs
-orchestrator loop --cycles 3 --feedback-store fb.json --config-dir config-mock  # loop de feedback mock
-```
-
-## Desenvolvimento local com um comando
-
-```bash
+# 1. Copie o arquivo de variáveis de ambiente
 cp .env.example .env
-# preencha no .env:
-# AI_GATEWAY_API_KEY, REPLICATE_API_TOKEN, REPLICATE_ELEVENLABS_MODEL,
-# R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY e R2_BUCKET
+
+# 2. Suba o ambiente de desenvolvimento local
 ./scripts/dev-local up
 ```
 
-O comando detecta Docker Compose V2 ou V1, valida a configuração sem imprimir
-secrets e sobe PostgreSQL 16, migrações, API com runner embutido e Vite com hot
-reload. Acesse:
+Serviços disponibilizados:
+- **Aplicação Web / Dashboard**: `http://localhost:5173` (Vite dev server)
+- **API FastAPI / Readiness**: `http://localhost:8000/readyz`
+- **PostgreSQL**: `127.0.0.1:55432`
 
-- aplicação: `http://localhost:5173`
-- API/readiness: `http://localhost:8000/readyz`
-- PostgreSQL: `127.0.0.1:55432`
-
-Dentro dos containers, `DATABASE_URL` e `MIGRATION_DATABASE_URL` sempre apontam
-para o PostgreSQL local; qualquer URL de banco existente no `.env` é ignorada. O
-R2 é o storage padrão e continua externo ao ciclo de vida do Compose. Para parar
-preservando o banco ou zerar todos os volumes locais:
+Para encerrar o ambiente preservando os dados ou limpar todos os volumes locais:
 
 ```bash
 ./scripts/dev-local down
-./scripts/dev-local reset --yes  # não remove objetos do R2
+./scripts/dev-local reset --yes
 ```
 
-O default usa `config/`: Vercel AI Gateway para LLM e GPT Image 2; Replicate para
-ElevenLabs e os dois clips; FFmpeg local para concatenação e áudio; R2 para os
-bytes. Os clips usam `prunaai/p-video` em draft 1080p (`US$ 0,01/s`) durante a
-validação E2E. A montagem não faz uma terceira geração paga.
-Adapters pagos estão
-habilitados, mas só há custo quando uma campanha é iniciada. Para validar toda a
-infra sem geração paga, use o perfil staging; para trocar também o storage por
-filesystem local, use o override explícito:
+---
+
+## Dashboard Web ("Kinetic Command")
+
+Interface SPA desenvolvida em **React 19 + TypeScript + Vite + Tailwind CSS** localizada em `front/`, consumindo a API REST e stream de eventos SSE em tempo real. Utiliza **TanStack Query** com persistência em `localStorage` para navegação instantânea e cache resiliente.
+
+Possui **12 telas operacionais**:
+- **Dashboard**: Métricas gerais, campanhas ativas, atalhos de retry e progresso em tempo real.
+- **Campaigns**: Gestão, busca e filtros de todas as campanhas executadas.
+- **Campaign Detail**: Visualização do progresso, Human Gate V2 (aprovação criativa e reroll de voz) e Retry manual de campanhas falhadas.
+- **Create Campaign**: Wizard de criação de novas campanhas.
+- **Concepts & Scripts**: Galeria de conceitos criados e seus respectivos roteiros.
+- **Creators Library**: Biblioteca de personas de criadores gerados.
+- **Job Queue**: Fila de execução de jobs duráveis do PostgreSQL/Runner.
+- **Video Review & QC**: Central de revisão de vídeos gerados e relatório do QC.
+- **Integrations**: Status de conexão com os provedores de IA.
+- **Analytics**: Desempenho e taxa de aprovação/rejeição.
+- **Settings**: Configurações da plataforma e chaves.
+- **Publishing Calendar**: Calendário de agendamento visual (out-of-scope para postagem direta).
+
+### Desenvolvimento Frontend
 
 ```bash
-ORCH_DEV_CONFIG_DIR=config-staging ./scripts/dev-local up
-ORCH_DEV_CONFIG_DIR=config-staging ORCH_DEV_STORAGE_BACKEND=local \
-  ./scripts/dev-local up
+cd front
+npm run typecheck    # Checagem de tipos com tsc
+npm run build        # Build de produção para front/dist/
+npm run dev          # Server de dev Vite com proxy para o backend em :8000
 ```
 
-O roteiro live é limitado a 35 palavras/14 segundos. Após o QC, a voz aprovada
-gera `voiceover`, e o FFmpeg produz um MP4 vertical de 16 segundos com H.264/AAC.
-O primeiro run live deve usar batch 1. O banco persiste runs, jobs, gates,
-eventos, checkpoints e retries; ponteiros de mídia permanecem `r2://` no estado e
-as respostas REST/SSE geram URLs assinadas somente na saída.
+`front/dist` e `front/node_modules` são mantidos no `.gitignore`. O FastAPI serve automaticamente `front/dist/index.html` em `GET /` quando ele é compilado.
 
-Passo a passo completo, com a saída esperada de cada comando e como lê-la:
-**[`docs/DEMO.md`](docs/DEMO.md)**.
+---
 
-## Dashboard web ("Kinetic Command")
+## Uso da CLI (`orchestrator`)
 
-A UI é uma **SPA React (Vite + TypeScript + Tailwind)** em `front/`, buildada para
-`front/dist/` e servida pelo FastAPI. São 12 telas navegáveis (Dashboard, Campaigns,
-Campaign Detail com gate de aprovação de creators + reroll de voz, Create Campaign,
-Concepts & Scripts, Creators Library, Job Queue, Video Review & QC, Integrations,
-Analytics, Settings, Publishing Calendar), ligadas a dados reais via `/api/*` + SSE
-onde há backend.
+O executável `orchestrator` fornece comandos para execução offline, gestão de banco de dados e disparo do runner worker.
 
-A tela Concepts & Scripts hidrata runs checkpointados via `/api/state/{run_id}`, então
-ela não depende só do stream SSE em memória. Na galeria de creators, `Draft Video with
-<creator>` inicia um novo run com o creator selecionado como roster fixo e abre
-`/scripts?run=<novo_run_id>` para revisão/edição antes de gerar vídeo.
+### Comandos de Pipeline
+```bash
+# Roda uma pipeline em dry-run (config-mock)
+orchestrator run --batch 12 --offer "serum X" --config-dir config-mock
+
+# Roda múltiplos ciclos encadeados com feedback loop (close-the-loop)
+orchestrator loop --cycles 3 --feedback-store fb.json --config-dir config-mock
+
+# Exibe o status e relatório de um run pelo ID
+orchestrator status <run_id> --config-dir config-mock
+
+# Retoma a execução de um run a partir do checkpointer
+orchestrator resume <run_id> --config-dir config-mock
+
+# Lista os IDs de runs armazenados
+orchestrator list
+```
+
+### Comandos de Servidor e Workers (OCI / Durável)
+```bash
+# Inicia a API REST + SSE FastAPI + SPA
+orchestrator api --port 8000
+
+# Worker durável: consome 1 job pendente da fila PostgreSQL
+orchestrator runner --once
+
+# Servidor interno de launcher para containers runner
+orchestrator runner-service
+
+# Consumidor de filas SQS/Cloudflare que dispara jobs duráveis do PostgreSQL
+orchestrator sqs-runner
+```
+
+### Administrador de Banco de Dados e Migrações
+```bash
+# Executa as migrações Alembic no PostgreSQL (ou configura SQLite/ArtifactDB local)
+orchestrator migrate
+
+# Importa dados e mídias legadas de SQLite/JSON para o PostgreSQL/R2 de forma idempotente
+orchestrator import-legacy --apply
+
+# Gestão de organizações e permissões (multi-tenant)
+orchestrator db org-create --slug acme --name "Acme Corp"
+orchestrator db membership-grant --user-id <usr_id> --org-id <org_id> --role admin
+
+# Diagnóstico operacional e manutenção
+orchestrator ops inspect-run <run_id>
+orchestrator ops maintain --purge-expired
+orchestrator storage migrate-run <run_id>
+```
+
+---
+
+## Arquitetura e Engenharia
+
+- **Engine de Orquestração**: **LangGraph** (`StateGraph` assíncrono com suporte a fan-out paralelo `Send` e conditional routing para Tier Routing de vídeo e QC loop).
+- **Checkpointer Resumível**: `AsyncPostgresSaver` com **Row Level Security (RLS)** habilitado por `organization_id` no PostgreSQL, garantindo isolamento multi-tenant completo.
+- **Pattern Outbox & Workers**: Concorrência otimista nos jobs (`FOR UPDATE SKIP LOCKED`), leases com heartbeat de 30s e isolamento por `PostgresEffectLedger` para impedir cobranças duplicadas em provedores pagos.
+- **Gate Humano V2**: Ponto único de interrupção (`review_creative_plan`). A aprovação/edição é enviada via `POST /api/v2/runs/{run_id}/review` com verificação de versão para evitar conflitos de concorrência (*stale gate rejection*).
+- **Forks Limpos para Retry**: Repetir uma campanha em erro gera um novo ID de campanha (`web-...`) mantendo o registro original intacto para fins de auditoria.
+
+---
+
+## Testes (TDD Estrito)
+
+A suíte de testes garante 100% de integridade funcional. É uma regra do projeto **nunca afrouxar asserções** para obter testes verdes.
 
 ```bash
-cd front && npm install && npm run build   # gera front/dist (servido em GET /)
-orchestrator serve                         # dashboard em http://localhost:8000/
-cd front && npm run dev                    # dev: Vite faz proxy /api,/media,/videos -> :8000
+# Executar a suíte de testes backend via rtk proxy
+rtk proxy python -m pytest --no-cov tests/
+
+# Executar testes do LLM Judge usando cassette (CI/offline)
+rtk proxy python -m pytest tests/test_judge_eval.py
+
+# Executar testes do LLM Judge contra o gateway real (regrava cassette)
+rtk proxy python -m pytest tests/test_judge_eval.py --live
 ```
 
-`front/dist` e `front/node_modules` são gitignored — builde a SPA antes de `orchestrator
-serve` (sem o build, `GET /` devolve uma página de fallback instruindo a rodar `npm run
-build`, o que mantém o CI sem Node verde). Endpoints principais: `POST /api/run`,
-`GET /api/stream/{run_id}` (SSE), `GET /api/state/{run_id}`, `POST /api/approve/{run_id}`,
-`GET /api/creators`, `GET /api/prompts`, `GET /api/integrations`, `GET /api/runs`,
-`GET /api/status/{run_id}`.
+---
 
-## Testes (TDD)
+## Documentação Adicional
 
-```bash
-pytest                                    # toda a suíte (determinística, sem rede)
-pytest tests/test_judge_eval.py           # LLM Judge via cassette (CI)
-pytest tests/test_judge_eval.py --live    # LLM Judge contra o gateway real (regrava cassette)
-```
-
-**Regra de integridade dos testes:** se um teste falha, investiga-se a causa raiz e corrige-se o
-código — nunca se afrouxa a asserção só para passar. Ver `CLAUDE.md`.
-
-## Documentação
-
-- `CLAUDE.md` — guia para sessões do Claude Code (stack, convenções, regra dos testes).
-- `docs/DECISIONS.md` — log de todas as decisões + rationale.
-- `docs/PLAN-CREATOR-VOICE-DESIGN.md` — plano para derivar e aprovar a voz de cada
-  creator sem pools de IDs no `.env`.
-- `docs/PROGRESS.md` — handoff: o que está feito, o que falta, próximo passo.
-# video-orchestration-ai
+- `AGENTS.md` — Regras do agente, arquitetura de nodes e convenções do projeto.
+- `Context.md` — Visão conceitual e operacional da pipeline de AI UGC em escala.
+- `docs/DECISIONS.md` — Registro de Decisões de Arquitetura (ADRs).
+- `docs/PROGRESS.md` — Log detalhado de progresso e correções Red → Green.
+- `docs/DEMO.md` — Passo a passo detalhado de demonstração e saída de comandos.
