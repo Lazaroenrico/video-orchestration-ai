@@ -733,3 +733,41 @@ Datas absolutas. Apendar novas decisões ao final.
 - **Consequência:** o piso de vídeo volta a 0,16 USD por item (dois clips Pruna),
   acrescido apenas do TTS. FFmpeg/ffprobe tornam-se dependências de readiness e da
   imagem runtime.
+
+## 2026-08-03
+
+### D44 — Voice Design direto da ElevenLabs antes do único gate humano
+
+- **Contexto:** D43 ainda escolhia uma voz de pool e sintetizava TTS pelo Replicate.
+  Isso não oferecia três alternativas audíveis na revisão, misturava a identidade
+  permanente da voz com a URL temporária do preview e não protegia as chamadas pagas
+  contra replay em execução durável.
+- **Decisão de fluxo:** o perfil live usa
+  `creator_vercel_elevenlabs_design`. O grafo separa
+  `creator_profiles → roster → voice_candidates → review → finalize_voices`.
+  `voice_candidates` chama `eleven_ttv_v3`, materializa de um a três previews e os
+  persiste antes do checkpoint. O único gate continua `review_creative_plan`; ele
+  exige uma seleção pertencente ao mesmo creator. Somente depois da aprovação a voz
+  escolhida é criada e usada no TTS `eleven_turbo_v2_5`.
+- **Revisão:** `ReviewCreatorPatch` contém apenas ID, campos criativos editáveis e
+  `selected_voice_candidate_id`. Editar `voice_brief` invalida candidatos/seleção.
+  `regenerate target=voices` aceita IDs de creators do gate atual, volta somente a
+  `voice_candidates` e preserva imagens, assignments, conceitos e scripts. O limite
+  é de dois rerolls por creator; candidatos antigos ficam apenas no histórico.
+- **Durabilidade:** chamadas diretas pagas usam `PostgresEffectLedger`, opt-in por
+  `ORCH_ENABLE_PAID_ADAPTERS=true` e três quotas independentes:
+  `elevenlabs_voice_design_chars`, `elevenlabs_voice_slots` e
+  `elevenlabs_tts_chars`. Replay concluído reutiliza o resultado. Falha pré-envio
+  comprovada pode liberar quota; timeout pós-envio fica `uncertain`. Finalização
+  incerta reconcilia pelo nome determinístico e bloqueia sem correspondência única.
+- **Persistência e custo:** a migração `20260729_0010` permanece imutável. ORM e
+  repositório mapeiam spec, provider, modelos, hash, candidato, status e metadata.
+  Banco/estado guardam somente URIs canônicas; base64 e signed URLs são transitórios.
+  Custos estimados ficam no YAML: 0,01 USD por candidato e 0,03 USD por mil caracteres,
+  com `cost_source=estimate`; o resumo separa `voice_design` e `voiceover` sem duplicar
+  no resume.
+- **Compatibilidade:** `config-mock` e `config-staging` continuam offline,
+  determinísticos e com custo zero. Aliases antigos permanecem somente para leitura de
+  configuração legada; `/readyz` exige `ELEVENLABS_API_KEY` apenas quando o provider
+  direto está selecionado. D43 fica substituída somente no transporte/seleção de voz;
+  seus contratos de locução aprovada e montagem FFmpeg continuam válidos.

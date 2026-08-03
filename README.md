@@ -19,7 +19,7 @@ O orquestrador suporta três perfis de execução configuráveis:
 
 - **`config-mock/`** — Execução determinística local, sem chamadas de rede externas e custo zero (ideal para desenvolvimento offline e suíte de testes).
 - **`config-staging/`** — Provedores AI em modo mock, porém utilizando a infraestrutura real de persistência e filas (PostgreSQL, R2/S3, outbox e Runner worker). Usado por padrão no desenvolvimento local durável.
-- **`config/`** — Perfil live completo com adapters reais de LLM (Vercel AI Gateway / OpenAI / Claude), Criadores (GPT Image 2 + Topaz + ElevenLabs), Vídeo (PrunaAI P-Video / Replicate), QC de áudio/vídeo e Montagem local via FFmpeg. Em ambiente durável, adapters pagos exigem a variável `ORCH_ENABLE_PAID_ADAPTERS=true`.
+- **`config/`** — Perfil live completo com adapters reais de LLM (Vercel AI Gateway / OpenAI / Claude), creators (GPT Image 2 + Voice Design direto da ElevenLabs), vídeo (PrunaAI P-Video / Replicate), QC de áudio/vídeo e montagem local via FFmpeg. Em ambiente durável, adapters pagos exigem `ORCH_ENABLE_PAID_ADAPTERS=true`, ledger PostgreSQL e quotas configuradas.
 
 ---
 
@@ -77,7 +77,7 @@ Interface SPA desenvolvida em **React 19 + TypeScript + Vite + Tailwind CSS** lo
 Possui **12 telas operacionais**:
 - **Dashboard**: Métricas gerais, campanhas ativas, atalhos de retry e progresso em tempo real.
 - **Campaigns**: Gestão, busca e filtros de todas as campanhas executadas.
-- **Campaign Detail**: Visualização do progresso, Human Gate V2 (aprovação criativa e reroll de voz) e Retry manual de campanhas falhadas.
+- **Campaign Detail**: Visualização do progresso, Human Gate V2 com três previews de voz por creator, seleção/reroll de voz e retry manual de campanhas falhadas.
 - **Create Campaign**: Wizard de criação de novas campanhas.
 - **Concepts & Scripts**: Galeria de conceitos criados e seus respectivos roteiros.
 - **Creators Library**: Biblioteca de personas de criadores gerados.
@@ -150,6 +150,11 @@ orchestrator import-legacy --apply
 orchestrator db org-create --slug acme --name "Acme Corp"
 orchestrator db membership-grant --user-id <usr_id> --org-id <org_id> --role admin
 
+# Quotas operacionais do Voice Design/TTS direto (uma chamada por comando)
+orchestrator db set-voice-quota --bucket elevenlabs_voice_design_chars --limit-units 100000
+orchestrator db set-voice-quota --bucket elevenlabs_voice_slots --limit-units 20
+orchestrator db set-voice-quota --bucket elevenlabs_tts_chars --limit-units 500000
+
 # Diagnóstico operacional e manutenção
 orchestrator ops inspect-run <run_id>
 orchestrator ops maintain --purge-expired
@@ -164,6 +169,8 @@ orchestrator storage migrate-run <run_id>
 - **Checkpointer Resumível**: `AsyncPostgresSaver` com **Row Level Security (RLS)** habilitado por `organization_id` no PostgreSQL, garantindo isolamento multi-tenant completo.
 - **Pattern Outbox & Workers**: Concorrência otimista nos jobs (`FOR UPDATE SKIP LOCKED`), leases com heartbeat de 30s e isolamento por `PostgresEffectLedger` para impedir cobranças duplicadas em provedores pagos.
 - **Gate Humano V2**: Ponto único de interrupção (`review_creative_plan`). A aprovação/edição é enviada via `POST /api/v2/runs/{run_id}/review` com verificação de versão para evitar conflitos de concorrência (*stale gate rejection*).
+- **Voice Design direto**: O provider live `creator_vercel_elevenlabs_design` gera até três candidatos com `eleven_ttv_v3`, persiste os previews antes do gate e cria a voz permanente somente após a seleção. Editar `voice_brief` invalida a seleção; cada creator aceita no máximo dois rerolls.
+- **Idempotência paga**: Voice Design, finalização e TTS usam chaves de efeito estáveis no `PostgresEffectLedger`. Replay concluído reutiliza o resultado; timeout pós-envio fica `uncertain` e não libera quota automaticamente.
 - **Forks Limpos para Retry**: Repetir uma campanha em erro gera um novo ID de campanha (`web-...`) mantendo o registro original intacto para fins de auditoria.
 
 ---
