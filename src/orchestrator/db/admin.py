@@ -2,19 +2,14 @@
 from __future__ import annotations
 
 from psycopg import Connection, sql
-
-from orchestrator.db.tenancy import TenantIdentity
-
-
-RUNTIME_ROLE = "orchestrator_runtime"
-MEMBERSHIP_ROLES = ("owner", "admin", "member", "viewer")
-
-
 from sqlalchemy import create_engine, delete, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from orchestrator.db.models import Organization, OrganizationMember, User
+from orchestrator.db.tenancy import TenantIdentity
 
+RUNTIME_ROLE = "orchestrator_runtime"
+MEMBERSHIP_ROLES = ("owner", "admin", "member", "viewer")
 
 
 def provision_runtime_role(database_url: str, password: str) -> None:

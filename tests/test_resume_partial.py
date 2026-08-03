@@ -21,7 +21,6 @@ from orchestrator.graph.builder import build_graph
 from orchestrator.graph.checkpoint import open_checkpointer
 from orchestrator.graph.state import Artifact
 
-
 # ---------------------------------------------------------------------------
 # FlakyAdapter: falha exatamente UMA VEZ — na 3ª chamada a generate_clip
 # (após o item-0 completar as suas 2 chamadas: gen_tier + demo)
@@ -216,7 +215,7 @@ async def test_resume_partial_batch(tmp_path):
     #
     # Documentamos o comportamento observado sem mascarar.
     items_rerun_in_resume = calls_resume // _CALLS_PER_ITEM
-    items_not_rerun = BATCH_SIZE - items_rerun_in_resume
+    items_not_rerun = BATCH_SIZE - items_rerun_in_resume  # noqa: F841
 
     # Invariante: o resume não deve produzir mais execuções do que o batch inteiro
     assert calls_resume <= BATCH_SIZE * _CALLS_PER_ITEM, (
