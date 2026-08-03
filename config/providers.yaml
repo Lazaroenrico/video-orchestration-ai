@@ -4,8 +4,8 @@
 # nenhum papel runtime ausente.
 adapters:
   llm: vercel_gateway_llm  # ✅ Claude via Vercel Gateway (AI_GATEWAY_API_KEY configurada)
-  creator: creator_vercel_replicate_voice  # imagem Vercel; voz via ElevenLabs no Replicate
-  video: replicate              # clips PrunaAI P-Video via Replicate; áudio fica para etapa posterior
+  creator: creator_vercel_elevenlabs_design  # imagem Vercel; Voice Design direto ElevenLabs
+  video: replicate           # clips PrunaAI P-Video via Replicate; áudio fica para etapa posterior
   qc: integrity_qc              # checa mídia real e bloqueia mock/fallback antes da montagem
   assembly: ffmpeg_assembly     # concatena os 2 clips e muxa a locução; custo zero
   upscale: passthrough_upscale  # upscale do vídeo final (não da imagem); no-op até plugar upscaler de vídeo real

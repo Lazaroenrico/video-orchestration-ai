@@ -8,20 +8,20 @@ qc:
   max_attempts: 3           # tentativas antes de descartar um item (Step 7 regen loop)
   fail_rate: 0.34           # fração determinística reprovada no mock (exercita o loop)
 
-# Roteamento + custo por tier (Step 4 / "The Cost at Scale" do Context.md).
-# Tentativas escalam o tier: 1ª LTX, 2ª Kling, 3ª Seedance (cheap -> premium).
+# Tiers determinísticos para exercitar routing/QC com adapters mock. O staging nunca
+# atribui custo operacional, mesmo quando o fluxo percorre um tier com nome premium.
 tiers:
   - name: ltx
     model: lightricks/ltx-2.3-fast
-    cost_per_second: 0.01
+    cost_per_second: 0.0
     max_concurrency: 16     # barato: alta concorrência (bulk de testes)
   - name: kling
     model: kling-3.0
-    cost_per_second: 0.10
+    cost_per_second: 0.0
     max_concurrency: 6      # sinal: reprodução mais limpa
   - name: seedance
     model: seedance-2.0
-    cost_per_second: 0.168
+    cost_per_second: 0.0
     max_concurrency: 2      # premium: vencedores, baixa concorrência
 
 clip:
@@ -36,8 +36,8 @@ roster:
   creators: 2               # quantos creators reutilizáveis no roster (Step 3)
 
 voice:
-  mode: designed
-  provider: elevenlabs
+  mode: mock
+  provider: mock
   design_model: eleven_ttv_v3
   tts_model: eleven_turbo_v2_5
   language_code: pt-BR

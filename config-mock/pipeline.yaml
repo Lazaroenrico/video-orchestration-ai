@@ -36,8 +36,8 @@ roster:
   creators: 2               # quantos creators reutilizáveis no roster (Step 3)
 
 voice:
-  mode: designed
-  provider: elevenlabs
+  mode: mock
+  provider: mock
   design_model: eleven_ttv_v3
   tts_model: eleven_turbo_v2_5
   language_code: pt-BR

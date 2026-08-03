@@ -67,3 +67,11 @@ voice:
   preview_text_version: pt-br-ugc-v1
   request_timeout_seconds: 120
   concurrency: 1
+  retry:
+    max_retries: 3
+    backoff_base_seconds: 1
+    max_delay_seconds: 60
+  costs:
+    design_per_candidate_usd: 0.01
+    tts_per_1000_chars_usd: 0.03
+    cost_source: estimate
