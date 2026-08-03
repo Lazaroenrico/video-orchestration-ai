@@ -16,7 +16,13 @@ import {
 import { HttpError } from "../api/client";
 import { mediaUrl } from "../api/urls";
 import { creatorVoiceUri } from "../api/media";
-import type { Creator, EditableConcept, GateRef, Item } from "../types";
+import type {
+  Creator,
+  EditableConcept,
+  GateRef,
+  Item,
+  ReviewCreatorPatch,
+} from "../types";
 import { shortRun, usd, pct } from "../lib/format";
 
 function phasePill(phase: RunPhase): { status: Status; label: string } {
@@ -57,6 +63,24 @@ function stageLabel(stage: string): string {
     .join(" ");
 }
 
+function editableCreatorPatch(creator: Creator): ReviewCreatorPatch {
+  const patch: ReviewCreatorPatch = { id: creator.id };
+  for (const key of [
+    "archetype",
+    "visual_brief",
+    "voice_brief",
+    "performance_style",
+    "exclusions",
+    "selected_voice_candidate_id",
+  ] as const) {
+    const value = creator[key];
+    if (value !== undefined && value !== null) {
+      Object.assign(patch, { [key]: value });
+    }
+  }
+  return patch;
+}
+
 export function CreativeReviewPanel({
   runId,
   initialConcepts,
@@ -71,6 +95,9 @@ export function CreativeReviewPanel({
   const review = useReviewRunV2Mutation();
   const [concepts, setConcepts] = useState(initialConcepts);
   const [creators, setCreators] = useState(initialCreators);
+  const [staleVoiceBriefs, setStaleVoiceBriefs] = useState<Set<string>>(
+    new Set(),
+  );
   const [feedback, setFeedback] = useState("");
   const [error, setError] = useState<string | null>(null);
   const submitLock = useRef(false);
@@ -90,7 +117,28 @@ export function CreativeReviewPanel({
   function editCreator(index: number, key: string, value: string) {
     setCreators((current) =>
       current.map((creator, position) =>
-        position === index ? { ...creator, [key]: value } : creator,
+        position === index
+          ? {
+              ...creator,
+              [key]: value,
+              ...(key === "voice_brief"
+                ? { selected_voice_candidate_id: null }
+                : {}),
+            }
+          : creator,
+      ),
+    );
+    if (key === "voice_brief") {
+      setStaleVoiceBriefs((current) => new Set(current).add(creators[index].id));
+    }
+  }
+
+  function selectVoice(index: number, candidateId: string) {
+    setCreators((current) =>
+      current.map((creator, position) =>
+        position === index
+          ? { ...creator, selected_voice_candidate_id: candidateId }
+          : creator,
       ),
     );
   }
@@ -105,13 +153,25 @@ export function CreativeReviewPanel({
     setActiveAction(action === "approve" ? action : `${action}:${target}`);
     setError(null);
     try {
+      const creatorPatches = creators.map(editableCreatorPatch);
+      const ids =
+        target === "concepts" || target === "scripts"
+          ? concepts.map((concept) => String(concept.id))
+          : creators.map((creator) => creator.id);
       await review.mutateAsync({
         runId,
         action,
         gate,
         ...(action === "approve"
-          ? { concepts, creators }
-          : { target, feedback: feedback.trim() }),
+          ? { concepts, creators: creatorPatches }
+          : {
+              target,
+              ids,
+              feedback: feedback.trim(),
+              ...(target === "creators" || target === "voices"
+                ? { creators: creatorPatches }
+                : { concepts }),
+            }),
       });
       setSubmission("accepted");
     } catch (caught) {
@@ -148,6 +208,16 @@ export function CreativeReviewPanel({
   }
 
   const controlsLocked = submission === "submitting";
+  const allVoicesSelected = creators.every((creator) => {
+    if (staleVoiceBriefs.has(creator.id)) return false;
+    const candidateIds = new Set(
+      (creator.voice_candidates || []).map((candidate) => candidate.candidate_id),
+    );
+    return Boolean(
+      creator.selected_voice_candidate_id &&
+        candidateIds.has(creator.selected_voice_candidate_id),
+    );
+  });
 
   return (
     <Card className="border-warning-review/30">
@@ -158,9 +228,10 @@ export function CreativeReviewPanel({
         </h3>
         <div className="grid gap-3 sm:grid-cols-2">
           {creators.map((creator, index) => {
-            const voice = creatorVoiceUri(creator);
+            const candidates = creator.voice_candidates || [];
+            const voiceBriefIsStale = staleVoiceBriefs.has(creator.id);
             return (
-              <div key={creator.id} className="grid gap-3 border-b border-surface-border pb-4 sm:grid-cols-[112px_1fr]">
+              <div key={creator.id} className="grid gap-4 border-b border-surface-border pb-5 sm:grid-cols-[112px_1fr]">
                 <div className="aspect-square overflow-hidden rounded-lg bg-surface-container">
                   {(creator.image_uri || creator.image) && (
                     <img
@@ -187,7 +258,62 @@ export function CreativeReviewPanel({
                     placeholder="Estilo de performance"
                     aria-label={`Performance do creator ${index + 1}`}
                   />
-                  {voice && <audio src={mediaUrl(voice)} controls className="h-8 w-full" />}
+                  <textarea
+                    className="hm-field"
+                    rows={2}
+                    value={creator.voice_brief || ""}
+                    onChange={(event) =>
+                      editCreator(index, "voice_brief", event.target.value)
+                    }
+                    placeholder="Direção vocal"
+                    aria-label={`Brief de voz do creator ${index + 1}`}
+                  />
+                  <fieldset className="space-y-2" aria-label={`Vozes do creator ${index + 1}`}>
+                    <legend className="font-label-sm text-label-sm uppercase tracking-[0.12em] text-on-surface-variant">
+                      Escolha uma voz
+                    </legend>
+                    {voiceBriefIsStale && (
+                      <p className="font-label-sm text-label-sm text-warning-review">
+                        Brief alterado — regenere as vozes antes de selecionar.
+                      </p>
+                    )}
+                    {candidates.map((candidate, candidateIndex) => {
+                      const selected =
+                        creator.selected_voice_candidate_id === candidate.candidate_id;
+                      return (
+                        <label
+                          key={candidate.candidate_id}
+                          className={`grid cursor-pointer gap-2 rounded-lg border p-3 transition-colors ${
+                            selected
+                              ? "border-primary bg-primary/5"
+                              : "border-surface-border bg-surface-container-low hover:border-primary/50"
+                          } ${voiceBriefIsStale ? "cursor-not-allowed opacity-55" : ""}`}
+                        >
+                          <span className="flex items-center gap-2 font-label-sm text-label-sm text-primary">
+                            <input
+                              type="radio"
+                              name={`voice-${creator.id}`}
+                              value={candidate.candidate_id}
+                              checked={selected}
+                              disabled={voiceBriefIsStale || controlsLocked}
+                              onChange={() => selectVoice(index, candidate.candidate_id)}
+                            />
+                            Opção {String(candidateIndex + 1).padStart(2, "0")}
+                            <span className="ml-auto text-on-surface-variant">
+                              {candidate.duration_seconds.toFixed(1)}s
+                            </span>
+                          </span>
+                          <audio
+                            src={mediaUrl(candidate.preview.uri)}
+                            controls
+                            preload="metadata"
+                            className="h-8 w-full"
+                            onClick={(event) => event.stopPropagation()}
+                          />
+                        </label>
+                      );
+                    })}
+                  </fieldset>
                 </div>
               </div>
             );
@@ -287,7 +413,7 @@ export function CreativeReviewPanel({
           </Button>
           <Button
             icon="check"
-            disabled={controlsLocked}
+            disabled={controlsLocked || !allVoicesSelected}
             loading={activeAction === "approve"}
             onClick={() => submit("approve")}
           >

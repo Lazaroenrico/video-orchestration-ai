@@ -32,6 +32,21 @@ const creators: Creator[] = [
     angles: ["front"],
     archetype: "Creator",
     performance_style: "Direct",
+    voice_brief: "Warm conversational voice",
+    image_uri: "r2://server-owned/image.png",
+    voice_ref: "server-owned-voice",
+    voice_candidates: [0, 1, 2].map((index) => ({
+      candidate_id: `candidate-${index}`,
+      preview: {
+        kind: "voice_preview",
+        uri: `https://media.test/candidate-${index}.mp3`,
+        media_type: "audio",
+        renderable: true,
+      },
+      duration_seconds: 4,
+      media_type: "audio/mpeg",
+    })),
+    selected_voice_candidate_id: "candidate-0",
   },
 ];
 const gate: GateRef = {
@@ -159,5 +174,51 @@ describe("CreativeReviewPanel", () => {
     expect(
       screen.getByRole("button", { name: /Aprovar e produzir/ }),
     ).toBeEnabled();
+  });
+
+  it("shows every voice candidate, blocks missing selection, and invalidates on brief edits", () => {
+    renderPanel();
+
+    expect(document.querySelectorAll("audio")).toHaveLength(3);
+    const approve = screen.getByRole("button", { name: /Aprovar e produzir/ });
+    expect(approve).toBeEnabled();
+
+    fireEvent.change(screen.getByLabelText("Brief de voz do creator 1"), {
+      target: { value: "Deeper, slower voice" },
+    });
+
+    expect(approve).toBeDisabled();
+    expect(
+      screen.getByText("Brief alterado — regenere as vozes antes de selecionar."),
+    ).toBeInTheDocument();
+    for (const radio of screen.getAllByRole("radio")) {
+      expect(radio).toBeDisabled();
+    }
+  });
+
+  it("submits only editable creator fields and the selected candidate", async () => {
+    reviewMutation.mutateAsync.mockResolvedValue({ ok: true });
+    renderPanel();
+
+    fireEvent.click(screen.getByRole("button", { name: /Aprovar e produzir/ }));
+
+    await waitFor(() => expect(reviewMutation.mutateAsync).toHaveBeenCalledTimes(1));
+    expect(reviewMutation.mutateAsync).toHaveBeenCalledWith(
+      expect.objectContaining({
+        creators: [
+          {
+            id: "creator-1",
+            archetype: "Creator",
+            voice_brief: "Warm conversational voice",
+            performance_style: "Direct",
+            selected_voice_candidate_id: "candidate-0",
+          },
+        ],
+      }),
+    );
+    const submitted = reviewMutation.mutateAsync.mock.calls[0][0].creators[0];
+    expect(submitted).not.toHaveProperty("image_uri");
+    expect(submitted).not.toHaveProperty("voice_ref");
+    expect(submitted).not.toHaveProperty("voice_candidates");
   });
 });

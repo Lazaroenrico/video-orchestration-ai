@@ -43,6 +43,16 @@ export interface Creator {
   exclusions?: string[];
 }
 
+export interface ReviewCreatorPatch {
+  id: string;
+  archetype?: string;
+  visual_brief?: string;
+  voice_brief?: string;
+  performance_style?: string;
+  exclusions?: string[];
+  selected_voice_candidate_id?: string;
+}
+
 export interface Item {
   id: string;
   creator_ref?: string | null;

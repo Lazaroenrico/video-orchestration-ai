@@ -11,6 +11,7 @@ import type {
   Creator,
   EditableConcept,
   GateRef,
+  ReviewCreatorPatch,
   PromptsIndex,
   RunDetail,
   RunSummary,
@@ -277,7 +278,7 @@ export function useReviewRunV2Mutation() {
       runId: string;
       action: "approve" | "regenerate";
       concepts?: EditableConcept[];
-      creators?: Creator[];
+      creators?: ReviewCreatorPatch[];
       target?: "concepts" | "scripts" | "creators" | "voices";
       ids?: string[];
       feedback?: string;

@@ -6,6 +6,7 @@ import type {
   PromptTemplate,
   EditableConcept,
   GateRef,
+  ReviewCreatorPatch,
   RetryRunResponse,
   RunDetail,
   RunSummary,
@@ -64,7 +65,7 @@ export const api = {
     body: {
       action: "approve" | "regenerate";
       concepts?: EditableConcept[];
-      creators?: Creator[];
+      creators?: ReviewCreatorPatch[];
       target?: "concepts" | "scripts" | "creators" | "voices";
       ids?: string[];
       feedback?: string;
