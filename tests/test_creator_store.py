@@ -9,10 +9,8 @@ Espelha test_feedback_store.py:
 from __future__ import annotations
 
 import json
-import pytest
 
 from orchestrator.creator_store import JsonCreatorRepository, load_creators, record_creators
-
 
 # ---------------------------------------------------------------------------
 # Helpers

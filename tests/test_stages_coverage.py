@@ -13,8 +13,7 @@ from orchestrator.adapters.base import RenderedMedia, VoiceProfile
 from orchestrator.adapters.mock import MockAdapter
 from orchestrator.graph.state import Artifact, Item, QCResult, new_item
 from orchestrator.nodes import stages
-from orchestrator.storage.base import StoredObject
-
+from orchestrator.storage.base import StoredObject, is_downloadable
 
 # ------------------------------------------------------------------ #
 # adapters/base.py — VoiceProfile / infer                            #
@@ -168,7 +167,6 @@ async def test_node_roster_seed_reconstructs_reference_from_local_media(tmp_path
     disco) — senão o adapter de vídeo real ignora a referência e gera outra pessoa."""
     import base64
 
-    from orchestrator import media_store
 
     media_root = tmp_path / "media"
     face = media_root / "web-old" / "creator-0" / "image.png"
@@ -203,7 +201,7 @@ async def test_node_roster_seed_reconstructs_reference_from_local_media(tmp_path
     # ser buscável pelo provider — não o path /media local.
     ref = creator["image_source_uri"]
     assert ref.startswith("data:image/png;base64,")
-    assert media_store._is_downloadable(ref)
+    assert is_downloadable(ref)
     assert base64.b64decode(ref.split(",", 1)[1]) == b"\x89PNG\r\n\x1a\nFAKE"
 
 
@@ -639,6 +637,412 @@ async def test_node_review_routes_regeneration_and_rejects_invalid_decisions(mon
     )
     with pytest.raises(ValueError, match="review action"):
         await stages.node_review(state, config)
+
+    voice_state = {
+        "concepts": [{"id": "concept-1"}],
+        "roster": [
+            {
+                "id": "creator-0",
+                "voice_brief": "Warm",
+                "voice_candidates": [{"candidate_id": "candidate-0"}],
+                "selected_voice_candidate_id": "candidate-0",
+            },
+            {
+                "id": "creator-1",
+                "voice_brief": "Direct",
+                "voice_candidates": [{"candidate_id": "candidate-1"}],
+                "selected_voice_candidate_id": "candidate-1",
+            },
+        ],
+    }
+    monkeypatch.setattr(
+        stages,
+        "interrupt",
+        lambda _payload: {
+            "action": "regenerate",
+            "target": "voices",
+            "ids": ["creator-0"],
+            "creators": [
+                {"id": "creator-0", "voice_brief": "Deeper and slower"},
+                {"id": "creator-1", "voice_brief": "Direct"},
+            ],
+        },
+    )
+    reroll = await stages.node_review(voice_state, config)
+    assert reroll["roster"][0]["voice_brief"] == "Deeper and slower"
+    assert reroll["roster"][0]["voice_candidates"] == []
+    assert reroll["roster"][0]["selected_voice_candidate_id"] is None
+    assert reroll["roster"][1]["selected_voice_candidate_id"] == "candidate-1"
+
+
+async def test_node_review_requires_one_valid_voice_candidate_per_creator(monkeypatch):
+    roster = [
+        {
+            "id": f"creator-{index}",
+            "voice_candidates": [
+                {
+                    "candidate_id": f"candidate-{index}",
+                    "preview": {
+                        "kind": "voice_preview",
+                        "uri": f"r2://candidate-{index}.mp3",
+                    },
+                    "duration_seconds": 3.0,
+                }
+            ],
+            "selected_voice_candidate_id": None,
+        }
+        for index in range(2)
+    ]
+    monkeypatch.setattr(stages, "interrupt", lambda _payload: {"action": "approve"})
+
+    with pytest.raises(ValueError, match="select one voice candidate"):
+        await stages.node_review(
+            {"concepts": [{"id": "concept-1"}], "roster": roster},
+            {"configurable": {"run": {"review_plan": True}}},
+        )
+
+
+async def test_node_review_preserves_concept_edits_before_regeneration(monkeypatch):
+    monkeypatch.setattr(
+        stages,
+        "interrupt",
+        lambda _payload: {
+            "action": "regenerate",
+            "target": "scripts",
+            "ids": ["concept-1"],
+            "concepts": [{"id": "concept-1", "script": "Edited before rerun"}],
+        },
+    )
+
+    result = await stages.node_review(
+        {"concepts": [{"id": "concept-1", "script": "Original"}], "roster": []},
+        {"configurable": {"run": {"review_plan": True}}},
+    )
+
+    assert result["concepts"][0]["script"] == "Edited before rerun"
+
+
+async def test_node_finalize_voices_uses_only_selected_candidate(monkeypatch):
+    calls = []
+
+    async def execute(*_args, **kwargs):
+        calls.append(kwargs)
+        return {
+            "provider": "elevenlabs",
+            "voice_ref": "voice-permanent-1",
+            "selected_candidate_id": "candidate-1",
+            "preview_uri": "https://temporary.example/preview.mp3",
+            "design_model": "eleven_ttv_v3",
+            "tts_model": "eleven_turbo_v2_5",
+        }
+
+    monkeypatch.setattr(stages, "execute_stage_tool", execute)
+    candidates = [
+        {
+            "candidate_id": f"candidate-{index}",
+            "preview": {
+                "kind": "voice_preview",
+                "uri": f"r2://bucket/candidate-{index}.mp3",
+            },
+            "duration_seconds": 3.0,
+        }
+        for index in range(2)
+    ]
+    batch = {
+        "provider": "elevenlabs",
+        "design_model": "eleven_ttv_v3",
+        "description_hash": "description-hash",
+        "prompt_version": "voice-match-v1",
+        "candidates": candidates,
+        "cost_usd": 0.02,
+        "cost_source": "estimate",
+    }
+    state = {
+        "roster": [
+            {
+                "id": "creator-0",
+                "voice_candidates": candidates,
+                "voice_design_batch": batch,
+                "selected_voice_candidate_id": "candidate-1",
+            }
+        ],
+        "creator_assignments": [
+            {"concept_id": "concept-0", "creator_id": "creator-0"}
+        ],
+    }
+    config = {
+        "configurable": {
+            "adapter": object(),
+            "organization_id": "org-1",
+            "thread_id": "run-1",
+            "run": {},
+        }
+    }
+
+    result = await stages.node_finalize_voices(state, config)
+
+    assert len(calls) == 1
+    assert calls[0]["candidate_id"] == "candidate-1"
+    creator = result["roster"][0]
+    assert creator["voice_ref"] == "voice-permanent-1"
+    assert creator["voice_id"] == "voice-permanent-1"
+    assert creator["voice_preview_uri"] == "r2://bucket/candidate-1.mp3"
+
+
+async def test_node_finalize_voices_blocks_missing_selection_or_empty_voice(monkeypatch):
+    state = {
+        "roster": [
+            {
+                "id": "creator-0",
+                "voice_candidates": [
+                    {
+                        "candidate_id": "candidate-0",
+                        "preview": {"kind": "voice_preview", "uri": "r2://preview.mp3"},
+                        "duration_seconds": 3.0,
+                    }
+                ],
+            }
+        ],
+        "creator_assignments": [{"creator_id": "creator-0"}],
+    }
+    config = {
+        "configurable": {"adapter": object(), "run": {}, "thread_id": "run-1"}
+    }
+
+    with pytest.raises(ValueError, match="selected voice candidate"):
+        await stages.node_finalize_voices(state, config)
+
+    state["roster"][0]["selected_voice_candidate_id"] = "candidate-0"
+    state["roster"][0]["voice_design_batch"] = {
+        "provider": "elevenlabs",
+        "design_model": "eleven_ttv_v3",
+        "description_hash": "description-hash",
+        "prompt_version": "voice-match-v1",
+        "candidates": state["roster"][0]["voice_candidates"],
+        "cost_usd": 0.01,
+        "cost_source": "estimate",
+    }
+
+    async def empty_voice(*_args, **_kwargs):
+        return {"voice_ref": ""}
+
+    monkeypatch.setattr(stages, "execute_stage_tool", empty_voice)
+    with pytest.raises(ValueError, match="empty voice_ref"):
+        await stages.node_finalize_voices(state, config)
+
+
+async def test_node_finalize_voices_requires_design_batch() -> None:
+    state = {
+        "roster": [
+            {
+                "id": "creator-0",
+                "selected_voice_candidate_id": "candidate-0",
+                "voice_candidates": [
+                    {
+                        "candidate_id": "candidate-0",
+                        "preview": {"uri": "r2://preview.mp3"},
+                    }
+                ],
+            }
+        ]
+    }
+    config = {
+        "configurable": {"adapter": object(), "run": {}, "thread_id": "run-1"}
+    }
+
+    with pytest.raises(ValueError, match="no voice design batch"):
+        await stages.node_finalize_voices(state, config)
+
+
+async def test_node_finalize_voices_requires_canonical_selected_preview(monkeypatch):
+    async def finalize(*_args, **_kwargs):
+        return {"voice_ref": "voice-permanent", "provider": "elevenlabs"}
+
+    monkeypatch.setattr(stages, "execute_stage_tool", finalize)
+    candidate = {"candidate_id": "candidate-0", "preview": {}}
+    state = {
+        "roster": [
+            {
+                "id": "creator-0",
+                "selected_voice_candidate_id": "candidate-0",
+                "voice_candidates": [candidate],
+                "voice_design_batch": {
+                    "description_hash": "hash",
+                    "candidates": [candidate],
+                },
+            }
+        ]
+    }
+    config = {
+        "configurable": {"adapter": object(), "run": {}, "thread_id": "run-1"}
+    }
+
+    with pytest.raises(ValueError, match="no voice preview URI"):
+        await stages.node_finalize_voices(state, config)
+
+
+async def test_node_finalize_voices_blocks_missing_assigned_creator(monkeypatch):
+    async def finalize(*_args, **_kwargs):
+        return {"voice_ref": "voice-permanent", "provider": "elevenlabs"}
+
+    monkeypatch.setattr(stages, "execute_stage_tool", finalize)
+    candidate = {
+        "candidate_id": "candidate-0",
+        "preview": {"uri": "r2://preview.mp3"},
+    }
+    state = {
+        "roster": [
+            {
+                "id": "creator-0",
+                "selected_voice_candidate_id": "candidate-0",
+                "voice_candidates": [candidate],
+                "voice_design_batch": {
+                    "description_hash": "hash",
+                    "candidates": [candidate],
+                },
+            }
+        ],
+        "creator_assignments": [
+            {"creator_id": "creator-0"},
+            {"creator_id": "creator-missing"},
+        ],
+    }
+    config = {
+        "configurable": {"adapter": object(), "run": {}, "thread_id": "run-1"}
+    }
+
+    with pytest.raises(ValueError, match="creator-missing"):
+        await stages.node_finalize_voices(state, config)
+
+
+async def test_node_voice_candidates_rerolls_only_requested_creator(monkeypatch):
+    designed_for = []
+
+    async def execute(*_args, **kwargs):
+        if kwargs["tool_name"] == "derive_creator_voice_spec":
+            designed_for.append(kwargs["profile"]["id"])
+            return {
+                "language_code": "pt-BR",
+                "accent": "neutral",
+                "vocal_presentation": "neutral",
+                "vocal_age": "adult",
+                "timbre": "warm",
+                "pace": "conversational",
+                "energy": "balanced",
+            }
+        creator_id = designed_for[-1]
+        return {
+            "provider": "elevenlabs",
+            "design_model": "eleven_ttv_v3",
+            "description_hash": f"hash-{creator_id}",
+            "prompt_version": "voice-match-v1",
+            "candidates": [
+                {
+                    "candidate_id": f"new-{creator_id}",
+                    "preview": {
+                        "kind": "voice_preview",
+                        "uri": "data:audio/mpeg;base64,QUJD",
+                    },
+                    "duration_seconds": 3.0,
+                }
+            ],
+            "cost_usd": 0.01,
+            "cost_source": "estimate",
+        }
+
+    async def persist(candidates, **_kwargs):
+        return candidates
+
+    monkeypatch.setattr(stages, "execute_stage_tool", execute)
+    monkeypatch.setattr(stages.media_store, "persist_voice_candidates", persist)
+    untouched = {
+        "id": "creator-1",
+        "upscaled_base": "r2://creator-1.png",
+        "voice_candidates": [{"candidate_id": "old-1"}],
+        "selected_voice_candidate_id": "old-1",
+    }
+    state = {
+        "run_id": "run-1",
+        "revision_request": {"target": "voices", "ids": ["creator-0"]},
+        "roster": [
+            {
+                "id": "creator-0",
+                "upscaled_base": "r2://creator-0.png",
+                "voice_reroll_count": 0,
+                "voice_candidates": [{"candidate_id": "old-0"}],
+                "selected_voice_candidate_id": "old-0",
+            },
+            untouched,
+        ],
+    }
+    config = {
+        "configurable": {
+            "adapter": object(),
+            "pipeline": {
+                "voice": {
+                    "max_rerolls_per_creator": 2,
+                    "selection_without_review": "first",
+                }
+            },
+            "run": {"review_plan": True},
+            "thread_id": "run-1",
+        }
+    }
+
+    result = await stages.node_voice_candidates(state, config)
+
+    assert designed_for == ["creator-0"]
+    assert result["roster"][0]["voice_reroll_count"] == 1
+    assert result["roster"][0]["selected_voice_candidate_id"] is None
+    assert result["roster"][0]["voice_design_history"][0][0]["candidate_id"] == "old-0"
+    assert result["roster"][0]["upscaled_base"] == "r2://creator-0.png"
+    assert result["roster"][1] == untouched
+    assert result["total_cost_usd"] == 0.01
+
+
+async def test_node_voice_candidates_enforces_reroll_limit(monkeypatch):
+    async def should_not_execute(*_args, **_kwargs):
+        raise AssertionError("paid voice design must not run after the reroll limit")
+
+    monkeypatch.setattr(stages, "execute_stage_tool", should_not_execute)
+    state = {
+        "revision_request": {"target": "voices", "ids": ["creator-0"]},
+        "roster": [{"id": "creator-0", "voice_reroll_count": 2}],
+    }
+    config = {
+        "configurable": {
+            "adapter": object(),
+            "pipeline": {"voice": {"max_rerolls_per_creator": 2}},
+            "run": {"review_plan": True},
+        }
+    }
+
+    with pytest.raises(ValueError, match="reroll limit"):
+        await stages.node_voice_candidates(state, config)
+
+
+async def test_node_voice_candidates_rejects_foreign_or_empty_reroll_ids(monkeypatch):
+    async def should_not_execute(*_args, **_kwargs):
+        raise AssertionError("invalid reroll must fail before any tool")
+
+    monkeypatch.setattr(stages, "execute_stage_tool", should_not_execute)
+    config = {
+        "configurable": {
+            "adapter": object(),
+            "pipeline": {"voice": {"max_rerolls_per_creator": 2}},
+            "run": {"review_plan": True},
+        }
+    }
+
+    for ids in ([], ["creator-other"]):
+        with pytest.raises(ValueError, match="must belong to the current creator roster"):
+            await stages.node_voice_candidates(
+                {
+                    "revision_request": {"target": "voices", "ids": ids},
+                    "roster": [{"id": "creator-0"}],
+                },
+                config,
+            )
 
 
 # ------------------------------------------------------------------ #

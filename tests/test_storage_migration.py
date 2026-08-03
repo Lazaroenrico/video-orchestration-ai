@@ -5,8 +5,8 @@ import asyncio
 import hashlib
 import json
 
-from click.testing import CliRunner
 import pytest
+from click.testing import CliRunner
 
 from orchestrator.cli import cli
 from orchestrator.db import Database, TenantIdentity, upgrade_database

@@ -7,10 +7,9 @@ global ``web_server._runs`` é limpo por fixture.
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 from contextlib import asynccontextmanager
 from datetime import datetime
-import sqlite3
-from pathlib import Path
 from types import SimpleNamespace
 from uuid import UUID
 
@@ -53,6 +52,21 @@ async def _wait_for_run_key(run_id: str, key: str, task: asyncio.Task, timeout: 
         assert not task.done(), f"run finished before {key!r} was available"
         await asyncio.sleep(0.02)
     raise AssertionError(f"run did not expose {key!r}")
+
+
+def _approve_first_voice_per_creator(runtime: dict) -> dict:
+    return {
+        "action": "approve",
+        "creators": [
+            {
+                "id": creator["id"],
+                "selected_voice_candidate_id": creator["voice_candidates"][0][
+                    "candidate_id"
+                ],
+            }
+            for creator in runtime["pending_review"]["creators"]
+        ],
+    }
 
 
 # ------------------------------------------------------------------ #
@@ -539,7 +553,27 @@ async def test_dashboard_returns_html():
 # reroll-voice endpoint                                             #
 # ------------------------------------------------------------------ #
 
-async def test_reroll_endpoint_409_without_adapter():
+def test_pending_creators_returns_current_non_empty_roster():
+    creators = [{"id": "creator-0"}]
+    web_server._runs["r"] = {"pending_creators": creators}
+
+    assert web_server._pending_creators_for("r") is creators
+
+
+async def test_reroll_endpoint_404_when_run_absent():
+    with pytest.raises(HTTPException) as ei:
+        await web_server.reroll_creator_voice("missing", "creator-0")
+    assert ei.value.status_code == 404
+
+
+async def test_reroll_endpoint_requires_v2_when_database_is_configured(monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", "postgresql://durable")
+    with pytest.raises(HTTPException) as ei:
+        await web_server.reroll_creator_voice("r", "creator-0")
+    assert ei.value.status_code == 409
+    assert "versioned V2" in ei.value.detail
+
+async def test_reroll_endpoint_409_without_pending_combined_review():
     web_server._runs["r"] = {"pending_creators": [{"id": "creator-0"}]}
     with pytest.raises(HTTPException) as ei:
         await web_server.reroll_creator_voice("r", "creator-0")
@@ -547,34 +581,32 @@ async def test_reroll_endpoint_409_without_adapter():
 
 
 async def test_reroll_endpoint_404_when_creator_absent():
-    class _Ad:
-        pass
-
-    web_server._runs["r"] = {"pending_creators": [{"id": "creator-0"}], "adapter": _Ad()}
+    future = asyncio.get_running_loop().create_future()
+    web_server._runs["r"] = {
+        "pending_review": {"creators": [{"id": "creator-0"}]},
+        "review": future,
+    }
     with pytest.raises(HTTPException) as ei:
         await web_server.reroll_creator_voice("r", "creator-X")
     assert ei.value.status_code == 404
 
 
-async def test_reroll_endpoint_success_emits_update():
-    class _Ad:  # fallback: sem método reroll → caminho determinístico offline
-        pass
-
-    creator = {
-        "id": "creator-0",
-        "upscaled_base": "data:image/png;base64,IMG",
-        "voice_id": "voice-0",
-        "voice_profile": {"preset": "male", "prompt": "warm"},
-    }
+async def test_reroll_endpoint_delegates_to_voice_only_graph_branch():
+    future = asyncio.get_running_loop().create_future()
     web_server._runs["r"] = {
-        "pending_creators": [creator], "adapter": _Ad(), "buffer": [], "queues": [],
+        "pending_review": {"creators": [{"id": "creator-0"}]},
+        "review": future,
     }
 
     result = await web_server.reroll_creator_voice("r", "creator-0")
 
-    assert result["ok"] is True
-    assert result["creator"]["id"] == "creator-0"
-    assert any(e.get("type") == "creator_update" for e in web_server._runs["r"]["buffer"])
+    assert result == {"ok": True, "queued": True, "creator_id": "creator-0"}
+    assert future.result() == {
+        "action": "regenerate",
+        "target": "voices",
+        "ids": ["creator-0"],
+        "feedback": "",
+    }
 
 
 # ------------------------------------------------------------------ #
@@ -1777,7 +1809,7 @@ async def test_run_state_returns_combined_pending_creative_review(tmp_path, monk
         assert len(state["review"]["creators"]) == 2
         assert all(concept["script"] for concept in state["review"]["concepts"])
 
-        runtime["review"].set_result({"action": "approve"})
+        runtime["review"].set_result(_approve_first_voice_per_creator(runtime))
         await asyncio.wait_for(task, timeout=8.0)
     finally:
         if not task.done():
@@ -2005,7 +2037,7 @@ async def test_local_execute_persists_combined_review_completion_and_error(
         )
     )
     runtime = await _wait_for_run_key(run_id, "review", task)
-    runtime["review"].set_result({"action": "approve"})
+    runtime["review"].set_result(_approve_first_voice_per_creator(runtime))
     await asyncio.wait_for(task, timeout=8)
 
     original_load_pipeline = web_server.load_pipeline

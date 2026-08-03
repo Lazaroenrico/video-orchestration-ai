@@ -1,7 +1,9 @@
 """CompositeAdapter: roteamento por papel + default mock (integração dos adapters reais)."""
+import pytest
+
+from orchestrator.adapters.ffmpeg_assembly import FfmpegAssemblyAdapter
 from orchestrator.adapters.gateway_llm import GatewayLLMAdapter
 from orchestrator.adapters.integrity_qc import IntegrityQCAdapter
-from orchestrator.adapters.ffmpeg_assembly import FfmpegAssemblyAdapter
 from orchestrator.adapters.mock import MockAdapter
 from orchestrator.adapters.vercel_gateway_video import VercelGatewayVideoAdapter
 from orchestrator.adapters.vercel_seedance_assembly import VercelSeedanceAssemblyAdapter
@@ -140,3 +142,66 @@ def test_composite_exposes_voice_subadapter_of_creator_role(pipeline_cfg):
     # Mock não tem sub-adapter de voz → atributo ausente, como antes.
     mock_comp = build_adapter_from_providers(PROVIDERS_EMPTY, pipeline_cfg)
     assert getattr(mock_comp, "voice", None) is None
+
+
+@pytest.mark.parametrize(
+    "method",
+    ["design_voice_candidates", "finalize_voice", "reconcile_voice"],
+)
+async def test_composite_falls_back_to_creator_voice_subadapter(
+    pipeline_cfg, method: str,
+) -> None:
+    sentinel = object()
+
+    class VoiceSub:
+        async def design_voice_candidates(self, *args, **kwargs):
+            return sentinel
+
+        async def finalize_voice(self, *args, **kwargs):
+            return sentinel
+
+        async def reconcile_voice(self, *args, **kwargs):
+            return sentinel
+
+    class CreatorWithVoice:
+        def __init__(self):
+            self.voice = VoiceSub()
+
+    register_adapter("voice_subadapter_fallback", lambda pipeline: CreatorWithVoice())
+    comp = build_adapter_from_providers(
+        {"adapters": {"creator": "voice_subadapter_fallback"}}, pipeline_cfg
+    )
+
+    assert await getattr(comp, method)("argument", field="value") is sentinel
+
+
+@pytest.mark.parametrize(
+    "method",
+    ["design_voice_candidates", "finalize_voice", "reconcile_voice"],
+)
+async def test_composite_reports_missing_voice_design_capability(
+    pipeline_cfg, method: str,
+) -> None:
+    class CreatorWithoutVoice:
+        pass
+
+    register_adapter("creator_without_voice_design", lambda pipeline: CreatorWithoutVoice())
+    comp = build_adapter_from_providers(
+        {"adapters": {"creator": "creator_without_voice_design"}}, pipeline_cfg
+    )
+
+    with pytest.raises(AttributeError, match=method):
+        await getattr(comp, method)()
+
+
+async def test_composite_prefers_creator_level_reconcile(pipeline_cfg) -> None:
+    class CreatorWithReconcile:
+        async def reconcile_voice(self, *args, **kwargs):
+            return {"voice_ref": "creator-level"}
+
+    register_adapter("creator_level_reconcile", lambda pipeline: CreatorWithReconcile())
+    comp = build_adapter_from_providers(
+        {"adapters": {"creator": "creator_level_reconcile"}}, pipeline_cfg
+    )
+
+    assert await comp.reconcile_voice() == {"voice_ref": "creator-level"}

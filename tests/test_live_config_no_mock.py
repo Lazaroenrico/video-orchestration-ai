@@ -1,9 +1,9 @@
 """Live config must not route production roles to mock adapters."""
 from __future__ import annotations
 
+from orchestrator.adapters.elevenlabs_voice_design import ElevenLabsVoiceDesignAdapter
 from orchestrator.adapters.ffmpeg_assembly import FfmpegAssemblyAdapter
 from orchestrator.adapters.replicate_video import ReplicateVideoAdapter
-from orchestrator.adapters.replicate_voice import ReplicateVoiceAdapter
 from orchestrator.config import load_agent_catalog, load_pipeline, load_providers
 from orchestrator.registry import build_adapter_from_providers
 
@@ -15,7 +15,7 @@ def test_live_config_routes_all_runtime_roles_to_non_mock_adapters():
     runtime_roles = ("llm", "creator", "video", "qc", "assembly")
     assert {role: adapters.get(role) for role in runtime_roles} == {
         "llm": "vercel_gateway_llm",
-        "creator": "creator_vercel_replicate_voice",
+        "creator": "creator_vercel_elevenlabs_design",
         "video": "replicate",
         "qc": "integrity_qc",
         "assembly": "ffmpeg_assembly",
@@ -25,7 +25,7 @@ def test_live_config_routes_all_runtime_roles_to_non_mock_adapters():
         role
         for role, adapter_name in adapters.items()
         if "replicate" in adapter_name
-    ] == ["creator", "video"]
+    ] == ["video"]
 
 
 def test_live_config_uses_pruna_p_video_for_all_clips():
@@ -56,16 +56,16 @@ def test_live_config_uses_pruna_p_video_for_all_clips():
 def test_live_runtime_uses_replicate_for_clips_and_ffmpeg_for_assembly(monkeypatch):
     monkeypatch.setenv("AI_GATEWAY_API_KEY", "test-gateway-key")
     monkeypatch.setenv("REPLICATE_API_TOKEN", "test-replicate-key")
-    monkeypatch.setenv(
-        "REPLICATE_ELEVENLABS_MODEL",
-        "elevenlabs/turbo-v2.5",
-    )
+    monkeypatch.setenv("ELEVENLABS_API_KEY", "test-elevenlabs-key")
     composite = build_adapter_from_providers(
         load_providers("config"),
         load_pipeline("config"),
     )
 
-    assert isinstance(composite._by_role["creator"].voice, ReplicateVoiceAdapter)
+    assert isinstance(
+        composite._by_role["creator"].voice,
+        ElevenLabsVoiceDesignAdapter,
+    )
     assert isinstance(composite._by_role["video"], ReplicateVideoAdapter)
     assert isinstance(composite._by_role["assembly"], FfmpegAssemblyAdapter)
 

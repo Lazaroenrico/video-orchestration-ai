@@ -7,8 +7,8 @@ endpoint /api/integrations que lê providers.yaml.
 """
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
 import json
+from contextlib import asynccontextmanager
 
 import pytest
 from fastapi import FastAPI, HTTPException
@@ -198,6 +198,44 @@ async def test_readyz_ready_defaults_to_local_when_unset(monkeypatch) -> None:
     resp = await web_server.readyz()
     assert resp.status_code == 200
     assert json.loads(resp.body)["storage"] == "local"
+
+
+@pytest.mark.asyncio
+async def test_readyz_requires_elevenlabs_key_only_for_direct_voice_design(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(web_server, "load_pipeline", lambda path=None: {})
+    monkeypatch.setattr(web_server, "load_judge", lambda path=None: {})
+    monkeypatch.setattr(
+        web_server,
+        "load_providers",
+        lambda path=None: {
+            "storage": {"backend": "local"},
+            "adapters": {"creator": "creator_vercel_elevenlabs_design"},
+        },
+    )
+    monkeypatch.delenv("ELEVENLABS_API_KEY", raising=False)
+
+    missing = await web_server.readyz()
+    assert missing.status_code == 503
+    assert json.loads(missing.body)["reason"] == "ELEVENLABS_API_KEY is required"
+
+    monkeypatch.setenv("ELEVENLABS_API_KEY", "super-secret-elevenlabs-key")
+    ready = await web_server.readyz()
+    assert ready.status_code == 200
+    assert "super-secret-elevenlabs-key" not in ready.body.decode()
+
+    monkeypatch.delenv("ELEVENLABS_API_KEY")
+    monkeypatch.setattr(
+        web_server,
+        "load_providers",
+        lambda path=None: {
+            "storage": {"backend": "local"},
+            "adapters": {"creator": "creator_vercel_gateway"},
+        },
+    )
+    legacy = await web_server.readyz()
+    assert legacy.status_code == 200
 
 
 @pytest.mark.asyncio

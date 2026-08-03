@@ -11,11 +11,10 @@ Todos os testes rodam offline (LANGSMITH_TRACING off / lib no-op):
 """
 from __future__ import annotations
 
-import asyncio
 import inspect
 import os
-from typing import Any, Optional
 import unittest.mock as mock
+from typing import Any, Optional
 
 import pytest
 
@@ -30,7 +29,10 @@ os.environ.setdefault("LANGSMITH_TRACING", "false")
 def test_import_safe():
     """Módulo tracing importa sem erro mesmo que langsmith não esteja disponível."""
     from orchestrator.tracing import (  # noqa: F401
-        traced, wrap_anthropic_client, add_trace_metadata, run_trace_config,
+        add_trace_metadata,
+        run_trace_config,
+        traced,
+        wrap_anthropic_client,
     )
 
 
@@ -249,6 +251,7 @@ def test_add_trace_metadata_noop():
 def test_wrap_anthropic_client_returns_same_object_when_lib_unavailable():
     """Quando langsmith NÃO está disponível, wrap_anthropic_client devolve o próprio objeto."""
     import unittest.mock as mock
+
     import orchestrator.tracing as tracing_mod
 
     class DummyClient:
@@ -371,6 +374,7 @@ def test_add_trace_metadata_swallows_run_tree_errors(monkeypatch):
 def test_wrap_anthropic_client_does_not_raise():
     """wrap_anthropic_client não lança exceção com qualquer objeto quando _HAS_LS=False."""
     import unittest.mock as mock
+
     import orchestrator.tracing as tracing_mod
 
     with mock.patch.object(tracing_mod, "_HAS_LS", False):

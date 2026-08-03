@@ -18,7 +18,6 @@ import orchestrator.prompt_store as prompt_store
 from orchestrator.config import default_prompt_store_path
 from orchestrator.web import server as web_server
 
-
 # ------------------------------------------------------------------ #
 # prompt_store                                                       #
 # ------------------------------------------------------------------ #

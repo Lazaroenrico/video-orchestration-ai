@@ -9,18 +9,29 @@ import httpx
 import pytest
 
 import orchestrator.run_store as run_store
-from orchestrator.web import server as web_server
 from orchestrator.db import (
     Database,
     PostgresArtifactRepository,
     PostgresCreatorRepository,
-    PostgresJobRepository,
     PostgresRunRepository,
     TenantIdentity,
     upgrade_database,
 )
 from orchestrator.storage.db import ArtifactRecord
+from orchestrator.web import server as web_server
 from orchestrator.worker import run_worker_once
+
+
+def _voice_selections(gate) -> list[dict[str, str]]:
+    return [
+        {
+            "id": creator["id"],
+            "selected_voice_candidate_id": creator["voice_candidates"][0][
+                "candidate_id"
+            ],
+        }
+        for creator in gate.payload["creators"]
+    ]
 
 
 def _admin_url(postgresql) -> str:
@@ -434,6 +445,7 @@ async def test_review_gate_is_persisted_while_waiting_for_decision(
         run_id,
         web_server.ReviewV2Request(
             action="approve",
+            creators=_voice_selections(gate),
             gate_id=str(gate.gate_id),
             version=gate.version,
             gate_type="review_creative_plan",
@@ -488,6 +500,7 @@ async def test_review_gate_persists_creators_until_approval(
         run_id,
         web_server.ReviewV2Request(
             action="approve",
+            creators=_voice_selections(gate),
             gate_id=str(gate.gate_id),
             version=gate.version,
             gate_type="review_creative_plan",

@@ -10,6 +10,8 @@ import pytest
 from fastapi import BackgroundTasks
 from replicate.exceptions import ReplicateError
 
+from orchestrator import runner as runner_module
+from orchestrator import worker as worker_module
 from orchestrator.db import (
     CancelledGateError,
     Database,
@@ -23,12 +25,21 @@ from orchestrator.db import (
     provision_runtime_role,
     upgrade_database,
 )
-from orchestrator.web import server as web_server
-from orchestrator import runner as runner_module
-from orchestrator import worker as worker_module
-from orchestrator.worker import run_worker_once
 from orchestrator.wake_queue import publish_outbox_once
+from orchestrator.web import server as web_server
+from orchestrator.worker import run_worker_once
 
+
+def _voice_selections(gate) -> list[dict[str, str]]:
+    return [
+        {
+            "id": creator["id"],
+            "selected_voice_candidate_id": creator["voice_candidates"][0][
+                "candidate_id"
+            ],
+        }
+        for creator in gate.payload["creators"]
+    ]
 
 NOW = datetime(2026, 7, 25, 18, 0, tzinfo=UTC)
 
@@ -479,6 +490,7 @@ async def test_review_gate_survives_worker_restart_and_http_resolution(
         response["run_id"],
         web_server.ReviewV2Request(
             action="approve",
+            creators=_voice_selections(gate),
             gate_id=str(gate.gate_id),
             version=gate.version,
             gate_type="review_creative_plan",
@@ -489,6 +501,7 @@ async def test_review_gate_survives_worker_restart_and_http_resolution(
             response["run_id"],
             web_server.ReviewV2Request(
                 action="approve",
+                creators=_voice_selections(gate),
                 gate_id=str(gate.gate_id),
                 version=gate.version,
                 gate_type="review_creative_plan",
@@ -546,6 +559,7 @@ async def test_review_gate_resumes_from_versioned_edited_http_decision(
         response["run_id"],
         web_server.ReviewV2Request(
             action="approve",
+            creators=_voice_selections(gate),
             gate_id=str(gate.gate_id),
             version=gate.version,
             gate_type="review_creative_plan",
@@ -557,6 +571,7 @@ async def test_review_gate_resumes_from_versioned_edited_http_decision(
             response["run_id"],
             web_server.ReviewV2Request(
                 action="approve",
+                creators=_voice_selections(gate),
                 gate_id=str(gate.gate_id),
                 version=gate.version,
                 gate_type="review_creative_plan",

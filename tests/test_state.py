@@ -1,5 +1,4 @@
 """Testes dos schemas de estado do grafo (TDD — escritos antes da implementação)."""
-import operator
 
 import pytest
 
@@ -76,7 +75,7 @@ def test_batchstate_has_expected_keys_and_reducers():
 
 def test_results_reducer_is_additive():
     # O fan-out paralelo concatena resultados; o reducer precisa ser aditivo.
-    from orchestrator.graph.state import add_items, add_cost
+    from orchestrator.graph.state import add_cost, add_items
 
     merged = add_items([new_item({"a": 1})], [new_item({"b": 2})])
     assert len(merged) == 2

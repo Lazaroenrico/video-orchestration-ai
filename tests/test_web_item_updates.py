@@ -2,14 +2,13 @@
 from __future__ import annotations
 
 import asyncio
-from pathlib import Path
 
 import pytest
 
+from orchestrator import stream_bus
 from orchestrator.adapters.mock import MockAdapter
 from orchestrator.graph.state import Artifact, QCResult
 from orchestrator.nodes.stages import node_roster
-from orchestrator import stream_bus
 from orchestrator.web import server as web_server
 
 
@@ -288,45 +287,33 @@ def test_creators_history_recovers_from_media_when_store_is_empty(tmp_path, monk
 
 
 @pytest.mark.asyncio
-async def test_reroll_voice_updates_pending_creator_and_emits_sse(monkeypatch, pipeline_cfg) -> None:
-    adapter = MockAdapter(tiers=pipeline_cfg["tiers"])
+async def test_reroll_voice_delegates_without_blank_overwriting_valid_voice() -> None:
     run_id = "web-reroll"
+    future = asyncio.get_running_loop().create_future()
+    creator = {
+        "id": "creator-0",
+        "image_uri": "data:image/svg+xml;base64,original",
+        "voice_ref": "voice-0",
+        "voice_preview_uri": "data:audio/wav;base64,original",
+        "voice": "voice-0",
+    }
     web_server._runs[run_id] = {
         "queues": [],
         "buffer": [],
         "done": False,
-        "adapter": adapter,
-        "pending_creators": [
-            {
-                "id": "creator-0",
-                "image_uri": "data:image/svg+xml;base64,original",
-                "voice_ref": "voice-0",
-                "voice_preview_uri": "data:audio/wav;base64,original",
-                "voice": "voice-0",
-            }
-        ],
+        "review": future,
+        "pending_review": {"creators": [creator]},
     }
-    monkeypatch.setattr(web_server, "default_media_path", lambda: Path("/tmp/nonexistent-media"))
-    events: list[dict] = []
-    monkeypatch.setattr(web_server, "_emit", lambda _run_id, event: events.append(event) or asyncio.sleep(0))
 
     try:
         payload = await web_server.reroll_creator_voice(run_id, "creator-0")
     finally:
         web_server._runs.pop(run_id, None)
 
-    creator = payload["creator"]
-    assert creator["id"] == "creator-0"
-    assert creator["voice_ref"] != "voice-0"
-    assert creator["voice_preview_uri"] != "data:audio/wav;base64,original"
-    assert web_server._runs.get(run_id) is None or True
-    assert events == [
-        {
-            "type": "creator_update",
-            "run_id": run_id,
-            "creator": creator,
-        }
-    ]
+    assert payload == {"ok": True, "queued": True, "creator_id": "creator-0"}
+    assert creator["voice_ref"] == "voice-0"
+    assert creator["voice_preview_uri"] == "data:audio/wav;base64,original"
+    assert future.result()["target"] == "voices"
 
 
 @pytest.mark.asyncio
@@ -395,7 +382,20 @@ async def test_dashboard_run_pauses_for_combined_review_by_default(tmp_path, mon
         event_types = [event.get("type") for event in state["buffer"]]
         assert "awaiting_review" in event_types
 
-        state["review"].set_result({"action": "approve"})
+        state["review"].set_result(
+            {
+                "action": "approve",
+                "creators": [
+                    {
+                        "id": creator["id"],
+                        "selected_voice_candidate_id": creator[
+                            "voice_candidates"
+                        ][0]["candidate_id"],
+                    }
+                    for creator in pending["creators"]
+                ],
+            }
+        )
         await asyncio.wait_for(task, timeout=5.0)
     finally:
         if not task.done():
@@ -525,7 +525,15 @@ async def test_dashboard_combined_review_contains_scripts_and_creator_previews(
         state["review"].set_result({
             "action": "approve",
             "concepts": edited,
-            "creators": review_ev["creators"],
+            "creators": [
+                {
+                    "id": creator["id"],
+                    "selected_voice_candidate_id": creator[
+                        "voice_candidates"
+                    ][0]["candidate_id"],
+                }
+                for creator in review_ev["creators"]
+            ],
         })
 
         await asyncio.wait_for(task, timeout=8.0)
@@ -590,7 +598,15 @@ async def test_dashboard_run_summary_after_combined_review(tmp_path, monkeypatch
                 }
                 for index, concept in enumerate(pending)
             ],
-            "creators": review_ev["creators"],
+            "creators": [
+                {
+                    "id": creator["id"],
+                    "selected_voice_candidate_id": creator[
+                        "voice_candidates"
+                    ][0]["candidate_id"],
+                }
+                for creator in review_ev["creators"]
+            ],
         })
 
         await asyncio.wait_for(task, timeout=8.0)

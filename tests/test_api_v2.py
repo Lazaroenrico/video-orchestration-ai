@@ -6,11 +6,42 @@ from types import SimpleNamespace
 from uuid import UUID
 
 import pytest
-from pydantic import ValidationError
 from fastapi import BackgroundTasks
 from fastapi.exceptions import HTTPException
+from pydantic import ValidationError
 
 from orchestrator.web import server as web_server
+
+
+def _pending_creators() -> list[dict]:
+    return [
+        {
+            "id": f"creator-{index}",
+            "archetype": "Expert" if index == 0 else "Customer",
+            "image_uri": f"r2://trusted/creator-{index}.png",
+            "voice_candidates": [
+                {
+                    "candidate_id": f"candidate-{index}",
+                    "preview": {
+                        "kind": "voice_preview",
+                        "uri": f"r2://trusted/candidate-{index}.mp3",
+                    },
+                }
+            ],
+            "selected_voice_candidate_id": None,
+        }
+        for index in range(2)
+    ]
+
+
+def _voice_selections() -> list[dict]:
+    return [
+        {
+            "id": f"creator-{index}",
+            "selected_voice_candidate_id": f"candidate-{index}",
+        }
+        for index in range(2)
+    ]
 
 
 async def test_start_v2_queues_validated_campaign_and_one_review_gate(monkeypatch) -> None:
@@ -96,17 +127,23 @@ async def test_local_v2_review_resumes_the_single_combined_gate(monkeypatch) -> 
         "review": future,
         "pending_review": {
             "concepts": [{"id": "concept-1"}],
-            "creators": [{"id": "creator-0"}, {"id": "creator-1"}],
+            "creators": _pending_creators(),
         },
     }
 
     response = await web_server.review_run_v2(
         "run-v2",
-        web_server.ReviewV2Request(action="approve"),
+        web_server.ReviewV2Request(
+            action="approve",
+            creators=_voice_selections(),
+        ),
     )
 
     assert response == {"ok": True}
-    assert future.result() == {"action": "approve"}
+    assert future.result() == {
+        "action": "approve",
+        "creators": _voice_selections(),
+    }
 
 
 async def test_local_v2_review_requires_a_pending_gate_and_canonical_payload(
@@ -215,18 +252,7 @@ async def test_durable_v2_review_validates_gate_and_sanitizes_server_fields(
                             "hook": "Original hook",
                         }
                     ],
-                    "creators": [
-                        {
-                            "id": "creator-0",
-                            "archetype": "Expert",
-                            "image_uri": "r2://trusted/creator-0.png",
-                        },
-                        {
-                            "id": "creator-1",
-                            "archetype": "Customer",
-                            "image_uri": "r2://trusted/creator-1.png",
-                        },
-                    ],
+                    "creators": _pending_creators(),
                 },
             )
 
@@ -258,9 +284,12 @@ async def test_durable_v2_review_validates_gate_and_sanitizes_server_fields(
                 {
                     "id": "creator-0",
                     "archetype": "Edited expert",
-                    "image_uri": "https://attacker.invalid/image.png",
+                    "selected_voice_candidate_id": "candidate-0",
                 },
-                {"id": "creator-1"},
+                {
+                    "id": "creator-1",
+                    "selected_voice_candidate_id": "candidate-1",
+                },
             ],
             gate_id=str(gate_id),
             version=2,
@@ -270,13 +299,9 @@ async def test_durable_v2_review_validates_gate_and_sanitizes_server_fields(
 
     assert response["job_id"] == "00000000-0000-0000-0000-000000000022"
     resolution = resolved[0]["resolution"]
-    assert resolution["concepts"][0] == {
-        "id": "concept-1",
-        "offer": "Serum X",
-        "hook": "Edited hook",
-    }
+    assert resolution["concepts"][0] == {"id": "concept-1", "hook": "Edited hook"}
     assert resolution["creators"][0]["archetype"] == "Edited expert"
-    assert resolution["creators"][0]["image_uri"] == "r2://trusted/creator-0.png"
+    assert "image_uri" not in resolution["creators"][0]
 
 
 async def test_durable_v2_review_rejects_gate_from_another_run(monkeypatch) -> None:
@@ -377,7 +402,8 @@ def test_v2_review_rejects_invalid_action_field_combinations() -> None:
         {
             "action": "regenerate",
             "target": "scripts",
-            "concepts": [{"id": "concept-1"}],
+            "creators": [{"id": "creator-0"}],
+            "ids": ["concept-1"],
         },
         {"action": "delete"},
     ]
@@ -385,6 +411,24 @@ def test_v2_review_rejects_invalid_action_field_combinations() -> None:
     for payload in invalid:
         with pytest.raises(ValidationError):
             web_server.ReviewV2Request.model_validate(payload)
+
+    with pytest.raises(ValidationError, match="unique IDs"):
+        web_server.ReviewV2Request.model_validate(
+            {
+                "action": "regenerate",
+                "target": "voices",
+                "ids": ["creator-0", "creator-0"],
+            }
+        )
+    with pytest.raises(ValidationError, match="does not accept concept edits"):
+        web_server.ReviewV2Request.model_validate(
+            {
+                "action": "regenerate",
+                "target": "voices",
+                "ids": ["creator-0"],
+                "concepts": [{"id": "concept-1", "script": "edited"}],
+            }
+        )
 
 
 def test_v2_review_requires_canonical_payload_and_known_regeneration_ids() -> None:
@@ -422,3 +466,76 @@ def test_v2_review_rejects_unknown_nested_fields() -> None:
                 }
             ],
         )
+
+    for server_owned in (
+        "image_uri",
+        "voice_ref",
+        "voice_preview_uri",
+        "image",
+        "voice",
+        "angles",
+        "run_id",
+        "offer",
+        "status",
+    ):
+        with pytest.raises(ValidationError):
+            web_server.ReviewV2Request.model_validate(
+                {
+                    "action": "approve",
+                    "creators": [
+                        {"id": "creator-0", server_owned: "attacker-owned"}
+                    ],
+                }
+            )
+
+
+def test_v2_voice_regeneration_accepts_only_current_creator_ids() -> None:
+    pending = {
+        "concepts": [{"id": "concept-1"}],
+        "creators": _pending_creators(),
+    }
+    resolution = web_server._validated_review_resolution(
+        web_server.ReviewV2Request(
+            action="regenerate",
+            target="voices",
+            ids=["creator-0"],
+            creators=[
+                {"id": "creator-0", "voice_brief": "Deeper"},
+                {"id": "creator-1"},
+            ],
+        ),
+        pending,
+    )
+    assert resolution["ids"] == ["creator-0"]
+
+    for invalid_id in ("concept-1", "creator-unknown"):
+        with pytest.raises(HTTPException) as raised:
+            web_server._validated_review_resolution(
+                web_server.ReviewV2Request(
+                    action="regenerate",
+                    target="voices",
+                    ids=[invalid_id],
+                ),
+                pending,
+            )
+        assert raised.value.status_code == 422
+
+
+def test_v2_script_regeneration_applies_allowed_concept_edits() -> None:
+    pending = {
+        "concepts": [{"id": "concept-1", "script": "Original"}],
+        "creators": _pending_creators(),
+    }
+
+    resolution = web_server._validated_review_resolution(
+        web_server.ReviewV2Request(
+            action="regenerate",
+            target="scripts",
+            ids=["concept-1"],
+            concepts=[{"id": "concept-1", "script": "Edited"}],
+        ),
+        pending,
+    )
+
+    assert resolution["concepts"] == [{"id": "concept-1", "script": "Edited"}]
+    assert pending["concepts"][0]["script"] == "Original"

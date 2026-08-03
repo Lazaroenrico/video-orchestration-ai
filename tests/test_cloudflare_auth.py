@@ -13,12 +13,11 @@ from fastapi import FastAPI
 
 from orchestrator import auth as auth_module
 from orchestrator.auth import (
-    AccessTokenError,
     AccessJwtVerifier,
+    AccessTokenError,
     CloudflareAccessMiddleware,
 )
-from orchestrator.db import TenantContext, TenantIdentity
-from orchestrator.db import TenantAuthorizationError
+from orchestrator.db import TenantAuthorizationError, TenantContext, TenantIdentity
 from orchestrator.db.tenancy import tenant_identity_context
 
 

@@ -6,12 +6,11 @@ from typing import Any
 
 import pytest
 
+from orchestrator.adapters import vercel_gateway_video as gateway_video
 from orchestrator.adapters.vercel_gateway_video import (
     VercelGatewayVideoAdapter,
     build_vercel_gateway_video_adapter,
 )
-from orchestrator.adapters import vercel_gateway_video as gateway_video
-
 
 TIERS = [
     {

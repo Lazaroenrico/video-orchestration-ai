@@ -7,7 +7,6 @@ Cobre:
 - integração leve com node_feedback + tmp_path
 """
 import json
-import pytest
 
 from orchestrator.feedback_store import (
     JsonFeedbackRepository,
@@ -15,7 +14,6 @@ from orchestrator.feedback_store import (
     load_latest_feedback,
     save_feedback,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers

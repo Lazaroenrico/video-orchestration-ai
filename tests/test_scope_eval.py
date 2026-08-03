@@ -12,12 +12,12 @@ import httpx
 import pytest
 
 from orchestrator.adapters.judge import (
+    SCOPE_CRITERIA,
     Cassette,
     CassetteMiss,
     GatewayJudge,
     evaluate_judge,
     scope_adherence_evaluator,
-    SCOPE_CRITERIA,
 )
 from orchestrator.config import load_judge
 
@@ -168,10 +168,10 @@ def test_scope_evaluate_judge_accuracy_is_1(judge_config):
 
 def test_evaluate_judge_backwards_compatible(judge_config):
     """Sem criteria/evaluator, deve usar DEFAULT_QC_CRITERIA + qc_correctness_evaluator."""
-    from orchestrator.adapters.judge import DEFAULT_QC_CRITERIA, qc_correctness_evaluator
-    from orchestrator.config import load_judge
-    from orchestrator.adapters.judge import Cassette, GatewayJudge, evaluate_judge
     from pathlib import Path
+
+    from orchestrator.adapters.judge import Cassette, GatewayJudge, evaluate_judge
+    from orchestrator.config import load_judge
 
     QC_CASSETTE = Path(__file__).parent / "cassettes" / "judge_qc.json"
     QC_DATASET = [

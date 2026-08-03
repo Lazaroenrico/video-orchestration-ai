@@ -4,12 +4,12 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 
 import pytest
+from click.testing import CliRunner
 from fastapi import HTTPException
 
-from orchestrator import runner_service
 from orchestrator import cli as cli_module
+from orchestrator import runner_service
 from orchestrator.cli import cli
-from click.testing import CliRunner
 
 
 async def test_runner_tick_rejects_missing_or_wrong_internal_token(monkeypatch):

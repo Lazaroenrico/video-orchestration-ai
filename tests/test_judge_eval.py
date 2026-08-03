@@ -12,9 +12,9 @@ import httpx
 import pytest
 
 from orchestrator.adapters.judge import (
+    DEFAULT_QC_CRITERIA,
     Cassette,
     CassetteMiss,
-    DEFAULT_QC_CRITERIA,
     GatewayJudge,
     dig,
     evaluate_judge,

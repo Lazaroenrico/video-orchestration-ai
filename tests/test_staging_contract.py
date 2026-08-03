@@ -2,11 +2,10 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 import re
+from pathlib import Path
 
 import yaml
-
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -26,6 +25,15 @@ def test_staging_keeps_all_generation_adapters_mock_and_moves_bytes_to_r2():
         for role in ("llm", "creator", "video", "qc", "assembly", "upscale")
     )
     assert providers["storage"] == {"backend": "r2"}
+
+
+def test_staging_mock_profile_has_zero_generation_cost() -> None:
+    pipeline = yaml.safe_load(
+        (ROOT / "config-staging/pipeline.yaml").read_text(encoding="utf-8")
+    )
+
+    assert pipeline["tiers"]
+    assert all(tier["cost_per_second"] == 0 for tier in pipeline["tiers"])
 
 
 def test_wrangler_routes_spa_api_sse_and_uses_distinct_container_roles():

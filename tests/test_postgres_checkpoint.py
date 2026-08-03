@@ -1,11 +1,10 @@
 """Integração real do checkpointer PostgreSQL (ADR-D36, Fase 2)."""
 from __future__ import annotations
 
+from orchestrator import runner
 from orchestrator.db import Database, TenantIdentity, upgrade_database
 from orchestrator.graph.builder import build_graph
 from orchestrator.graph.checkpoint import open_checkpointer
-from orchestrator import runner
-
 
 _PROVIDERS = {"adapters": {"video": "mock"}}
 

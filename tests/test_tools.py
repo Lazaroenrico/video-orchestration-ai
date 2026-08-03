@@ -683,13 +683,13 @@ async def test_stage_nodes_delegate_to_tools(monkeypatch, tmp_path):
 
 
 async def test_voice_design_tools_delegate_to_adapter() -> None:
+    from orchestrator.adapters.mock import MockAdapter
     from orchestrator.tools.base import tool_context_from_config
     from orchestrator.tools.creators import (
         derive_creator_voice_spec_tool,
         design_creator_voice_tool,
         finalize_creator_voice_tool,
     )
-    from orchestrator.adapters.mock import MockAdapter
 
     adapter = MockAdapter(tiers=[{"name": "standard", "rate": 0.01}])
     cfg = _config(adapter)

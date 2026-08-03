@@ -8,8 +8,8 @@ from typing import Any
 
 import pytest
 
-from orchestrator.adapters.vercel_seedance_assembly import VercelSeedanceAssemblyAdapter
 from orchestrator.adapters import vercel_seedance_assembly as seedance
+from orchestrator.adapters.vercel_seedance_assembly import VercelSeedanceAssemblyAdapter
 from orchestrator.graph.state import Artifact, Item
 
 

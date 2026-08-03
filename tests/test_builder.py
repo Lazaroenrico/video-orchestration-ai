@@ -71,7 +71,7 @@ def test_top_graph_has_expected_nodes(pipeline_cfg):
     app = build_graph(pipeline_cfg)
     nodes = set(app.get_graph().nodes)
     for n in (
-        "concepts", "scripts", "creator_profiles", "roster", "review",
+        "concepts", "scripts", "creator_profiles", "roster", "voice_candidates", "review",
         "process_item", "feedback",
     ):
         assert n in nodes
@@ -87,7 +87,8 @@ def test_top_graph_orders_scripts_and_review_before_creator(pipeline_cfg):
     assert ("concepts", "scripts") in edges
     assert ("scripts", "creator_profiles") in edges
     assert ("creator_profiles", "roster") in edges
-    assert ("roster", "review") in edges
+    assert ("roster", "voice_candidates") in edges
+    assert ("voice_candidates", "review") in edges
 
 
 def test_top_graph_routes_review_via_conditional_send(pipeline_cfg):

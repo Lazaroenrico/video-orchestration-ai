@@ -1,9 +1,8 @@
 """Contratos estáticos do exercício AWS da ADR-D36, Fase 6."""
 from __future__ import annotations
 
-from pathlib import Path
 import re
-
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 AWS = ROOT / "infra/aws-staging"

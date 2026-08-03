@@ -12,6 +12,7 @@ import httpx
 import pytest
 
 from orchestrator import media_store
+from orchestrator.storage.base import is_downloadable
 
 # 1x1 PNG transparente (bytes reais), como base64 e como data URI.
 _PNG_BYTES = base64.b64decode(
@@ -35,7 +36,7 @@ def _fail_transport() -> httpx.MockTransport:
 
 
 # --------------------------------------------------------------------------- #
-# _is_downloadable                                                             #
+# is_downloadable                                                              #
 # --------------------------------------------------------------------------- #
 
 @pytest.mark.parametrize(
@@ -51,7 +52,7 @@ def _fail_transport() -> httpx.MockTransport:
     ],
 )
 def test_is_downloadable(uri, expected):
-    assert media_store._is_downloadable(uri) is expected
+    assert is_downloadable(uri) is expected
 
 
 # --------------------------------------------------------------------------- #

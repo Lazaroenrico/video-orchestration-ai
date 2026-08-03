@@ -2,11 +2,10 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
 import subprocess
+from pathlib import Path
 
 import yaml
-
 
 ROOT = Path(__file__).resolve().parents[1]
 COMPOSE_PATH = ROOT / "docker-compose.yml"
@@ -82,7 +81,7 @@ def _write_live_env(path: Path) -> None:
             [
                 "AI_GATEWAY_API_KEY=gateway-secret",
                 "REPLICATE_API_TOKEN=replicate-secret",
-                "REPLICATE_ELEVENLABS_MODEL=owner/model",
+                "ELEVENLABS_API_KEY=elevenlabs-secret",
                 "R2_ACCOUNT_ID=account-secret",
                 "R2_ACCESS_KEY_ID=access-secret",
                 "R2_SECRET_ACCESS_KEY=r2-secret",

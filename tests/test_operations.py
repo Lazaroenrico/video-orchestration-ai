@@ -2,11 +2,11 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime, timedelta
 import json
+from datetime import UTC, datetime, timedelta
 
-from click.testing import CliRunner
 import pytest
+from click.testing import CliRunner
 
 from orchestrator.cli import cli
 from orchestrator.db import Database, TenantIdentity, upgrade_database

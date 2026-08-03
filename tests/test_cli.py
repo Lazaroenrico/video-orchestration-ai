@@ -6,7 +6,6 @@ from click.testing import CliRunner
 
 from orchestrator.cli import cli
 
-
 CLI_OFFLINE_ENV = {
     "LANGSMITH_TRACING": "false",
     "DATABASE_URL": "",
@@ -138,6 +137,15 @@ def test_cli_provision_runtime_requires_password(monkeypatch):
     assert "ORCHESTRATOR_RUNTIME_PASSWORD" in result.output
 
 
+def test_cli_voice_quota_command_exposes_only_operational_buckets():
+    result = _invoke(CliRunner(), ["db", "set-voice-quota", "--help"])
+
+    assert result.exit_code == 0, result.output
+    assert "elevenlabs_voice_design_chars" in result.output
+    assert "elevenlabs_voice_slots" in result.output
+    assert "elevenlabs_tts_chars" in result.output
+
+
 def _mock_config_dir(tmp_path):
     cfg = tmp_path / "config"
     cfg.mkdir()
@@ -262,3 +270,47 @@ def test_cli_does_not_override_existing_env_with_dotenv(monkeypatch):
 
     assert res.exit_code == 0, res.output
     assert observed["gateway"] == "already-exported"
+
+
+def test_cli_sets_tenant_scoped_voice_quota(monkeypatch):
+    calls = []
+
+    class FakeDatabase:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def resolve_tenant(self, identity):
+            calls.append(("tenant", identity))
+            return "tenant-context"
+
+    class FakeLedger:
+        def __init__(self, database, tenant):
+            calls.append(("ledger", database, tenant))
+
+        async def set_quota(self, bucket, *, limit_units):
+            calls.append(("quota", bucket, limit_units))
+
+    monkeypatch.setattr(
+        "orchestrator.cli.Database.from_env",
+        lambda: FakeDatabase(),
+    )
+    monkeypatch.setattr("orchestrator.cli.PostgresEffectLedger", FakeLedger)
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "db",
+            "set-voice-quota",
+            "--bucket",
+            "elevenlabs_voice_slots",
+            "--limit-units",
+            "3",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert calls[-1] == ("quota", "elevenlabs_voice_slots", 3)
+    assert "configurada em 3 unidades" in result.output

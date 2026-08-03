@@ -7,17 +7,17 @@ from __future__ import annotations
 
 import logging
 
-import httpx
 import pytest
 
 from orchestrator import creator_store, feedback_store, media_store, prompt_store
 from orchestrator.adapters import integrity_qc, mock, replicate_voice
 from orchestrator.adapters._agent_loop import AgentRunResult, ToolAttempt, ToolCall
 from orchestrator.adapters.base import VoiceProfile
-from orchestrator.graph.state import Artifact, Item
 from orchestrator.graph.routing import select_tier
+from orchestrator.graph.state import Artifact, Item
 from orchestrator.registry import resolve_adapter
-
+from orchestrator.storage.base import DEFAULT_EXT, ext_from_mime, ext_from_url
+from orchestrator.tools.base import ToolContext
 
 # ------------------------------------------------------------------ #
 # graph/routing                                                     #
@@ -209,6 +209,46 @@ def test_playable_voice_uri_accepts_audio_data_and_rejects_opaque_schemes():
     assert _is_playable_voice_uri("voice-id:opaque") is False
 
 
+def test_public_creator_payload_ignores_malformed_voice_candidates():
+    from orchestrator.creators import normalize_creator_payload
+
+    payload = normalize_creator_payload(
+        {
+            "id": "creator-0",
+            "voice_candidates": [
+                "not-an-object",
+                {"candidate_id": "missing-preview"},
+                {
+                    "candidate_id": "valid",
+                    "preview": {"uri": "r2://bucket/preview.mp3"},
+                },
+            ],
+        }
+    )
+
+    assert [item["candidate_id"] for item in payload["voice_candidates"]] == ["valid"]
+
+
+def test_creator_database_projection_skips_non_objects_and_rejects_temporary_uris():
+    from orchestrator.db.creators import _canonical_voice_design_fields
+
+    projected = _canonical_voice_design_fields({"voice_candidates": ["invalid"]})
+    assert projected["voice_design_meta"] == {}
+    assert projected["voice_status"] == "legacy"
+
+    with pytest.raises(ValueError, match="canonical URI"):
+        _canonical_voice_design_fields(
+            {
+                "voice_candidates": [
+                    {
+                        "candidate_id": "candidate-1",
+                        "preview": {"uri": "https://temporary.example/preview.mp3"},
+                    }
+                ]
+            }
+        )
+
+
 # ------------------------------------------------------------------ #
 # graph review routing                                              #
 # ------------------------------------------------------------------ #
@@ -219,6 +259,7 @@ def test_playable_voice_uri_accepts_audio_data_and_rejects_opaque_schemes():
         ("concepts", "concepts"),
         ("scripts", "scripts"),
         ("creators", "creator_profiles"),
+        ("voices", "voice_candidates"),
     ],
 )
 async def test_review_regeneration_routes_to_the_requested_creative_stage(target, expected):
@@ -311,15 +352,15 @@ def test_record_last_used_noop_without_prompts(tmp_path):
 # ------------------------------------------------------------------ #
 
 def test_ext_from_mime_guesses_unknown_mime():
-    assert media_store._ext_from_mime("text/html") in ("html", "htm")
+    assert ext_from_mime("text/html") in ("html", "htm")
 
 
 def test_ext_from_mime_defaults_for_unguessable():
-    assert media_store._ext_from_mime("application/x-nonsense") == media_store._DEFAULT_EXT
+    assert ext_from_mime("application/x-nonsense") == DEFAULT_EXT
 
 
 def test_ext_from_url_none_without_extension():
-    assert media_store._ext_from_url("https://cdn.example/path/no-ext") is None
+    assert ext_from_url("https://cdn.example/path/no-ext") is None
 
 
 async def test_persist_item_media_requires_root():
@@ -350,3 +391,91 @@ async def test_persist_media_downloads_http_with_own_client(monkeypatch, tmp_pat
 
     assert out == "/media/run/creator-0/image.png"
     assert (tmp_path / "image.png").read_bytes() == b"BYTES"
+
+
+async def test_persist_voice_candidates_requires_id_and_preview_uri(tmp_path):
+    with pytest.raises(ValueError, match="requires candidate_id and preview uri"):
+        await media_store.persist_voice_candidates(
+            [{"candidate_id": ""}],
+            run_id="run-1",
+            creator_id="creator-0",
+            design_hash="hash",
+            media_root=tmp_path,
+        )
+
+
+async def test_persist_voice_candidates_rejects_unmaterializable_preview(
+    monkeypatch, tmp_path,
+):
+    async def missing(_uri):
+        return None
+
+    monkeypatch.setattr(media_store, "fetch_media", missing)
+    with pytest.raises(RuntimeError, match="could not be materialized"):
+        await media_store.persist_voice_candidates(
+            [
+                {
+                    "candidate_id": "candidate-1",
+                    "preview": {"uri": "mock://missing-preview"},
+                }
+            ],
+            run_id="run-1",
+            creator_id="creator-0",
+            design_hash="hash",
+            media_root=tmp_path,
+        )
+
+
+@pytest.mark.parametrize(
+    ("profile", "presentation", "age", "energy", "pace"),
+    [
+        (
+            {"voice_brief": "masculino jovem", "performance_style": "calma"},
+            "masculine",
+            "young_adult",
+            "low",
+            "calm",
+        ),
+        (
+            {"voice_brief": "voz madura", "performance_style": "neutral"},
+            "neutral",
+            "mature",
+            "balanced",
+            "conversational",
+        ),
+    ],
+)
+async def test_voice_spec_derives_remaining_presentation_age_and_energy_branches(
+    profile, presentation, age, energy, pace,
+):
+    from orchestrator.tools.creators import derive_creator_voice_spec_tool
+
+    spec = await derive_creator_voice_spec_tool(
+        ToolContext(adapter=object(), pipeline={}, run={}, run_id="run-1"),
+        profile=profile,
+    )
+
+    assert spec["vocal_presentation"] == presentation
+    assert spec["vocal_age"] == age
+    assert spec["energy"] == energy
+    assert spec["pace"] == pace
+
+
+def test_summary_ignores_non_mapping_roster_entries_and_batches():
+    from orchestrator.runner import summarize
+
+    summary = summarize(
+        {
+            "roster": [
+                "invalid-creator",
+                {
+                    "id": "creator-0",
+                    "voice_design_history": ["invalid-batch"],
+                    "voice_design_batch": None,
+                },
+            ],
+            "results": [],
+        }
+    )
+
+    assert summary["cost_by_stage"]["voice_design"] == 0.0

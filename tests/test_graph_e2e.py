@@ -34,11 +34,35 @@ def test_summary_breaks_out_voiceover_cost():
     summary = runner.summarize({"results": [item]})
 
     assert summary["cost_by_stage"] == {
+        "voice_design": 0.0,
         "video": 0.16,
         "voiceover": 0.0042,
         "assembly": 0.0,
     }
     assert summary["total_cost_usd"] == pytest.approx(0.1642)
+
+
+def test_summary_counts_voice_design_rerolls_once_across_resume() -> None:
+    batch = {
+        "description_hash": "hash",
+        "reroll_count": 1,
+        "cost_usd": 0.03,
+    }
+    summary = runner.summarize(
+        {
+            "results": [],
+            "roster": [
+                {
+                    "id": "creator-0",
+                    "voice_design_history": [batch],
+                    "voice_design_batch": dict(batch),
+                }
+            ],
+        }
+    )
+
+    assert summary["cost_by_stage"]["voice_design"] == 0.03
+    assert summary["total_cost_usd"] == 0.03
 
 
 def test_clean_task_error_variants():

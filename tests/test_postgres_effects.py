@@ -196,9 +196,30 @@ async def test_effect_ledger_rejects_invalid_and_ambiguous_transitions(postgresq
             await ledger.mark_uncertain("missing-effect", error="missing")
         with pytest.raises(ValueError, match="inexistente"):
             await ledger.mark_succeeded("missing-effect", result={})
+        with pytest.raises(ValueError, match="inexistente"):
+            await ledger.mark_failed(
+                "missing-effect",
+                error="ConnectTimeout",
+                release_quota=True,
+            )
         await ledger.mark_uncertain("effect-guard", error="timeout")
         with pytest.raises(UncertainEffectError, match="não pode"):
             await ledger.mark_succeeded("effect-guard", result={})
+        with pytest.raises(UncertainEffectError, match="não pode falhar"):
+            await ledger.mark_failed(
+                "effect-guard",
+                error="ambiguous",
+                release_quota=False,
+            )
+        reconciled = await ledger.mark_reconciled(
+            "effect-guard",
+            result={"provider_id": "reconciled"},
+        )
+        with pytest.raises(UncertainEffectError, match="não está disponível"):
+            await ledger.mark_reconciled(
+                "effect-guard",
+                result={"provider_id": "duplicate"},
+            )
         with pytest.raises(ValueError, match="inexistente"):
             await ledger.quota_usage("missing-provider")
 
@@ -219,5 +240,44 @@ async def test_effect_ledger_rejects_invalid_and_ambiguous_transitions(postgresq
             "effect-succeeded",
             result={"provider_id": "second"},
         )
+        with pytest.raises(UncertainEffectError, match="não pode falhar"):
+            await ledger.mark_failed(
+                "effect-succeeded",
+                error="too late",
+                release_quota=True,
+            )
 
     assert first.result == replay.result == {"provider_id": "first"}
+    assert reconciled.status == "succeeded"
+    assert reconciled.result == {"provider_id": "reconciled"}
+
+
+async def test_definitive_failure_releases_quota_exactly_once(postgresql):
+    runtime_url = _runtime_url(postgresql)
+    identity = TenantIdentity("failed-acme", "Failed Acme", "oidc|runner")
+
+    async with Database(runtime_url) as database:
+        tenant = await database.ensure_tenant(identity)
+        ledger = PostgresEffectLedger(database, tenant)
+        await ledger.set_quota("elevenlabs_tts_chars", limit_units=200)
+        await ledger.reserve(
+            "voiceover:run-1:item-1:hash:voice-1",
+            run_id="run-1",
+            provider="elevenlabs_tts_chars",
+            units=120,
+            request={"script_hash": "hash"},
+        )
+        failed = await ledger.mark_failed(
+            "voiceover:run-1:item-1:hash:voice-1",
+            error="ConnectTimeout",
+            release_quota=True,
+        )
+        replay = await ledger.mark_failed(
+            "voiceover:run-1:item-1:hash:voice-1",
+            error="ConnectTimeout replay",
+            release_quota=True,
+        )
+        usage = await ledger.quota_usage("elevenlabs_tts_chars")
+
+    assert failed.status == replay.status == "failed"
+    assert usage == (0, 200)

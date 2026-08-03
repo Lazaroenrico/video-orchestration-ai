@@ -1104,6 +1104,52 @@ async def test_real_creator_rejects_full_voiceover_when_adapter_lacks_it() -> No
         )
 
 
+async def test_real_creator_builds_image_when_voice_has_no_legacy_create_method() -> None:
+    adapter = RealCreatorAdapter(
+        image=_FakeImage(),
+        topaz=_OkUpscale(),
+        voice=object(),
+    )
+
+    creator = await adapter.build_creator(0)
+
+    assert creator["voice_id"] == ""
+    assert creator["voice_ref"] == ""
+
+
+@pytest.mark.parametrize(
+    "method",
+    ["design_voice_candidates", "finalize_voice", "reconcile_voice"],
+)
+async def test_real_creator_delegates_direct_voice_design_methods(method: str) -> None:
+    sentinel = object()
+
+    class _DirectVoice:
+        async def design_voice_candidates(self, *args, **kwargs):
+            return sentinel
+
+        async def finalize_voice(self, *args, **kwargs):
+            return sentinel
+
+        async def reconcile_voice(self, *args, **kwargs):
+            return sentinel
+
+    adapter = RealCreatorAdapter(image=_FakeImage(), voice=_DirectVoice())
+
+    assert await getattr(adapter, method)("argument", field="value") is sentinel
+
+
+@pytest.mark.parametrize(
+    "method",
+    ["design_voice_candidates", "finalize_voice", "reconcile_voice"],
+)
+async def test_real_creator_reports_missing_direct_voice_design_methods(method: str) -> None:
+    adapter = RealCreatorAdapter(image=_FakeImage(), voice=object())
+
+    with pytest.raises(AttributeError, match=method):
+        await getattr(adapter, method)()
+
+
 async def test_persist_creator_media_does_not_replace_voice_model_reference(tmp_path) -> None:
     creator = {
         "id": "creator-0",

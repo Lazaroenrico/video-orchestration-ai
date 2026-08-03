@@ -1,13 +1,10 @@
 """Combined creative-plan review gate."""
 from __future__ import annotations
 
-import pytest
 from langgraph.types import Command
 
 from orchestrator.graph.builder import build_graph
 from orchestrator.graph.checkpoint import open_checkpointer
-from tests.conftest import TIERS
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -25,6 +22,18 @@ def _make_cfg(adapter, pipeline_cfg, run_extras=None, thread_id="t1", db_path=No
         "recursion_limit": 100,
     }
     return cfg
+
+
+def _select_first_voice(creators):
+    return [
+        {
+            "id": creator["id"],
+            "selected_voice_candidate_id": creator["voice_candidates"][0][
+                "candidate_id"
+            ],
+        }
+        for creator in creators
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -105,7 +114,19 @@ async def test_review_gate_approve_resumes_full_production(tmp_path, adapter, pi
     async with open_checkpointer(str(db)) as cp:
         graph = build_graph(pipeline_cfg, checkpointer=cp)
         await graph.ainvoke(init, cfg)
-        result = await graph.ainvoke(Command(resume={"action": "approve"}), cfg)
+        snap = await graph.aget_state(cfg)
+        interrupt = next(
+            item for task in snap.tasks for item in getattr(task, "interrupts", ())
+        )
+        result = await graph.ainvoke(
+            Command(
+                resume={
+                    "action": "approve",
+                    "creators": _select_first_voice(interrupt.value["creators"]),
+                }
+            ),
+            cfg,
+        )
 
     roster = result.get("roster", [])
     assert len(roster) == 2
@@ -134,7 +155,13 @@ async def test_review_gate_approve_applies_concept_edits(tmp_path, adapter, pipe
         concepts = list(interrupt.value["concepts"])
         concepts[0] = {**concepts[0], "script": "HOOK: edited\nCTA: now"}
         result = await graph.ainvoke(
-            Command(resume={"action": "approve", "concepts": concepts}),
+            Command(
+                resume={
+                    "action": "approve",
+                    "concepts": concepts,
+                    "creators": _select_first_voice(interrupt.value["creators"]),
+                }
+            ),
             cfg,
         )
 
@@ -169,6 +196,9 @@ async def test_review_gate_approve_edits_profile_without_replacing_media(
             {
                 "id": creator["id"],
                 "archetype": f"Reviewed archetype {idx}",
+                "selected_voice_candidate_id": creator["voice_candidates"][0][
+                    "candidate_id"
+                ],
             }
             for idx, creator in enumerate(creators)
         ]

@@ -14,7 +14,6 @@ from orchestrator.db import (
 from orchestrator.storage.db import ArtifactRecord, open_artifact_repository
 from orchestrator.storage.retention import RETENTION_REJECTED, purge_expired
 
-
 _NOW = datetime(2026, 7, 19, 12, 0, tzinfo=timezone.utc)
 
 

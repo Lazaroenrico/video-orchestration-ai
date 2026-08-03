@@ -56,6 +56,35 @@ async def test_recorded_creator_survives_repository_restart(postgresql):
         "voice_preview_uri": "r2://ugc-prod/run-1/creator-0/voice.mp3",
         "angles": ["front", "profile"],
         "voice_reroll_count": 2,
+        "voice_spec": {
+            "language_code": "pt-BR",
+            "timbre": "warm",
+        },
+        "voice_provider": "elevenlabs",
+        "voice_tts_model": "eleven_turbo_v2_5",
+        "voice_design_batch": {
+            "provider": "elevenlabs",
+            "design_model": "eleven_ttv_v3",
+            "description_hash": "description-hash",
+            "prompt_version": "voice-match-v1",
+            "candidates": [
+                {
+                    "candidate_id": "candidate-1",
+                    "preview": {
+                        "kind": "voice_preview",
+                        "uri": (
+                            "r2://ugc-prod/run-1/creators/creator-0/"
+                            "voice-candidates/description-hash/candidate-1.mp3"
+                        ),
+                    },
+                    "duration_seconds": 4.2,
+                    "media_type": "audio/mpeg",
+                }
+            ],
+            "cost_usd": 0.01,
+            "cost_source": "estimate",
+        },
+        "selected_voice_candidate_id": "candidate-1",
     }
 
     async with Database(runtime_url) as database:
@@ -87,6 +116,33 @@ async def test_recorded_creator_survives_repository_restart(postgresql):
             "voice": "voice-acme",
             "angles": ["front", "profile"],
             "voice_reroll_count": 2,
+            "voice_spec": {
+                "language_code": "pt-BR",
+                "timbre": "warm",
+            },
+            "voice_provider": "elevenlabs",
+            "voice_design_model": "eleven_ttv_v3",
+            "voice_tts_model": "eleven_turbo_v2_5",
+            "voice_design_hash": "description-hash",
+            "voice_selected_candidate": "candidate-1",
+            "voice_status": "selected",
+            "voice_design_meta": {
+                "prompt_version": "voice-match-v1",
+                "reroll": 2,
+                "candidates": [
+                    {
+                        "candidate_id": "candidate-1",
+                        "preview_uri": (
+                            "r2://ugc-prod/run-1/creators/creator-0/"
+                            "voice-candidates/description-hash/candidate-1.mp3"
+                        ),
+                        "duration_seconds": 4.2,
+                        "media_type": "audio/mpeg",
+                    }
+                ],
+                "cost_usd": 0.01,
+                "cost_source": "estimate",
+            },
             "creator_prompt": "natural",
             "video_prompt": "close-up",
             "offer": "serum X",

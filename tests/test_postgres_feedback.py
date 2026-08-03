@@ -10,7 +10,6 @@ from orchestrator.db import (
     upgrade_database,
 )
 
-
 SUMMARY = {
     "produced": 10,
     "approved": 8,

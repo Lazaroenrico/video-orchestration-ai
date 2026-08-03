@@ -7,12 +7,10 @@
 """
 from __future__ import annotations
 
-import asyncio
 import pytest
 
 from orchestrator.adapters.mock import MockAdapter
 from tests.conftest import TIERS
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -188,8 +186,8 @@ async def test_gen_node_passes_video_prompt(pipeline_cfg, adapter):
 
     spy = SpyAdapter(tiers=TIERS)
 
-    from orchestrator.nodes.stages import make_gen_node
     from orchestrator.graph.state import Item
+    from orchestrator.nodes.stages import make_gen_node
 
     gen = make_gen_node("ltx")
     item = Item(
@@ -241,8 +239,8 @@ async def test_node_product_demo_passes_video_prompt(pipeline_cfg, adapter):
 
     spy = SpyAdapter(tiers=TIERS)
 
-    from orchestrator.nodes.stages import node_product_demo
     from orchestrator.graph.state import Item
+    from orchestrator.nodes.stages import node_product_demo
 
     item = Item(
         concept={"id": "c1", "offer": "serum"},
