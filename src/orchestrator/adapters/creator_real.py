@@ -31,6 +31,7 @@ from orchestrator.adapters.base import VoicePort, VoiceProfile, resolve_voice_pr
 from orchestrator.adapters.elevenlabs_voice import ElevenLabsVoiceAdapter
 from orchestrator.adapters.openai_image import OpenAIImageAdapter, build_openai_image_vercel_adapter
 from orchestrator.adapters.replicate_voice import ReplicateVoiceAdapter
+from orchestrator.adapters.voice_factory import build_voice_adapter
 from orchestrator.tracing import traced
 
 _log = logging.getLogger(__name__)
@@ -99,7 +100,11 @@ class RealCreatorAdapter:
         primary = face["primary"]
 
         try:
-            voice_id = await self.voice.create_voice(index, voice_profile=resolved_voice)
+            create_voice_fn = getattr(self.voice, "create_voice", None)
+            if callable(create_voice_fn):
+                voice_id = await create_voice_fn(index, voice_profile=resolved_voice)
+            else:
+                voice_id = ""
         except Exception as exc:  # noqa: BLE001 — voz é opcional; imagem preservada
             _log.error("voz falhou (creator-%d): %s", index, exc)
             voice_id = ""
@@ -141,8 +146,11 @@ class RealCreatorAdapter:
         comportar. ``voice_source_uri``/``voice_preview_uri`` são zerados para o
         caller re-persistir o áudio novo.
         """
-        voice_id = await self.voice.create_voice(
-            index + reroll_count, voice_profile=voice_profile
+        create_voice_fn = getattr(self.voice, "create_voice", None)
+        voice_id = (
+            await create_voice_fn(index + reroll_count, voice_profile=voice_profile)
+            if callable(create_voice_fn)
+            else ""
         )
         resolve_voice_ref = getattr(self.voice, "resolve_voice_ref", None)
         voice_model_ref = (
@@ -168,6 +176,11 @@ class RealCreatorAdapter:
         if hasattr(self.voice, "finalize_voice"):
             return await self.voice.finalize_voice(*args, **kwargs)
         raise AttributeError("self.voice has no finalize_voice")
+
+    async def reconcile_voice(self, *args: Any, **kwargs: Any) -> Any:
+        if hasattr(self.voice, "reconcile_voice"):
+            return await self.voice.reconcile_voice(*args, **kwargs)
+        raise AttributeError("self.voice has no reconcile_voice")
 
     @traced(
         "adapter.creator_real.synthesize_voiceover",
@@ -195,7 +208,7 @@ def build_real_creator_adapter(pipeline: dict[str, Any]) -> RealCreatorAdapter:
     """
     return RealCreatorAdapter(
         image=OpenAIImageAdapter(),
-        voice=ElevenLabsVoiceAdapter(),
+        voice=build_voice_adapter(pipeline),
     )
 
 
@@ -209,7 +222,7 @@ def build_real_creator_vercel_adapter(pipeline: dict[str, Any]) -> RealCreatorAd
     """
     return RealCreatorAdapter(
         image=build_openai_image_vercel_adapter(pipeline),
-        voice=ElevenLabsVoiceAdapter(),
+        voice=build_voice_adapter(pipeline),
     )
 
 

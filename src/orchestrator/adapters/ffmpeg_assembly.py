@@ -4,7 +4,10 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import os
+import signal
 import tempfile
+from contextlib import suppress
 from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import unquote, urlparse
@@ -56,23 +59,40 @@ class FfmpegAssemblyAdapter:
         if self.audio_speedup_max < 1 or self.audio_speedup_max > 2:
             raise ValueError("audio_speedup_max must be between 1 and 2")
 
+    @staticmethod
+    async def _communicate(process: asyncio.subprocess.Process) -> tuple[bytes, bytes]:
+        """Drain both pipes without the late ``Process.wait()`` race in communicate()."""
+        assert process.stdout is not None
+        assert process.stderr is not None
+        stdout, stderr = await asyncio.gather(
+            process.stdout.read(),
+            process.stderr.read(),
+        )
+        while process.returncode is None:
+            await asyncio.sleep(0)
+        await process.wait()
+        return stdout, stderr
+
     async def _run(self, *command: str) -> tuple[bytes, bytes]:
         try:
             process = await asyncio.create_subprocess_exec(
                 *command,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                start_new_session=True,
             )
         except FileNotFoundError as exc:
             raise RuntimeError(f"required media binary is missing: {command[0]}") from exc
         try:
             stdout, stderr = await asyncio.wait_for(
-                process.communicate(),
+                self._communicate(process),
                 timeout=self.timeout_seconds,
             )
         except TimeoutError as exc:
-            process.kill()
-            await process.communicate()
+            if process.returncode is None:
+                with suppress(ProcessLookupError):
+                    os.killpg(process.pid, signal.SIGKILL)
+            await self._communicate(process)
             raise RuntimeError(f"{command[0]} timed out") from exc
         if process.returncode:
             detail = stderr.decode("utf-8", errors="replace").strip()
