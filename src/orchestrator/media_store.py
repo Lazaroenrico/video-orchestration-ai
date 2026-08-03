@@ -25,17 +25,14 @@ from typing import Any, Optional
 
 import httpx
 
+from orchestrator.graph.state import Artifact
 from orchestrator.storage.base import (
-    _DEFAULT_EXT,
     MediaStorage,
     StoredObject,
-    ext_from_mime as _ext_from_mime,
-    ext_from_url as _ext_from_url,
-    is_downloadable as _is_downloadable,
+    fetch_media,
 )
 from orchestrator.storage.db import ArtifactRecord, ArtifactRepository
 from orchestrator.storage.local import LocalMediaStorage
-from orchestrator.graph.state import Artifact
 
 _log = logging.getLogger(__name__)
 
@@ -46,6 +43,7 @@ __all__ = [
     "persist_artifact_bytes",
     "persist_item_media",
     "persist_media",
+    "persist_voice_candidates",
 ]
 
 
@@ -106,6 +104,73 @@ async def persist_bytes(
     storage = LocalMediaStorage(dest_dir, web_prefix=web_prefix)
     stored = await storage.put_bytes(data, key_base=basename, content_type=content_type)
     return stored.uri
+
+
+async def persist_voice_candidates(
+    candidates: list[dict[str, Any]],
+    *,
+    run_id: str,
+    creator_id: str,
+    design_hash: str,
+    media_root: str | Path | None = None,
+    storage: Optional[MediaStorage] = None,
+    db: Optional[ArtifactRepository] = None,
+) -> list[dict[str, Any]]:
+    """Persist voice previews before review and return canonical-pointer candidates."""
+    backend = _storage_for(
+        storage,
+        media_root,
+        web_prefix="/media",
+        required_arg="media_root",
+    )
+    persisted: list[dict[str, Any]] = []
+    for candidate in candidates:
+        candidate_data = dict(candidate)
+        candidate_id = str(candidate_data.get("candidate_id") or "").strip()
+        preview = candidate_data.get("preview")
+        preview_data = (
+            preview.model_dump(mode="json")
+            if hasattr(preview, "model_dump")
+            else dict(preview or {})
+        )
+        source_uri = preview_data.get("uri")
+        if not candidate_id or not isinstance(source_uri, str):
+            raise ValueError("voice candidate requires candidate_id and preview uri")
+        fetched = await fetch_media(source_uri)
+        if fetched is None:
+            raise RuntimeError("voice candidate preview could not be materialized")
+        key_base = (
+            f"runs/{run_id}/creators/{creator_id}/voice-candidates/"
+            f"{design_hash}/{candidate_id}"
+        )
+        stored = await backend.put_bytes(
+            fetched.data,
+            key_base=key_base,
+            content_type="audio/mpeg",
+        )
+        provider = str((preview_data.get("meta") or {}).get("provider") or "voice")
+        provenance = f"generated:{provider}"
+        await _record(
+            db,
+            stored,
+            run_id=run_id,
+            kind="voice_candidate",
+            source_uri=provenance,
+            creator_id=creator_id,
+        )
+        preview_meta = dict(preview_data.get("meta") or {})
+        preview_meta.update(
+            candidate_id=candidate_id,
+            **_pointer(stored),
+        )
+        candidate_data["preview"] = {
+            **preview_data,
+            "uri": stored.uri,
+            "meta": preview_meta,
+        }
+        candidate_data["media_type"] = "audio/mpeg"
+        persisted.append(candidate_data)
+    return persisted
 
 
 def _pointer(stored: StoredObject) -> dict[str, str]:

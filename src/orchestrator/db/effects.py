@@ -8,7 +8,8 @@ from sqlalchemy import select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from orchestrator.db.database import Database
-from orchestrator.db.models import EffectLedger as EffectLedgerModel, ProviderQuota
+from orchestrator.db.models import EffectLedger as EffectLedgerModel
+from orchestrator.db.models import ProviderQuota
 from orchestrator.db.tenancy import TenantContext
 
 
@@ -253,6 +254,85 @@ class PostgresEffectLedger:
                     )
         return _reservation(row, created=False)
 
+    async def mark_failed(
+        self,
+        effect_key: str,
+        *,
+        error: str,
+        release_quota: bool,
+    ) -> EffectReservation:
+        """Mark a definitive failure; release quota at most once when unbilled."""
+        stmt_update = (
+            update(EffectLedgerModel)
+            .where(
+                EffectLedgerModel.organization_id == self._tenant.organization_id,
+                EffectLedgerModel.effect_key == effect_key,
+                EffectLedgerModel.status == "reserved",
+            )
+            .values(status="failed", error=error[:2000])
+            .returning(*_EFFECT_COLUMNS)
+        )
+        stmt_existing = select(*_EFFECT_COLUMNS).where(
+            EffectLedgerModel.organization_id == self._tenant.organization_id,
+            EffectLedgerModel.effect_key == effect_key,
+        )
+        async with self._database.connection(self._tenant) as connection:
+            cursor = await self._database.execute(connection, stmt_update)
+            row = await cursor.fetchone()
+            if row is not None:
+                if release_quota:
+                    await self._database.execute(
+                        connection,
+                        update(ProviderQuota)
+                        .where(
+                            ProviderQuota.organization_id
+                            == self._tenant.organization_id,
+                            ProviderQuota.provider == row[2],
+                        )
+                        .values(
+                            used_units=ProviderQuota.used_units - int(row[3])
+                        ),
+                    )
+            else:
+                existing_cursor = await self._database.execute(
+                    connection,
+                    stmt_existing,
+                )
+                row = await existing_cursor.fetchone()
+                if row is None:
+                    raise ValueError(f"efeito {effect_key!r} inexistente")
+                if row[4] != "failed":
+                    raise UncertainEffectError(
+                        f"efeito {effect_key!r} não pode falhar a partir de {row[4]!r}"
+                    )
+        return _reservation(row, created=False)
+
+    async def mark_reconciled(
+        self,
+        effect_key: str,
+        *,
+        result: dict[str, Any],
+    ) -> EffectReservation:
+        """Resolve an uncertain effect only from a unique provider-side match."""
+        stmt = (
+            update(EffectLedgerModel)
+            .where(
+                EffectLedgerModel.organization_id == self._tenant.organization_id,
+                EffectLedgerModel.effect_key == effect_key,
+                EffectLedgerModel.status == "uncertain",
+            )
+            .values(status="succeeded", result=result, error=None)
+            .returning(*_EFFECT_COLUMNS)
+        )
+        async with self._database.connection(self._tenant) as connection:
+            cursor = await self._database.execute(connection, stmt)
+            row = await cursor.fetchone()
+            if row is None:
+                raise UncertainEffectError(
+                    f"efeito {effect_key!r} não está disponível para reconciliação"
+                )
+        return _reservation(row, created=False)
+
     async def quota_usage(self, provider: str) -> tuple[int, int]:
         stmt = (
             select(ProviderQuota.used_units, ProviderQuota.limit_units)
@@ -267,4 +347,3 @@ class PostgresEffectLedger:
         if row is None:
             raise ValueError(f"quota de {provider!r} inexistente")
         return row
-

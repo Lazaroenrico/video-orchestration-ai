@@ -1,12 +1,15 @@
 """Assembly and final-upscale tools."""
 from __future__ import annotations
 
-from typing import Optional
+import hashlib
+from typing import Any, Optional
 
 from orchestrator.adapters.base import RenderedMedia
 from orchestrator.graph.state import Artifact, Item
 from orchestrator.tools.base import (
     ToolContext,
+    direct_elevenlabs_voice_enabled,
+    execute_paid_effect,
     require_artifact,
     require_non_empty_string,
 )
@@ -56,6 +59,7 @@ async def synthesize_voiceover_tool(
     *,
     voice_ref: str,
     text: str,
+    item_id: str,
 ) -> Artifact:
     add_trace_metadata(
         tool_name="synthesize_voiceover",
@@ -63,11 +67,35 @@ async def synthesize_voiceover_tool(
         stage="voiceover",
         run_id=ctx.run_id,
     )
-    art = await ctx.adapter.synthesize_voiceover(
-        voice_ref=voice_ref,
-        text=text,
-    )
-    return require_artifact(art, tool_name="synthesize_voiceover_tool")
+    async def synthesize() -> dict[str, Any]:
+        art = await ctx.adapter.synthesize_voiceover(
+            voice_ref=voice_ref,
+            text=text,
+        )
+        validated = require_artifact(art, tool_name="synthesize_voiceover_tool")
+        return validated.model_dump(mode="json")
+
+    if direct_elevenlabs_voice_enabled(ctx):
+        script_hash = hashlib.sha256(text.encode()).hexdigest()[:16]
+        result = await execute_paid_effect(
+            ctx,
+            effect_key=(
+                f"voiceover:{ctx.run_id}:{item_id}:{script_hash}:{voice_ref}"
+            ),
+            provider="elevenlabs_tts_chars",
+            units=len(text),
+            request={
+                "item_id": item_id,
+                "script_hash": script_hash,
+                "voice_ref": voice_ref,
+                "characters": len(text),
+                "model": str(ctx.pipeline.get("voice", {}).get("tts_model") or ""),
+            },
+            operation=synthesize,
+        )
+    else:
+        result = await synthesize()
+    return require_artifact(result, tool_name="synthesize_voiceover_tool")
 
 
 @traced(

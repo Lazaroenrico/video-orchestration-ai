@@ -2,11 +2,10 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime
 import os
+from datetime import datetime
 from pathlib import Path
-from typing import Any
-from typing import Awaitable, Callable
+from typing import Any, Awaitable, Callable
 
 import httpx
 from replicate.exceptions import ReplicateError
@@ -25,14 +24,15 @@ from orchestrator.db import (
     Job,
     LeaseLostError,
     PostgresCreatorRepository,
+    PostgresEffectLedger,
     PostgresJobRepository,
     PostgresRunRepository,
     TenantIdentity,
 )
+from orchestrator.nodes.stages import apply_review_creator_updates
+from orchestrator.registry import ROLES
 from orchestrator.storage.factory import build_media_storage
 from orchestrator.storage.resolve import resolve_signed_uris
-from orchestrator.registry import ROLES
-
 
 JobExecutor = Callable[[Job], Awaitable[None]]
 
@@ -155,6 +155,7 @@ async def _execute_pipeline_job(
             f"{paid_roles}"
         )
     agent_catalog = load_agent_catalog(config_dir)
+    effect_ledger = PostgresEffectLedger(database, tenant)
     db_path = Path(run_payload.get("db_path") or default_db_path())
     run_options = {
         key: run_payload.get(key)
@@ -193,7 +194,14 @@ async def _execute_pipeline_job(
             and isinstance(resolution, dict)
             and resolution.get("action") == "approve"
         ):
-            creators = resolution.get("creators") or gate_payload.get("creators")
+            gate_creators = gate_payload.get("creators")
+            creator_updates = resolution.get("creators")
+            creators = gate_creators
+            if isinstance(gate_creators, list) and isinstance(creator_updates, list):
+                creators = apply_review_creator_updates(
+                    [_plain(creator) for creator in gate_creators],
+                    [_plain(creator) for creator in creator_updates],
+                )
             if isinstance(creators, list):
                 await PostgresCreatorRepository(database, tenant).record_creators(
                     job.run_id,
@@ -219,6 +227,8 @@ async def _execute_pipeline_job(
             agent_catalog=agent_catalog,
             run_options=run_options,
             event_sink=persist_progress,
+            effect_ledger=effect_ledger,
+            durable=True,
         )
     else:
         _, output = await runner.resume_pipeline(
@@ -231,6 +241,8 @@ async def _execute_pipeline_job(
             resume_value=payload.get("resolution"),
             run_options=run_options,
             event_sink=persist_progress,
+            effect_ledger=effect_ledger,
+            durable=True,
         )
     persisted_state = await runner.get_status(
         pipeline,
@@ -238,6 +250,20 @@ async def _execute_pipeline_job(
         run_id=job.run_id,
     )
     state = _plain(persisted_state or output)
+    finalized_roster = state.get("roster")
+    if isinstance(finalized_roster, list) and finalized_roster:
+        await PostgresCreatorRepository(database, tenant).record_creators(
+            job.run_id,
+            [_plain(creator) for creator in finalized_roster],
+            approved_ids=[
+                str(creator.get("id"))
+                for creator in finalized_roster
+                if isinstance(creator, dict) and creator.get("id")
+            ],
+            creator_prompt=None,
+            video_prompt=None,
+            offer=run_payload.get("offer"),
+        )
     items = [
         _plain(item)
         for item in ((persisted_state or output).get("results") or [])

@@ -6,7 +6,6 @@ from pathlib import Path
 from alembic import command
 from alembic.config import Config
 
-
 _PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
 

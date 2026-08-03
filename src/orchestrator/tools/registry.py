@@ -5,7 +5,6 @@ from dataclasses import dataclass, field
 from importlib import import_module
 from typing import Any
 
-
 _CONCEPT_SUBMISSION_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {

@@ -4,7 +4,16 @@ from __future__ import annotations
 from typing import Any, Optional
 
 from orchestrator.adapters.base import VoiceProfile
-from orchestrator.tools.base import ToolContext, require_dict
+from orchestrator.adapters.elevenlabs_voice_design import (
+    DEFAULT_PREVIEW_TEXT,
+    voice_description_hash,
+)
+from orchestrator.tools.base import (
+    ToolContext,
+    direct_elevenlabs_voice_enabled,
+    execute_paid_effect,
+    require_dict,
+)
 from orchestrator.tracing import add_trace_metadata, traced
 
 
@@ -111,6 +120,8 @@ async def design_creator_voice_tool(
     *,
     spec: dict[str, Any],
     preview_text: Optional[str] = None,
+    creator_id: str = "creator",
+    reroll_count: int = 0,
 ) -> dict[str, Any]:
     add_trace_metadata(
         tool_name="design_creator_voice",
@@ -121,12 +132,37 @@ async def design_creator_voice_tool(
     from orchestrator.creative_contracts import CreatorVoiceSpec
 
     spec_obj = CreatorVoiceSpec.model_validate(spec)
-    batch = await ctx.adapter.design_voice_candidates(
-        spec_obj, preview_text=preview_text
-    )
-    return require_dict(
-        batch.model_dump() if hasattr(batch, "model_dump") else batch,
-        tool_name="design_creator_voice_tool",
+    description_hash = voice_description_hash(spec_obj)
+
+    async def design() -> dict[str, Any]:
+        batch = await ctx.adapter.design_voice_candidates(
+            spec_obj,
+            preview_text=preview_text,
+        )
+        return require_dict(
+            batch.model_dump() if hasattr(batch, "model_dump") else batch,
+            tool_name="design_creator_voice_tool",
+        )
+
+    if not direct_elevenlabs_voice_enabled(ctx):
+        return await design()
+    sample = (preview_text or DEFAULT_PREVIEW_TEXT).strip()
+    return await execute_paid_effect(
+        ctx,
+        effect_key=(
+            f"voice-design:{ctx.run_id}:{creator_id}:"
+            f"{description_hash}:{reroll_count}"
+        ),
+        provider="elevenlabs_voice_design_chars",
+        units=len(sample),
+        request={
+            "creator_id": creator_id,
+            "description_hash": description_hash,
+            "model": str(ctx.pipeline.get("voice", {}).get("design_model") or ""),
+            "preview_characters": len(sample),
+            "reroll": reroll_count,
+        },
+        operation=design,
     )
 
 
@@ -151,13 +187,45 @@ async def finalize_creator_voice_tool(
         stage="finalize_voices",
         run_id=ctx.run_id,
     )
-    finalized = await ctx.adapter.finalize_voice(
-        candidate_id,
-        batch=batch,
-        creator_id=creator_id,
-        organization_id=organization_id,
-    )
-    return require_dict(
-        finalized.model_dump() if hasattr(finalized, "model_dump") else finalized,
-        tool_name="finalize_creator_voice_tool",
+    async def finalize() -> dict[str, Any]:
+        finalized = await ctx.adapter.finalize_voice(
+            candidate_id,
+            batch=batch,
+            creator_id=creator_id,
+            organization_id=organization_id,
+        )
+        return require_dict(
+            finalized.model_dump() if hasattr(finalized, "model_dump") else finalized,
+            tool_name="finalize_creator_voice_tool",
+        )
+
+    if not direct_elevenlabs_voice_enabled(ctx):
+        return await finalize()
+
+    async def reconcile() -> dict[str, Any]:
+        reconciled = await ctx.adapter.reconcile_voice(
+            candidate_id,
+            batch=batch,
+            creator_id=creator_id,
+            organization_id=organization_id,
+        )
+        return require_dict(
+            reconciled.model_dump()
+            if hasattr(reconciled, "model_dump")
+            else reconciled,
+            tool_name="finalize_creator_voice_tool",
+        )
+
+    return await execute_paid_effect(
+        ctx,
+        effect_key=f"voice-finalize:{ctx.run_id}:{creator_id}:{candidate_id}",
+        provider="elevenlabs_voice_slots",
+        units=1,
+        request={
+            "creator_id": creator_id,
+            "candidate_id": candidate_id,
+            "description_hash": str(batch.get("description_hash") or ""),
+        },
+        operation=finalize,
+        reconcile=reconcile,
     )

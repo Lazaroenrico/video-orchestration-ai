@@ -10,7 +10,6 @@ import orchestrator.job_store as job_store
 from orchestrator.wake_queue import build_wake_queue, publish_outbox_once
 from orchestrator.worker import run_worker_once
 
-
 app = FastAPI(title="UGC Orchestrator Runner")
 
 

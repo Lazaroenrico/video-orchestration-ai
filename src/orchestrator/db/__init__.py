@@ -1,12 +1,5 @@
 """Interface pública da persistência PostgreSQL multi-tenant."""
 
-from orchestrator.db.database import (
-    Database,
-    TenantAuthorizationError,
-    close_shared_database,
-    get_shared_database,
-)
-from orchestrator.db.artifacts import PostgresArtifactRepository
 from orchestrator.db.admin import (
     MEMBERSHIP_ROLES,
     RUNTIME_ROLE,
@@ -15,14 +8,21 @@ from orchestrator.db.admin import (
     provision_runtime_role,
     revoke_membership,
 )
+from orchestrator.db.artifacts import PostgresArtifactRepository
 from orchestrator.db.creators import PostgresCreatorRepository
-from orchestrator.db.feedback import PostgresFeedbackRepository
+from orchestrator.db.database import (
+    Database,
+    TenantAuthorizationError,
+    close_shared_database,
+    get_shared_database,
+)
 from orchestrator.db.effects import (
     EffectReservation,
     PostgresEffectLedger,
     QuotaExceededError,
     UncertainEffectError,
 )
+from orchestrator.db.feedback import PostgresFeedbackRepository
 from orchestrator.db.jobs import (
     CancellationSummary,
     CancelledGateError,
@@ -30,8 +30,8 @@ from orchestrator.db.jobs import (
     LeaseLostError,
     OutboxEntry,
     PostgresJobRepository,
-    RunGate,
     RunEvent,
+    RunGate,
     StaleGateError,
 )
 from orchestrator.db.migrations import upgrade_database

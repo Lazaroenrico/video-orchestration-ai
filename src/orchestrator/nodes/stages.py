@@ -15,8 +15,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-_log = logging.getLogger(__name__)
-
 from langchain_core.callbacks.manager import adispatch_custom_event
 from langchain_core.runnables import RunnableConfig
 from langgraph.types import interrupt
@@ -32,15 +30,16 @@ from orchestrator.creative_contracts import (
     ScriptResult,
     script_result_from_text,
 )
-from orchestrator.graph.state import Artifact, Item, new_item
+from orchestrator.graph.state import Artifact, Item
 from orchestrator.nodes.base import as_item, get_pipeline
 from orchestrator.stage_executor import StageExecutionError, execute_stage_tool
+from orchestrator.storage.base import is_downloadable
+from orchestrator.storage.resolve import resolve_signed_uris
 from orchestrator.storage.retention import (
     RETENTION_INTERMEDIATE,
     RETENTION_KEEP,
     RETENTION_REJECTED,
 )
-from orchestrator.storage.resolve import resolve_signed_uris
 from orchestrator.tools.assembly import (
     assemble_video_tool,
     synthesize_voiceover_tool,
@@ -48,18 +47,20 @@ from orchestrator.tools.assembly import (
 )
 from orchestrator.tools.base import tool_context_from_config
 from orchestrator.tools.concepts import generate_concepts_tool
+from orchestrator.tools.creator_profiles import design_creator_roster_tool
 from orchestrator.tools.creators import (
     build_creator_tool,
     derive_creator_voice_spec_tool,
     design_creator_voice_tool,
     finalize_creator_voice_tool,
 )
-from orchestrator.tools.creator_profiles import design_creator_roster_tool
 from orchestrator.tools.persona import write_persona_tool
 from orchestrator.tools.qc import qc_check_tool
 from orchestrator.tools.scripts import write_script_tool
 from orchestrator.tools.video import generate_clip_tool
 from orchestrator.tracing import add_trace_metadata, traced
+
+_log = logging.getLogger(__name__)
 
 
 async def _report_creative_progress(
@@ -105,7 +106,7 @@ async def _build_voice_preview(
         return None
     if creator.get("voice_source_uri"):
         return voice_ref
-    if media_store._is_downloadable(voice_ref):
+    if is_downloadable(voice_ref):
         return None
 
     synth = getattr(getattr(adapter, "voice", None), "synthesize_preview", None)
@@ -214,7 +215,7 @@ async def reroll_creator_voice(
     # bytes com nome versionado por reroll — o path muda a cada troca, então o
     # <audio> da UI nunca serve cache da voz anterior.
     voice_uri = next_creator.get("voice_id")
-    if isinstance(voice_uri, str) and media_store._is_downloadable(voice_uri):
+    if isinstance(voice_uri, str) and is_downloadable(voice_uri):
         creator_id = next_creator.get("id") or "creator"
         local = await media_store.persist_media(
             voice_uri,
@@ -387,17 +388,65 @@ def apply_review_creator_updates(
             )
         by_id[str(update["id"])] = update
 
-    return [
-        {
+    reviewed: list[dict[str, Any]] = []
+    for creator in roster:
+        update = by_id[str(creator["id"])]
+        merged = {
             **creator,
             **{
                 key: value
-                for key, value in by_id[str(creator["id"])].items()
+                for key, value in update.items()
                 if key in _EDITABLE_CREATOR_FIELDS
             },
         }
-        for creator in roster
-    ]
+        brief_changed = (
+            "voice_brief" in update
+            and update["voice_brief"] != creator.get("voice_brief")
+        )
+        if brief_changed:
+            previous_candidates = list(creator.get("voice_candidates") or [])
+            history = list(creator.get("voice_design_history") or [])
+            if previous_candidates:
+                previous_batch = creator.get("voice_design_batch")
+                history.append(
+                    dict(previous_batch)
+                    if isinstance(previous_batch, dict)
+                    else previous_candidates
+                )
+            merged["voice_design_history"] = history
+            merged["voice_candidates"] = []
+            merged.pop("voice_design_batch", None)
+            merged["selected_voice_candidate_id"] = None
+        elif "selected_voice_candidate_id" in update:
+            selected_id = str(update.get("selected_voice_candidate_id") or "")
+            candidate_ids = {
+                str(candidate.get("candidate_id") or "")
+                for candidate in creator.get("voice_candidates") or []
+                if isinstance(candidate, dict)
+            }
+            if selected_id and selected_id not in candidate_ids:
+                raise ValueError(
+                    "selected voice candidate must belong to creator "
+                    + str(creator.get("id") or "unknown")
+                )
+        reviewed.append(merged)
+    return reviewed
+
+
+def validate_voice_selections(roster: list[dict[str, Any]]) -> None:
+    """Require one current candidate selected for every reviewed creator."""
+    for creator in roster:
+        selected_id = str(creator.get("selected_voice_candidate_id") or "")
+        candidate_ids = {
+            str(candidate.get("candidate_id") or "")
+            for candidate in creator.get("voice_candidates") or []
+            if isinstance(candidate, dict)
+        }
+        if not selected_id or selected_id not in candidate_ids:
+            creator_id = str(creator.get("id") or "unknown")
+            raise ValueError(
+                f"select one voice candidate belonging to creator {creator_id}"
+            )
 
 
 def _normalize_seed_creator(creator: dict[str, Any]) -> dict[str, Any] | None:
@@ -446,7 +495,7 @@ def _ensure_seed_reference_image(creator: dict[str, Any], media_root: Path) -> N
     referência atual não é http(s)/data:. No-op quando já é buscável (data:/http) ou
     quando não há arquivo local (ex.: seed de teste sem mídia). Mutação in-place."""
     ref = creator.get("image_source_uri")
-    if isinstance(ref, str) and media_store._is_downloadable(ref):
+    if isinstance(ref, str) and is_downloadable(ref):
         return
     for candidate in (creator.get("image_source_uri"), creator.get("upscaled_base"),
                       creator.get("image_uri"), creator.get("image")):
@@ -589,7 +638,18 @@ async def node_roster(state: dict[str, Any], config: RunnableConfig) -> dict[str
         if normalized_seed is not None:
             _ensure_seed_reference_image(normalized_seed, media_root)
             add_trace_metadata(step=3, stage="roster", creators=1, seeded=True)
-            return {"roster": [normalized_seed]}
+            seed_id = str(normalized_seed["id"])
+            return {
+                "roster": [normalized_seed],
+                "creator_assignments": [
+                    {
+                        "concept_id": str(concept.get("id") or ""),
+                        "creator_id": seed_id,
+                    }
+                    for concept in state.get("concepts") or []
+                    if isinstance(concept, dict) and concept.get("id")
+                ],
+            }
 
     preview_completed = 0
     preview_progress_lock = asyncio.Lock()
@@ -623,44 +683,15 @@ async def node_roster(state: dict[str, Any], config: RunnableConfig) -> dict[str
         if creative_profile:
             creator = {**creator, **creative_profile, "id": creative_profile["id"]}
 
-        candidates = []
-        if hasattr(tool_ctx.adapter, "design_voice_candidates"):
-            voice_spec = await execute_stage_tool(
-                config,
-                tool_ctx,
-                catalog_stage="voice_spec",
-                tool_name="derive_creator_voice_spec",
-                tool_fn=derive_creator_voice_spec_tool,
-                profile=creator,
-            )
-            voice_batch = await execute_stage_tool(
-                config,
-                tool_ctx,
-                catalog_stage="voice_candidates",
-                tool_name="design_creator_voice",
-                tool_fn=design_creator_voice_tool,
-                spec=voice_spec,
-            )
-            candidates_raw = voice_batch.get("candidates") if isinstance(voice_batch, dict) else getattr(voice_batch, "candidates", [])
-            candidates = [c.model_dump() if hasattr(c, "model_dump") else c for c in candidates_raw]
-            creator["voice_spec"] = voice_spec if isinstance(voice_spec, dict) else voice_spec.model_dump()
-            creator["voice_candidates"] = candidates
-            if candidates and not creator.get("selected_voice_candidate_id"):
-                creator["selected_voice_candidate_id"] = candidates[0].get("candidate_id")
-
         # Baixa e persiste os bytes (imagem/voz) e reescreve as URIs para caminhos
         # locais servíveis. No-op para mock:// / voice_id (sem rede, sem disco).
         creator = await media_store.persist_creator_media(
             creator, run_id=run_id, media_root=media_root,
             **_persistence(config, storage_key="media_storage"),
         )
-        if candidates:
-            first_preview = candidates[0].get("preview") if isinstance(candidates[0], dict) else candidates[0]
-            creator["voice_preview_uri"] = first_preview.get("uri") if isinstance(first_preview, dict) else getattr(first_preview, "uri", None)
-        else:
-            creator["voice_preview_uri"] = await _build_voice_preview(
-                tool_ctx.adapter, creator, run_id=run_id, media_root=media_root,
-            )
+        creator["voice_preview_uri"] = await _build_voice_preview(
+            tool_ctx.adapter, creator, run_id=run_id, media_root=media_root,
+        )
         # Emite assim que cada creator fica pronto, com a mídia real (imagem + voz),
         # para feedback imediato na UI. No-op fora do contexto de streaming web.
         stream_bus.emit_token({
@@ -702,6 +733,112 @@ async def node_roster(state: dict[str, Any], config: RunnableConfig) -> dict[str
             raise errors[0][1]
 
     return {"roster": roster}
+
+
+@traced("node.voice_candidates", run_type="chain", step=3)
+async def node_voice_candidates(
+    state: dict[str, Any],
+    config: RunnableConfig,
+) -> dict[str, Any]:
+    """Deriva o voice spec e gera previews depois que as imagens do roster existem."""
+    tool_ctx = tool_context_from_config(config)
+    pipeline = get_pipeline(config)
+    review_enabled = bool(config["configurable"].get("run", {}).get("review_plan"))
+    revision = state.get("revision_request") or {}
+    is_voice_reroll = revision.get("target") == "voices"
+    requested_ids = {str(value) for value in revision.get("ids") or []}
+    roster = list(state.get("roster") or [])
+    roster_ids = {str(creator.get("id") or "") for creator in roster}
+    if is_voice_reroll:
+        if not requested_ids or not requested_ids <= roster_ids:
+            raise ValueError("voice reroll IDs must belong to the current creator roster")
+    voice_cfg = pipeline.get("voice", {})
+    max_rerolls = int(voice_cfg.get("max_rerolls_per_creator", 2))
+    updated_roster: list[dict[str, Any]] = []
+    design_cost = 0.0
+    for creator in roster:
+        creator_dict = dict(creator)
+        creator_id = str(creator_dict.get("id") or "creator")
+        if is_voice_reroll and creator_id not in requested_ids:
+            updated_roster.append(creator_dict)
+            continue
+        reroll_count = int(creator_dict.get("voice_reroll_count") or 0)
+        if is_voice_reroll:
+            if reroll_count >= max_rerolls:
+                raise ValueError(
+                    f"voice reroll limit reached for creator {creator_id}"
+                )
+            reroll_count += 1
+
+        voice_spec = await execute_stage_tool(
+            config,
+            tool_ctx,
+            catalog_stage="voice_spec",
+            tool_name="derive_creator_voice_spec",
+            tool_fn=derive_creator_voice_spec_tool,
+            profile=creator_dict,
+        )
+        voice_batch = await execute_stage_tool(
+            config,
+            tool_ctx,
+            catalog_stage="voice_candidates",
+            tool_name="design_creator_voice",
+            tool_fn=design_creator_voice_tool,
+            spec=voice_spec,
+            creator_id=creator_id,
+            reroll_count=reroll_count,
+        )
+        batch_dict = (
+            voice_batch.model_dump(mode="json")
+            if hasattr(voice_batch, "model_dump")
+            else dict(voice_batch)
+        )
+        candidates = [dict(candidate) for candidate in batch_dict.get("candidates") or []]
+        run_id = str(state.get("run_id") or config["configurable"].get("thread_id") or "run")
+        candidates = await media_store.persist_voice_candidates(
+            candidates,
+            run_id=run_id,
+            creator_id=creator_id,
+            design_hash=str(batch_dict.get("description_hash") or "unknown"),
+            media_root=default_media_path(),
+            **_persistence(config, storage_key="media_storage"),
+        )
+        batch_dict["candidates"] = candidates
+        batch_dict["reroll_count"] = reroll_count
+        design_cost += float(batch_dict.get("cost_usd") or 0.0)
+        if is_voice_reroll:
+            previous_candidates = list(creator_dict.get("voice_candidates") or [])
+            history = list(creator_dict.get("voice_design_history") or [])
+            if previous_candidates:
+                previous_batch = creator_dict.get("voice_design_batch")
+                history.append(
+                    dict(previous_batch)
+                    if isinstance(previous_batch, dict)
+                    else previous_candidates
+                )
+            creator_dict["voice_design_history"] = history
+            creator_dict["voice_reroll_count"] = reroll_count
+            for key in ("voice_ref", "voice_id", "voice"):
+                creator_dict.pop(key, None)
+        creator_dict["voice_spec"] = (
+            voice_spec.model_dump(mode="json")
+            if hasattr(voice_spec, "model_dump")
+            else dict(voice_spec)
+        )
+        creator_dict["voice_candidates"] = candidates
+        creator_dict["voice_design_batch"] = batch_dict
+        if review_enabled:
+            creator_dict["selected_voice_candidate_id"] = None
+        elif (
+            candidates
+            and pipeline.get("voice", {}).get("selection_without_review", "first")
+            == "first"
+        ):
+            creator_dict["selected_voice_candidate_id"] = candidates[0]["candidate_id"]
+        if candidates:
+            creator_dict["voice_preview_uri"] = candidates[0]["preview"]["uri"]
+        updated_roster.append(creator_dict)
+    return {"roster": updated_roster, "total_cost_usd": design_cost}
 
 @traced("node.approval", run_type="chain", step=3)
 async def node_approval(state: dict[str, Any], config: RunnableConfig) -> dict[str, Any]:
@@ -882,7 +1019,7 @@ async def node_review(state: dict[str, Any], config: RunnableConfig) -> dict[str
         target = decision.get("target")
         if target not in {"concepts", "scripts", "creators", "voices"}:
             raise ValueError("regenerate target must be concepts, scripts, creators, or voices")
-        return {
+        result: dict[str, Any] = {
             "review_approved": False,
             "revision_request": {
                 "target": target,
@@ -890,21 +1027,36 @@ async def node_review(state: dict[str, Any], config: RunnableConfig) -> dict[str
                 "feedback": str(decision.get("feedback") or ""),
             },
         }
+        creators = decision.get("creators")
+        if target in {"creators", "voices"} and isinstance(creators, list):
+            result["roster"] = apply_review_creator_updates(
+                state.get("roster") or [],
+                creators,
+            )
+        concepts = decision.get("concepts")
+        if target in {"concepts", "scripts"} and isinstance(concepts, list):
+            result["concepts"] = apply_review_concept_updates(
+                state.get("concepts") or [],
+                concepts,
+            )
+        return result
     if action != "approve":
         raise ValueError("review action must be approve or regenerate")
     concepts = decision.get("concepts")
     creators = decision.get("creators")
+    reviewed_roster = (
+        apply_review_creator_updates(state.get("roster") or [], creators)
+        if isinstance(creators, list)
+        else state.get("roster", [])
+    )
+    validate_voice_selections(reviewed_roster)
     return {
         "concepts": (
             apply_review_concept_updates(state.get("concepts") or [], concepts)
             if isinstance(concepts, list)
             else state.get("concepts", [])
         ),
-        "roster": (
-            apply_review_creator_updates(state.get("roster") or [], creators)
-            if isinstance(creators, list)
-            else state.get("roster", [])
-        ),
+        "roster": reviewed_roster,
         "review_approved": True,
         "revision_request": {},
     }
@@ -912,61 +1064,99 @@ async def node_review(state: dict[str, Any], config: RunnableConfig) -> dict[str
 
 @traced("node.finalize_voices", run_type="chain", step=3)
 async def node_finalize_voices(state: dict[str, Any], config: RunnableConfig) -> dict[str, Any]:
-    """Cria permanentemente a voz aprovada no ElevenLabs para cada creator do roster."""
+    """Permanently create only the voice candidate approved for each creator."""
     tool_ctx = tool_context_from_config(config)
     roster = list(state.get("roster") or [])
-    updated_roster = []
+    updated_roster: list[dict[str, Any]] = []
     org_id = config["configurable"].get("organization_id", "default")
 
     for creator in roster:
         creator_dict = dict(creator)
-        if creator_dict.get("voice_ref") and creator_dict.get("voice_id"):
+        if creator_dict.get("voice_ref"):
+            creator_dict.setdefault("voice_id", creator_dict["voice_ref"])
             updated_roster.append(creator_dict)
             continue
 
-        cand_id = creator_dict.get("selected_voice_candidate_id")
-        candidates = creator_dict.get("voice_candidates") or []
-        if not cand_id and candidates:
-            first = candidates[0]
-            cand_id = first.get("candidate_id") if isinstance(first, dict) else getattr(first, "candidate_id", None)
+        creator_id = str(creator_dict.get("id") or "")
+        candidate_id = str(creator_dict.get("selected_voice_candidate_id") or "")
+        candidates = list(creator_dict.get("voice_candidates") or [])
+        selected = next(
+            (
+                candidate
+                for candidate in candidates
+                if isinstance(candidate, dict)
+                and str(candidate.get("candidate_id") or "") == candidate_id
+            ),
+            None,
+        )
+        if selected is None:
+            raise ValueError(
+                f"creator {creator_id or 'unknown'} has no selected voice candidate"
+            )
+        batch = creator_dict.get("voice_design_batch")
+        if not isinstance(batch, dict):
+            raise ValueError(f"creator {creator_id or 'unknown'} has no voice design batch")
 
-        desc_hash = hashlib.sha256(str(creator_dict.get("id")).encode()).hexdigest()[:10]
-        batch = {
-            "provider": "elevenlabs",
-            "design_model": "eleven_ttv_v3",
-            "description_hash": desc_hash,
-            "prompt_version": "voice-match-v1",
-            "candidates": candidates,
-            "cost_usd": 0.0,
-        }
+        finalized = await execute_stage_tool(
+            config,
+            tool_ctx,
+            catalog_stage="finalize_voices",
+            tool_name="finalize_creator_voice",
+            tool_fn=finalize_creator_voice_tool,
+            candidate_id=candidate_id,
+            batch=batch,
+            creator_id=creator_id,
+            organization_id=org_id,
+        )
+        voice_ref = str(
+            finalized.get("voice_ref")
+            if isinstance(finalized, dict)
+            else getattr(finalized, "voice_ref", "")
+        ).strip()
+        if not voice_ref:
+            raise ValueError(f"creator {creator_id or 'unknown'} returned empty voice_ref")
 
-        if cand_id and candidates and hasattr(tool_ctx.adapter, "finalize_voice"):
-            finalized = await execute_stage_tool(
-                config,
-                tool_ctx,
-                catalog_stage="finalize_voices",
-                tool_name="finalize_creator_voice",
-                tool_fn=finalize_creator_voice_tool,
-                candidate_id=cand_id,
-                batch=batch,
-                creator_id=creator_dict.get("id", "creator-0"),
-                organization_id=org_id,
-            )
-            voice_ref = (
-                finalized.get("voice_ref")
-                if isinstance(finalized, dict)
-                else getattr(finalized, "voice_ref", f"voice-mock-{creator_dict.get('id')}")
-            )
-        else:
-            voice_ref = (
-                creator_dict.get("voice_id")
-                or creator_dict.get("voice_ref")
-                or f"voice-mock-{creator_dict.get('id')}"
-            )
+        preview = selected.get("preview")
+        preview_uri = (
+            preview.get("uri")
+            if isinstance(preview, dict)
+            else getattr(preview, "uri", None)
+        )
+        if not preview_uri:
+            raise ValueError(f"creator {creator_id or 'unknown'} has no voice preview URI")
 
         creator_dict["voice_ref"] = voice_ref
         creator_dict["voice_id"] = voice_ref
+        creator_dict["voice"] = voice_ref
+        creator_dict["voice_preview_uri"] = str(preview_uri)
+        creator_dict["voice_provider"] = str(
+            finalized.get("provider") or batch.get("provider") or "elevenlabs"
+        )
+        creator_dict["voice_design_model"] = str(
+            finalized.get("design_model") or batch.get("design_model") or ""
+        )
+        creator_dict["voice_tts_model"] = str(finalized.get("tts_model") or "")
+        creator_dict["voice_design_hash"] = str(
+            batch.get("description_hash") or ""
+        )
+        creator_dict["voice_status"] = "selected"
         updated_roster.append(creator_dict)
+
+    required_creator_ids = {
+        str(assignment.get("creator_id") or "")
+        for assignment in state.get("creator_assignments") or []
+        if isinstance(assignment, dict)
+    } or {str(creator.get("id") or "") for creator in roster}
+    finalized_by_id = {
+        str(creator.get("id") or ""): creator for creator in updated_roster
+    }
+    missing = sorted(
+        creator_id
+        for creator_id in required_creator_ids
+        if not finalized_by_id.get(creator_id, {}).get("voice_ref")
+    )
+    if missing:
+        raise ValueError("assigned creators without voice_ref: " + ", ".join(missing))
 
     return {"roster": updated_roster}
 
@@ -1282,6 +1472,7 @@ async def node_voiceover(state: Any, config: RunnableConfig) -> dict[str, Any]:
             tool_fn=synthesize_voiceover_tool,
             voice_ref=voice_ref,
             text=text,
+            item_id=item.id,
         )
     except StageExecutionError:
         raise

@@ -1,7 +1,6 @@
 """Vocabulário e validação compartilhados pelos backends de prompts."""
 from __future__ import annotations
 
-
 KINDS = ("creator", "video")
 
 

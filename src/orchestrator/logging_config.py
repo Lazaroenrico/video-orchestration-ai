@@ -11,10 +11,10 @@ do logger, sem nível controlável — daí "muitos erros que não sei o que sã
 """
 from __future__ import annotations
 
-from datetime import UTC, datetime
 import json
 import logging
 import os
+from datetime import UTC, datetime
 
 _FORMAT = "%(asctime)s %(levelname)-7s %(name)s: %(message)s"
 _DATEFMT = "%H:%M:%S"

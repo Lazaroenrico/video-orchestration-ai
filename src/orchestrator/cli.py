@@ -2,9 +2,9 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
 import json
 import os
+from datetime import UTC, datetime
 from pathlib import Path
 
 import click
@@ -20,14 +20,10 @@ from orchestrator.config import (
     load_pipeline,
     load_providers,
 )
-from orchestrator.graph.checkpoint import open_checkpointer
-from orchestrator.logging_config import configure_logging
-from orchestrator.operations import PostgresOperations
-from orchestrator.sqs_runner import run_sqs_runner
-from orchestrator.legacy_import import apply_legacy, scan_legacy
 from orchestrator.db import (
     MEMBERSHIP_ROLES,
     Database,
+    PostgresEffectLedger,
     TenantIdentity,
     create_organization,
     grant_membership,
@@ -36,6 +32,11 @@ from orchestrator.db import (
     upgrade_database,
 )
 from orchestrator.db.artifacts import PostgresArtifactRepository
+from orchestrator.graph.checkpoint import open_checkpointer
+from orchestrator.legacy_import import apply_legacy, scan_legacy
+from orchestrator.logging_config import configure_logging
+from orchestrator.operations import PostgresOperations
+from orchestrator.sqs_runner import run_sqs_runner
 from orchestrator.storage.db import ArtifactDB
 from orchestrator.storage.factory import build_media_storage
 from orchestrator.storage.migration import BotoObjectStore, migrate_run_objects
@@ -146,6 +147,31 @@ def provision_runtime(migration_database_url: str) -> None:
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
     click.echo("papel orchestrator_runtime provisionado com RLS obrigatório")
+
+
+VOICE_QUOTA_BUCKETS = (
+    "elevenlabs_voice_design_chars",
+    "elevenlabs_voice_slots",
+    "elevenlabs_tts_chars",
+)
+
+
+@db_commands.command(name="set-voice-quota")
+@click.option("--bucket", type=click.Choice(VOICE_QUOTA_BUCKETS), required=True)
+@click.option("--limit-units", type=click.IntRange(min=0), required=True)
+def set_voice_quota(bucket: str, limit_units: int) -> None:
+    """Configure a tenant-scoped operational quota for direct ElevenLabs calls."""
+
+    async def _set() -> None:
+        async with Database.from_env() as database:
+            tenant = await database.resolve_tenant(TenantIdentity.from_env())
+            await PostgresEffectLedger(database, tenant).set_quota(
+                bucket,
+                limit_units=limit_units,
+            )
+
+    asyncio.run(_set())
+    click.echo(f"quota {bucket} configurada em {limit_units} unidades")
 
 
 @db_commands.command(name="org-create")

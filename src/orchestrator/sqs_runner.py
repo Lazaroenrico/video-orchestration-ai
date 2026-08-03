@@ -1,9 +1,9 @@
 """Loop portátil do Runner ECS: SQS sinaliza, PostgreSQL reivindica."""
 from __future__ import annotations
 
-from itertools import count
 import os
-from typing import Any, Awaitable, Callable
+from itertools import count
+from typing import Awaitable, Callable
 
 import orchestrator.job_store as job_store
 from orchestrator.wake_queue import (

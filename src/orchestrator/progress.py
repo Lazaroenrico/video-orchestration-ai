@@ -8,7 +8,6 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import Any
 
-
 STAGES: tuple[dict[str, Any], ...] = (
     {"id": "setup", "label": "Configuração", "parent_id": None},
     {"id": "creative_plan", "label": "Plano criativo", "parent_id": None},

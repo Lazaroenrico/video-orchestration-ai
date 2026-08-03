@@ -4,7 +4,6 @@ from __future__ import annotations
 from typing import Any
 from urllib.parse import urlparse
 
-
 _AUDIO_EXTENSIONS = (".mp3", ".wav", ".m4a", ".ogg")
 
 
@@ -76,4 +75,37 @@ def normalize_creator_payload(creator: dict[str, Any]) -> dict[str, Any]:
     ):
         if key in creator:
             normalized[key] = creator[key]
+    candidates: list[dict[str, Any]] = []
+    for candidate in creator.get("voice_candidates") or []:
+        if not isinstance(candidate, dict):
+            continue
+        preview = candidate.get("preview")
+        preview_uri = (
+            preview.get("uri")
+            if isinstance(preview, dict)
+            else getattr(preview, "uri", None)
+        )
+        if not isinstance(preview_uri, str) or not preview_uri:
+            continue
+        candidates.append(
+            {
+                "candidate_id": candidate.get("candidate_id"),
+                "preview": {
+                    "kind": "voice_preview",
+                    "uri": preview_uri,
+                    "media_type": "audio",
+                    "renderable": _is_playable_voice_uri(preview_uri),
+                },
+                "duration_seconds": float(
+                    candidate.get("duration_seconds") or 0.0
+                ),
+                "media_type": str(candidate.get("media_type") or "audio/mpeg"),
+            }
+        )
+    if candidates:
+        normalized["voice_candidates"] = candidates
+    if candidates or "selected_voice_candidate_id" in creator:
+        normalized["selected_voice_candidate_id"] = creator.get(
+            "selected_voice_candidate_id"
+        )
     return normalized

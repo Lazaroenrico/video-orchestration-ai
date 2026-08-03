@@ -1,13 +1,12 @@
 """Declarative stage/tool catalog for future agent execution."""
 from __future__ import annotations
 
-from dataclasses import dataclass
 import hashlib
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from orchestrator.tools.registry import TOOL_REGISTRY, get_tool_spec, tool_specs_for_stage
-
 
 _EXECUTORS = {"tool", "agent"}
 # Stages que podem rodar em modo agent. ``video`` entrou no D33 (agent escolhe a diretiva

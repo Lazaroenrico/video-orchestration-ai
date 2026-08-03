@@ -25,18 +25,17 @@ from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from langgraph.types import Command
 from psycopg import OperationalError
 from psycopg_pool import PoolTimeout
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from langgraph.types import Command
-
-from orchestrator import runner, stream_bus
-from orchestrator.auth import CloudflareAccessMiddleware
 import orchestrator.creator_store as creator_store
 import orchestrator.job_store as job_store
 import orchestrator.prompt_store as prompt_store
 import orchestrator.run_store as run_store
+from orchestrator import runner, stream_bus
+from orchestrator.auth import CloudflareAccessMiddleware
 from orchestrator.config import (
     default_creator_store_path,
     default_db_path,
@@ -48,22 +47,22 @@ from orchestrator.config import (
     load_pipeline,
     load_providers,
 )
-from orchestrator.creators import normalize_creator_payload
 from orchestrator.creative_contracts import CampaignInput
+from orchestrator.creators import normalize_creator_payload
 from orchestrator.db import Database, TenantIdentity, close_shared_database, get_shared_database
-from orchestrator.tracing import run_trace_config
 from orchestrator.graph.builder import build_graph
 from orchestrator.graph.checkpoint import open_checkpointer
 from orchestrator.nodes.stages import (
     apply_review_concept_updates,
     apply_review_creator_updates,
-    reroll_creator_voice as reroll_creator_voice_in_stage,
+    validate_voice_selections,
 )
 from orchestrator.progress import ProgressEventTranslator, build_activity, build_progress
 from orchestrator.registry import build_adapter_from_providers
 from orchestrator.storage.factory import build_media_storage, resolve_storage_backend
 from orchestrator.storage.r2 import R2MediaStorage
 from orchestrator.storage.resolve import resolve_signed_uris
+from orchestrator.tracing import run_trace_config
 from orchestrator.worker import run_worker_once
 
 _log = logging.getLogger(__name__)
@@ -231,6 +230,13 @@ async def readyz() -> JSONResponse:
         pipeline = load_pipeline(effective_config_dir)
         providers = load_providers(effective_config_dir)
         load_judge(effective_config_dir)
+        adapters = providers.get("adapters") if isinstance(providers, dict) else {}
+        creator_adapter = adapters.get("creator") if isinstance(adapters, dict) else None
+        if (
+            creator_adapter == "creator_vercel_elevenlabs_design"
+            and not os.environ.get("ELEVENLABS_API_KEY")
+        ):
+            raise RuntimeError("ELEVENLABS_API_KEY is required")
         backend = resolve_storage_backend(providers)
         if backend == "local":
             pass
@@ -238,11 +244,7 @@ async def readyz() -> JSONResponse:
             R2MediaStorage.from_env()  # valida credenciais R2; não faz request de rede
         else:
             raise ValueError(f"unknown storage backend {backend!r}")
-        assembly_adapter = (
-            (providers.get("adapters") or {}).get("assembly")
-            if isinstance(providers, dict)
-            else None
-        )
+        assembly_adapter = adapters.get("assembly") if isinstance(adapters, dict) else None
         if assembly_adapter == "ffmpeg_assembly":
             missing = [
                 binary
@@ -1214,16 +1216,11 @@ class ReviewCreatorPatch(BaseModel):
     voice_brief: Optional[str] = Field(default=None, max_length=2000)
     performance_style: Optional[str] = Field(default=None, max_length=1000)
     exclusions: Optional[list[str]] = Field(default=None, max_length=20)
-    image_uri: Optional[str] = None
-    voice_ref: Optional[str] = None
-    voice_preview_uri: Optional[str] = None
-    selected_voice_candidate_id: Optional[str] = None
-    image: Optional[str] = None
-    voice: Optional[str] = None
-    angles: Optional[list[str]] = Field(default=None, max_length=20)
-    run_id: Optional[str] = None
-    offer: Optional[str] = None
-    status: Optional[str] = None
+    selected_voice_candidate_id: Optional[str] = Field(
+        default=None,
+        min_length=1,
+        max_length=200,
+    )
 
 
 class ReviewV2Request(BaseModel):
@@ -1250,8 +1247,12 @@ class ReviewV2Request(BaseModel):
                 raise ValueError(
                     "regenerate requires target concepts, scripts, creators, or voices"
                 )
-            if self.concepts is not None or self.creators is not None:
-                raise ValueError("regenerate does not accept review edits")
+            if not self.ids or len(self.ids) != len(set(self.ids)):
+                raise ValueError("regenerate requires unique IDs")
+            if self.target in {"concepts", "scripts"} and self.creators is not None:
+                raise ValueError("concept regeneration does not accept creator edits")
+            if self.target in {"creators", "voices"} and self.concepts is not None:
+                raise ValueError("creator regeneration does not accept concept edits")
             return self
         raise ValueError("action must be approve or regenerate")
 
@@ -1289,25 +1290,33 @@ def _validated_review_resolution(
     try:
         if req.action == "approve":
             if req.concepts is not None:
-                resolution["concepts"] = apply_review_concept_updates(
+                apply_review_concept_updates(
                     concepts,
                     resolution["concepts"],
                 )
+            reviewed_creators = creators
             if req.creators is not None:
-                resolution["creators"] = apply_review_creator_updates(
+                reviewed_creators = apply_review_creator_updates(
                     creators,
                     resolution["creators"],
                 )
+            validate_voice_selections(reviewed_creators)
         elif req.ids:
             available_ids = {
                 str(item.get("id"))
                 for item in (
-                    creators if req.target == "creators" else concepts
+                    creators
+                    if req.target in {"creators", "voices"}
+                    else concepts
                 )
                 if isinstance(item, dict) and item.get("id")
             }
             if not set(req.ids).issubset(available_ids):
                 raise ValueError("regeneration IDs must belong to the pending review")
+            if req.creators is not None:
+                apply_review_creator_updates(creators, resolution["creators"])
+            if req.concepts is not None:
+                apply_review_concept_updates(concepts, resolution["concepts"])
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
     return resolution
@@ -1577,28 +1586,40 @@ class ApproveRequest(BaseModel):
 
 @app.post("/api/approve/{run_id}/creators/{creator_id}/reroll-voice")
 async def reroll_creator_voice(run_id: str, creator_id: str) -> dict[str, Any]:
-    state = _runs.get(run_id)
-    creators = _pending_creators_for(run_id)
-    adapter = (state or {}).get("adapter")
-    if adapter is None:
-        raise HTTPException(status_code=409, detail="adapter indisponível para reroll")
-
-    for index, creator in enumerate(creators):
-        if creator.get("id") != creator_id:
-            continue
-        updated = _normalize_creator(
-            await reroll_creator_voice_in_stage(
-                adapter,
-                creator,
-                run_id=run_id,
-                media_root=default_media_path(),
-            )
+    """Compatibility endpoint that resumes the combined gate's voice-only branch."""
+    if os.environ.get("DATABASE_URL"):
+        raise HTTPException(
+            status_code=409,
+            detail="use the versioned V2 review endpoint for durable voice rerolls",
         )
-        creators[index] = updated
-        await _emit(run_id, {"type": "creator_update", "run_id": run_id, "creator": updated})
-        return {"ok": True, "creator": updated}
+    state = _runs.get(run_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail=f"run {run_id!r} not found")
+    pending_review = state.get("pending_review")
+    review_future = state.get("review")
+    if (
+        not isinstance(pending_review, dict)
+        or review_future is None
+        or review_future.done()
+    ):
+        raise HTTPException(status_code=409, detail="nenhuma revisão pendente")
+    creator_ids = {
+        str(creator.get("id") or "")
+        for creator in pending_review.get("creators") or []
+        if isinstance(creator, dict)
+    }
+    if creator_id not in creator_ids:
+        raise HTTPException(status_code=404, detail=f"creator {creator_id!r} not found")
 
-    raise HTTPException(status_code=404, detail=f"creator {creator_id!r} not found")
+    review_future.set_result(
+        {
+            "action": "regenerate",
+            "target": "voices",
+            "ids": [creator_id],
+            "feedback": "",
+        }
+    )
+    return {"ok": True, "queued": True, "creator_id": creator_id}
 
 
 @app.post("/api/approve/{run_id}")

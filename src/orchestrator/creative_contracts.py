@@ -270,6 +270,8 @@ class VoiceDesignBatch(StrictModel):
     prompt_version: str = Field(default="voice-match-v1", min_length=1, max_length=100)
     candidates: list[VoiceCandidate] = Field(min_length=1, max_length=3)
     cost_usd: float = Field(default=0.0, ge=0.0)
+    cost_source: Literal["estimate"] = "estimate"
+    reroll_count: int = Field(default=0, ge=0)
 
 
 class FinalizedVoice(StrictModel):

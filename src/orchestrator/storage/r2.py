@@ -5,9 +5,10 @@ verdade sobre eles vive no ``ArtifactDB`` (``storage/db.py``). Por isso o ``uri`
 objeto aqui é o ponteiro canônico ``r2://{bucket}/{key}``, e **não** uma signed URL:
 URL assinada expira, ponteiro não.
 
-Async: o boto3 é síncrono, então cada chamada de rede vai para ``asyncio.to_thread``.
+Async: o boto3 é síncrono, então cada chamada usa um executor de storage compartilhado.
 Diferente do SQLite do checkpointer (chamadas locais e curtas), aqui é upload de vídeo
-— segurar o event loop travaria o fan-out paralelo de items.
+— segurar o event loop travaria o fan-out paralelo de items. O executor é explícito para
+não ser encerrado junto com cada event loop curto de CLI/teste.
 """
 from __future__ import annotations
 
@@ -15,6 +16,8 @@ import asyncio
 import hashlib
 import logging
 import os
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 from typing import Any, Optional
 
 import boto3
@@ -27,6 +30,18 @@ _log = logging.getLogger(__name__)
 
 _ENV_VARS = ("R2_ACCOUNT_ID", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_BUCKET")
 _DEFAULT_TTL_SECONDS = 900
+_STORAGE_EXECUTOR = ThreadPoolExecutor(
+    max_workers=8,
+    thread_name_prefix="orchestrator-storage",
+)
+
+
+async def _run_sync(function: Any, /, *args: Any, **kwargs: Any) -> Any:
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        _STORAGE_EXECUTOR,
+        partial(function, *args, **kwargs),
+    )
 
 
 class R2MediaStorage:
@@ -82,7 +97,7 @@ class R2MediaStorage:
         )
 
     async def _put(self, key: str, data: bytes, content_type: str) -> StoredObject:
-        await asyncio.to_thread(
+        await _run_sync(
             self._client.put_object,
             Bucket=self.bucket,
             Key=key,
@@ -108,7 +123,7 @@ class R2MediaStorage:
 
     async def get_signed_url(self, key: str, *, ttl_seconds: int = _DEFAULT_TTL_SECONDS) -> str:
         """URL de leitura com TTL curto, derivada sob demanda. Não persistir (D30)."""
-        return await asyncio.to_thread(
+        return await _run_sync(
             self._client.generate_presigned_url,
             "get_object",
             Params={"Bucket": self.bucket, "Key": key},
@@ -116,11 +131,11 @@ class R2MediaStorage:
         )
 
     async def delete(self, key: str) -> None:
-        await asyncio.to_thread(self._client.delete_object, Bucket=self.bucket, Key=key)
+        await _run_sync(self._client.delete_object, Bucket=self.bucket, Key=key)
 
     async def exists(self, key: str) -> bool:
         try:
-            await asyncio.to_thread(self._client.head_object, Bucket=self.bucket, Key=key)
+            await _run_sync(self._client.head_object, Bucket=self.bucket, Key=key)
         except ClientError as exc:
             # Só "não existe" vira False. 403 (credencial) e afins têm de propagar —
             # tratar tudo como ausente esconderia bug de config atrás de um re-upload.

@@ -12,7 +12,7 @@ import jwt
 from jwt import PyJWTError
 from jwt.algorithms import RSAAlgorithm
 from starlette.responses import JSONResponse
-from starlette.types import ASGIApp, Message, Receive, Scope, Send
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from orchestrator.db.database import Database, TenantAuthorizationError
 from orchestrator.db.tenancy import (

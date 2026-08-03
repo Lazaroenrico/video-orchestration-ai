@@ -35,7 +35,7 @@ _EXT_BY_MIME = {
     "video/mp4": "mp4",
     "video/webm": "webm",
 }
-_DEFAULT_EXT = "bin"
+DEFAULT_EXT = "bin"
 _DEFAULT_CONTENT_TYPE = "application/octet-stream"
 
 
@@ -55,7 +55,7 @@ def ext_from_mime(content_type: str) -> str:
     # Fallback para mimes conhecidos do stdlib antes de degradar para .bin — evita
     # servir imagem/áudio como application/octet-stream (browser não renderiza).
     guessed = mimetypes.guess_extension(mime) if mime else None
-    return guessed.lstrip(".") if guessed else _DEFAULT_EXT
+    return guessed.lstrip(".") if guessed else DEFAULT_EXT
 
 
 def ext_from_url(uri: str) -> Optional[str]:

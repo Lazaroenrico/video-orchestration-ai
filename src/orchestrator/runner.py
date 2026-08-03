@@ -9,13 +9,13 @@ from typing import Any, Awaitable, Callable, Optional
 
 from langgraph.types import Command
 
+import orchestrator.feedback_store as _feedback_store
 from orchestrator.agent_catalog import AgentCatalog, default_agent_catalog
 from orchestrator.config import (
     default_artifacts_db_path,
     default_media_path,
     default_videos_path,
 )
-import orchestrator.feedback_store as _feedback_store
 from orchestrator.graph.builder import build_graph
 from orchestrator.graph.checkpoint import open_checkpointer
 from orchestrator.graph.state import Item
@@ -41,6 +41,8 @@ def _build_config(
     agent_catalog: Optional[AgentCatalog] = None,
     artifact_repository: Optional[ArtifactRepository] = None,
     run_options: Optional[dict[str, Any]] = None,
+    effect_ledger: Any | None = None,
+    durable: bool = False,
 ) -> dict[str, Any]:
     adapter = build_adapter_from_providers(providers, pipeline)
     catalog = agent_catalog or default_agent_catalog()
@@ -64,6 +66,8 @@ def _build_config(
             providers, root=default_videos_path(), web_prefix="/videos",
         ),
         "artifact_db": artifact_repository,
+        "effect_ledger": effect_ledger,
+        "durable": durable,
     }
     configurable["run"].update(run_options or {})
     if feedback_store is not None:
@@ -88,6 +92,8 @@ async def run_pipeline(
     agent_catalog: Optional[AgentCatalog] = None,
     run_options: Optional[dict[str, Any]] = None,
     event_sink: Optional[ProgressEventSink] = None,
+    effect_ledger: Any | None = None,
+    durable: bool = False,
 ) -> tuple[str, dict[str, Any]]:
     run_id = run_id or f"run-{uuid.uuid4().hex[:8]}"
     async with open_artifact_repository(default_artifacts_db_path()) as artifact_repository:
@@ -100,6 +106,8 @@ async def run_pipeline(
             agent_catalog,
             artifact_repository,
             run_options,
+            effect_ledger,
+            durable,
         )
         cfg.update(run_trace_config(run_id, offer=offer, platform=platform, batch=batch))
         # Step 10 -> Step 1: lê o feedback do ciclo anterior (se houver) e o injeta no
@@ -174,6 +182,8 @@ async def resume_pipeline(
     resume_value: Any = None,
     run_options: Optional[dict[str, Any]] = None,
     event_sink: Optional[ProgressEventSink] = None,
+    effect_ledger: Any | None = None,
+    durable: bool = False,
 ) -> tuple[str, dict[str, Any]]:
     async with open_artifact_repository(default_artifacts_db_path()) as artifact_repository:
         cfg = _build_config(
@@ -185,6 +195,8 @@ async def resume_pipeline(
             agent_catalog,
             artifact_repository,
             run_options,
+            effect_ledger,
+            durable,
         )
         cfg.update(run_trace_config(run_id, platform=platform))
         async with open_checkpointer(db_path) as cp:
@@ -333,7 +345,30 @@ def summarize(out: dict[str, Any]) -> dict[str, Any]:
     dropped = [r for r in results if r.dropped]
     in_flight = [r for r in results if r.assembled is None and not r.dropped]
     tier_cost: dict[str, float] = {}
-    stage_cost = {"video": 0.0, "voiceover": 0.0, "assembly": 0.0}
+    stage_cost = {
+        "voice_design": 0.0,
+        "video": 0.0,
+        "voiceover": 0.0,
+        "assembly": 0.0,
+    }
+    seen_voice_designs: set[tuple[str, str, int]] = set()
+    for creator in out.get("roster") or []:
+        if not isinstance(creator, dict):
+            continue
+        batches = list(creator.get("voice_design_history") or [])
+        batches.append(creator.get("voice_design_batch"))
+        for batch in batches:
+            if not isinstance(batch, dict):
+                continue
+            key = (
+                str(creator.get("id") or ""),
+                str(batch.get("description_hash") or ""),
+                int(batch.get("reroll_count") or 0),
+            )
+            if key in seen_voice_designs:
+                continue
+            seen_voice_designs.add(key)
+            stage_cost["voice_design"] += float(batch.get("cost_usd") or 0.0)
     for r in results:
         for clip in r.clips:
             t = str(clip.meta.get("tier", "?"))
@@ -361,7 +396,10 @@ def summarize(out: dict[str, Any]) -> dict[str, Any]:
         "dropped": len(dropped),
         "in_flight": len(in_flight),
         "total_attempts": sum(r.attempts for r in results),
-        "total_cost_usd": round(sum(r.cost_usd for r in results), 4),
+        "total_cost_usd": round(
+            sum(r.cost_usd for r in results) + stage_cost["voice_design"],
+            4,
+        ),
         "cost_by_tier": tier_cost,
         "cost_by_stage": {
             stage: round(cost, 6)

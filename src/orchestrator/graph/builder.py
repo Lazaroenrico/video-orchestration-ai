@@ -3,9 +3,9 @@
 - Subgrafo per-item (``Item``): [route tier] -> gen(tier) -> product_demo -> qc ->
   [qc gate] -> {assembly | regen | drop}. O script já vem pronto no ``Item`` (gerado
   em nível de batch antes do creator).
-- Grafo de topo (``BatchState``): persona -> concepts -> scripts -> concept_review
-  (gate de edição) -> roster -> approval -> [fan-out via Send] -> process_item
-  (invoca o subgrafo) -> feedback.
+- Grafo de topo (``BatchState``): concepts -> scripts -> creator_profiles -> roster
+  -> voice_candidates -> review (único gate) -> finalize_voices -> [fan-out via Send]
+  -> process_item (invoca o subgrafo) -> feedback.
 """
 from __future__ import annotations
 
@@ -24,21 +24,19 @@ from orchestrator.graph.state import BatchState, Item, new_item
 from orchestrator.nodes.base import as_item, tier_names
 from orchestrator.nodes.stages import (
     make_gen_node,
-    node_approval,
     node_assembly,
-    node_concept_review,
     node_concepts,
     node_creator_profiles,
     node_drop,
     node_feedback,
     node_finalize_voices,
-    node_persona,
     node_product_demo,
     node_qc,
-    node_roster,
     node_review,
+    node_roster,
     node_scripts,
     node_upscale,
+    node_voice_candidates,
     node_voiceover,
 )
 from orchestrator.tracing import add_trace_metadata, traced
@@ -72,7 +70,7 @@ def build_item_graph(pipeline: dict[str, Any]):
     sg.add_edge("product_demo", "qc")
     sg.add_conditional_edges(
         "voiceover",
-        lambda state: route_after_voiceover(as_item(state)),
+        route_after_voiceover_node,
         {"assembly": "assembly", "end": END},
     )
     sg.add_edge("assembly", "upscale")
@@ -106,6 +104,11 @@ def make_script_route_node(tns: list[str]):
         return route_after_script(as_item(state), tns)
 
     return route_after_script_node
+
+
+async def route_after_voiceover_node(state: dict[str, Any]) -> str:
+    """Mantém o roteamento no event loop, sem criar executor apenas para uma decisão."""
+    return route_after_voiceover(as_item(state))
 
 
 # Chaves de checkpoint do LangGraph: não podem vazar para o subgrafo per-item (que é
@@ -214,7 +217,7 @@ async def route_after_review(state: dict[str, Any]) -> str:
         "concepts": "concepts",
         "scripts": "scripts",
         "creators": "creator_profiles",
-        "voices": "roster",
+        "voices": "voice_candidates",
     }.get(target, "review")
 
 
@@ -227,6 +230,7 @@ def build_graph(pipeline: dict[str, Any], checkpointer: Optional[Any] = None):
     g.add_node("scripts", node_scripts)
     g.add_node("creator_profiles", node_creator_profiles)
     g.add_node("roster", node_roster)
+    g.add_node("voice_candidates", node_voice_candidates)
     g.add_node("review", node_review)
     g.add_node("finalize_voices", node_finalize_voices)
 
@@ -238,12 +242,20 @@ def build_graph(pipeline: dict[str, Any], checkpointer: Optional[Any] = None):
     g.add_edge("concepts", "scripts")
     g.add_edge("scripts", "creator_profiles")
     g.add_edge("creator_profiles", "roster")
-    g.add_edge("roster", "review")
+    g.add_edge("roster", "voice_candidates")
+    g.add_edge("voice_candidates", "review")
 
     g.add_conditional_edges(
         "review",
         route_after_review,
-        ["concepts", "scripts", "creator_profiles", "roster", "review", "finalize_voices"],
+        [
+            "concepts",
+            "scripts",
+            "creator_profiles",
+            "voice_candidates",
+            "review",
+            "finalize_voices",
+        ],
     )
     g.add_conditional_edges("finalize_voices", make_fan_out_node(), ["process_item"])
     g.add_edge("process_item", "feedback")

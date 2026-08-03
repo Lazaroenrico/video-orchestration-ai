@@ -12,23 +12,23 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
+from orchestrator.adapters._throttle import get_replicate_throttle
 from orchestrator.adapters.anthropic_llm import (
     build_anthropic_llm_adapter,
     build_vercel_gateway_llm_adapter,
-)
-from orchestrator.adapters.gateway_llm import build_gateway_llm_adapter
-from orchestrator.adapters.ffmpeg_assembly import build_ffmpeg_assembly_adapter
-from orchestrator.adapters.elevenlabs_voice_design import (
-    ElevenLabsVoiceDesignAdapter,
 )
 from orchestrator.adapters.creator_real import (
     build_real_creator_adapter,
     build_real_creator_replicate_adapter,
     build_real_creator_vercel_adapter,
 )
+from orchestrator.adapters.elevenlabs_voice_design import (
+    ElevenLabsVoiceDesignAdapter,
+)
+from orchestrator.adapters.ffmpeg_assembly import build_ffmpeg_assembly_adapter
+from orchestrator.adapters.gateway_llm import build_gateway_llm_adapter
 from orchestrator.adapters.integrity_qc import build_integrity_qc_adapter
 from orchestrator.adapters.mock import MockAdapter
-from orchestrator.adapters._throttle import get_replicate_throttle
 from orchestrator.adapters.passthrough_upscale import build_passthrough_upscale_adapter
 from orchestrator.adapters.replicate_video import ReplicateVideoAdapter
 from orchestrator.adapters.vercel_gateway_video import (
@@ -73,6 +73,7 @@ _ADAPTERS: dict[str, Callable[[dict[str, Any]], Any]] = {
     "creator_real_vercel": build_real_creator_vercel_adapter,
     "creator_real_replicate": build_real_creator_replicate_adapter,
     "creator_vercel_replicate_voice": build_real_creator_replicate_adapter,
+    "creator_vercel_elevenlabs_design": build_real_creator_vercel_adapter,
     "integrity_qc": build_integrity_qc_adapter,
     "ffmpeg_assembly": build_ffmpeg_assembly_adapter,
     "vercel_gateway_video": build_vercel_gateway_video_adapter,
@@ -178,6 +179,15 @@ class CompositeAdapter:
         if voice is not None and hasattr(voice, "finalize_voice"):
             return await voice.finalize_voice(*args, **kwargs)
         raise AttributeError("finalize_voice")
+
+    async def reconcile_voice(self, *args: Any, **kwargs: Any) -> Any:
+        creator_adapter = self._by_role["creator"]
+        if hasattr(creator_adapter, "reconcile_voice"):
+            return await creator_adapter.reconcile_voice(*args, **kwargs)
+        voice = getattr(creator_adapter, "voice", None)
+        if voice is not None and hasattr(voice, "reconcile_voice"):
+            return await voice.reconcile_voice(*args, **kwargs)
+        raise AttributeError("reconcile_voice")
 
     @traced(
         "adapter.creator.synthesize_voiceover",

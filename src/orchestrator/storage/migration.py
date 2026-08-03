@@ -3,9 +3,9 @@ from __future__ import annotations
 
 import asyncio
 import base64
-from dataclasses import dataclass
 import hashlib
 import os
+from dataclasses import dataclass
 from typing import Any, Protocol
 
 import boto3

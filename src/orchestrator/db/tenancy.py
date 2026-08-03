@@ -6,8 +6,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Iterator
-from uuid import UUID, NAMESPACE_URL, uuid5
-
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 _ID_NAMESPACE = "https://ugc-orchestrator.local/tenancy"
 _ENVIRONMENT_FIELDS = {

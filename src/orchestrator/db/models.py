@@ -17,7 +17,8 @@ from sqlalchemy import (
     UniqueConstraint,
     func,
 )
-from sqlalchemy.dialects.postgresql import JSONB, UUID as PG_UUID
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -110,6 +111,10 @@ class Creator(Base):
     __table_args__ = (
         PrimaryKeyConstraint("organization_id", "run_id", "creator_id"),
         CheckConstraint("status IN ('approved', 'rejected')", name="ck_creators_status"),
+        CheckConstraint(
+            "voice_status IN ('legacy', 'candidates_ready', 'selected', 'failed')",
+            name="ck_creators_voice_status",
+        ),
     )
 
     organization_id: Mapped[UUID] = mapped_column(
@@ -125,6 +130,20 @@ class Creator(Base):
         JSONB, nullable=False, server_default=func.text("'[]'::jsonb")
     )
     voice_reroll_count: Mapped[Optional[int]] = mapped_column(Integer)
+    voice_spec: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default=func.text("'{}'::jsonb")
+    )
+    voice_provider: Mapped[Optional[str]] = mapped_column(Text)
+    voice_design_model: Mapped[Optional[str]] = mapped_column(Text)
+    voice_tts_model: Mapped[Optional[str]] = mapped_column(Text)
+    voice_design_hash: Mapped[Optional[str]] = mapped_column(Text)
+    voice_selected_candidate: Mapped[Optional[str]] = mapped_column(Text)
+    voice_status: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default="legacy"
+    )
+    voice_design_meta: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default=func.text("'{}'::jsonb")
+    )
     creator_prompt: Mapped[Optional[str]] = mapped_column(Text)
     video_prompt: Mapped[Optional[str]] = mapped_column(Text)
     offer: Mapped[Optional[str]] = mapped_column(Text)

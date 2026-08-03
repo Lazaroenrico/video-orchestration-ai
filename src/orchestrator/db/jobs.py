@@ -6,19 +6,26 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import NAMESPACE_URL, UUID, uuid5
 
-from sqlalchemy import and_, delete, func, or_, select, update
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from orchestrator.db.database import Database
 from orchestrator.db.models import (
     Job as JobModel,
+)
+from orchestrator.db.models import (
     Outbox as OutboxModel,
+)
+from orchestrator.db.models import (
     Run as RunModel,
+)
+from orchestrator.db.models import (
     RunEvent as RunEventModel,
+)
+from orchestrator.db.models import (
     RunGate as RunGateModel,
 )
 from orchestrator.db.tenancy import TenantContext
-
 
 LEASE_SECONDS = 120
 OUTBOX_MAX_ATTEMPTS = 5
