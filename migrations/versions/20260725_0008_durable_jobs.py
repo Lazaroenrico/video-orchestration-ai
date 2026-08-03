@@ -7,7 +7,6 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-
 revision: str = "20260725_0008"
 down_revision: str | None = "20260722_0007"
 branch_labels: str | Sequence[str] | None = None

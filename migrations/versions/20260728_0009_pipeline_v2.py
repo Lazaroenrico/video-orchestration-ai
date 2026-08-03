@@ -5,7 +5,6 @@ from typing import Sequence
 
 from alembic import op
 
-
 revision: str = "20260728_0009"
 down_revision: str | None = "20260725_0008"
 branch_labels: str | Sequence[str] | None = None
