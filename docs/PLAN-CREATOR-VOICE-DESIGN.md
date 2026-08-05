@@ -818,7 +818,7 @@ scripts/dev-local
 README.md
 docs/DEMO.md
 docs/DECISIONS.md
-docs/PROGRESS.md
+docs/progress/changes/YYYY-MM-DD-slug.md
 ```
 
 ## 20. Referências oficiais
@@ -828,4 +828,3 @@ docs/PROGRESS.md
 - [ElevenLabs — Create a voice](https://elevenlabs.io/docs/api-reference/text-to-voice/create)
 - [ElevenLabs — Create speech](https://elevenlabs.io/docs/api-reference/text-to-speech/convert)
 - [Replicate — elevenlabs/turbo-v2.5](https://replicate.com/elevenlabs/turbo-v2.5)
-

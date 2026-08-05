@@ -311,7 +311,7 @@ async def get_pending_items(
         item = Item.model_validate(values)
         task_error = getattr(task, "error", None)
         if item.error is None and task_error is not None:
-            item = item.model_copy(update={"error": f"assembly: {_clean_task_error(task_error)}"})
+            item = item.model_copy(update={"error": f"production: {_clean_task_error(task_error)}"})
         # Só surfamos o que tem algo a mostrar: clips gerados ou um erro registrado.
         if item.clips or item.error:
             items.append(item)
@@ -343,7 +343,11 @@ def summarize(out: dict[str, Any]) -> dict[str, Any]:
     results = as_items(out.get("results"))
     approved = [r for r in results if r.assembled is not None and not r.dropped]
     dropped = [r for r in results if r.dropped]
-    in_flight = [r for r in results if r.assembled is None and not r.dropped]
+    in_flight = [
+        r
+        for r in results
+        if r.assembled is None and not r.dropped and r.error is None
+    ]
     tier_cost: dict[str, float] = {}
     stage_cost = {
         "voice_design": 0.0,

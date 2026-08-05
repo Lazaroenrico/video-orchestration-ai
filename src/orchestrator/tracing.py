@@ -54,6 +54,8 @@ _DROP_KEYS = {
     "creator_prompt",
     "image_prompt",
     "messages",
+    "reference_image_uri",
+    "revision",
 }
 _REDACT_KEYS = {
     "image_url",

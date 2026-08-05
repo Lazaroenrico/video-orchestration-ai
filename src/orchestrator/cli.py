@@ -156,21 +156,34 @@ VOICE_QUOTA_BUCKETS = (
 )
 
 
+async def _set_provider_quota(provider: str, limit_units: int) -> None:
+    async with Database.from_env() as database:
+        tenant = await database.resolve_tenant(TenantIdentity.from_env())
+        await PostgresEffectLedger(database, tenant).set_quota(
+            provider,
+            limit_units=limit_units,
+        )
+
+
+@db_commands.command(name="set-provider-quota")
+@click.option("--provider", required=True)
+@click.option("--limit-units", type=click.IntRange(min=0), required=True)
+def set_provider_quota(provider: str, limit_units: int) -> None:
+    """Configure a tenant-scoped quota for any paid provider bucket."""
+    provider = provider.strip()
+    if not provider:
+        raise click.ClickException("provider não pode ser vazio")
+    asyncio.run(_set_provider_quota(provider, limit_units))
+    click.echo(f"quota {provider} configurada em {limit_units} unidades")
+
+
 @db_commands.command(name="set-voice-quota")
 @click.option("--bucket", type=click.Choice(VOICE_QUOTA_BUCKETS), required=True)
 @click.option("--limit-units", type=click.IntRange(min=0), required=True)
 def set_voice_quota(bucket: str, limit_units: int) -> None:
     """Configure a tenant-scoped operational quota for direct ElevenLabs calls."""
 
-    async def _set() -> None:
-        async with Database.from_env() as database:
-            tenant = await database.resolve_tenant(TenantIdentity.from_env())
-            await PostgresEffectLedger(database, tenant).set_quota(
-                bucket,
-                limit_units=limit_units,
-            )
-
-    asyncio.run(_set())
+    asyncio.run(_set_provider_quota(bucket, limit_units))
     click.echo(f"quota {bucket} configurada em {limit_units} unidades")
 
 

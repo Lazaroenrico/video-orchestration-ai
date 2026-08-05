@@ -13,6 +13,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import shutil
 import uuid
 from contextlib import asynccontextmanager, suppress
@@ -49,7 +50,14 @@ from orchestrator.config import (
 )
 from orchestrator.creative_contracts import CampaignInput
 from orchestrator.creators import normalize_creator_payload
-from orchestrator.db import Database, TenantIdentity, close_shared_database, get_shared_database
+from orchestrator.db import (
+    Database,
+    PostgresEffectLedger,
+    PostgresJobRepository,
+    TenantIdentity,
+    close_shared_database,
+    get_shared_database,
+)
 from orchestrator.graph.builder import build_graph
 from orchestrator.graph.checkpoint import open_checkpointer
 from orchestrator.nodes.stages import (
@@ -59,6 +67,12 @@ from orchestrator.nodes.stages import (
 )
 from orchestrator.progress import ProgressEventTranslator, build_activity, build_progress
 from orchestrator.registry import build_adapter_from_providers
+from orchestrator.replicate_webhook import (
+    ReplicateWebhookError,
+    apply_replicate_event,
+    decode_effect_ref,
+    parse_and_verify_replicate_event,
+)
 from orchestrator.storage.factory import build_media_storage, resolve_storage_backend
 from orchestrator.storage.r2 import R2MediaStorage
 from orchestrator.storage.resolve import resolve_signed_uris
@@ -168,6 +182,76 @@ async def _app_lifespan(app_: FastAPI):
 app = FastAPI(title="UGC Orchestrator", lifespan=_app_lifespan)
 app.add_middleware(CloudflareAccessMiddleware)
 
+_ORGANIZATION_SLUG = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
+_MAX_REPLICATE_WEBHOOK_BYTES = 1_000_000
+
+
+async def _replicate_webhook_repositories(organization_slug: str):
+    database = await get_shared_database()
+    tenant = TenantIdentity(
+        organization_slug,
+        organization_slug,
+        "replicate-webhook",
+    ).context()
+    return (
+        PostgresEffectLedger(database, tenant),
+        PostgresJobRepository(database, tenant),
+    )
+
+
+@app.post("/webhooks/replicate/{organization_slug}/{effect_ref}")
+async def replicate_prediction_webhook(
+    organization_slug: str,
+    effect_ref: str,
+    request: Request,
+) -> dict[str, bool]:
+    """Authenticate and reconcile a Replicate prediction without reopening runs."""
+    signing_secret = os.environ.get("REPLICATE_WEBHOOK_SIGNING_SECRET", "").strip()
+    correlation_secret = os.environ.get("ORCH_WEBHOOK_CORRELATION_SECRET", "").strip()
+    if not signing_secret or not correlation_secret or not os.environ.get("DATABASE_URL"):
+        raise HTTPException(status_code=503, detail="Replicate webhook is not configured")
+    if not _ORGANIZATION_SLUG.fullmatch(organization_slug):
+        raise HTTPException(status_code=404, detail="Webhook correlation not found")
+    raw_body = await request.body()
+    if len(raw_body) > _MAX_REPLICATE_WEBHOOK_BYTES:
+        raise HTTPException(status_code=413, detail="Webhook body is too large")
+    try:
+        event = parse_and_verify_replicate_event(
+            raw_body,
+            request.headers,
+            signing_secret=signing_secret,
+        )
+    except ReplicateWebhookError as exc:
+        detail = str(exc)
+        status_code = 401 if "signature" in detail or "timestamp" in detail else 400
+        raise HTTPException(status_code=status_code, detail=detail) from exc
+    try:
+        effect_key = decode_effect_ref(
+            organization_slug,
+            effect_ref,
+            correlation_secret,
+        )
+    except ReplicateWebhookError as exc:
+        raise HTTPException(status_code=404, detail="Webhook correlation not found") from exc
+
+    ledger, events = await _replicate_webhook_repositories(organization_slug)
+    try:
+        changed = await apply_replicate_event(ledger, effect_key, event)
+        effect = await ledger.get(effect_key)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="Webhook effect not found") from exc
+    if changed:
+        await events.append_event(
+            effect.run_id,
+            "replicate_prediction_updated",
+            {
+                "effect_key": effect_key,
+                "prediction_id": event.prediction_id,
+                "provider_status": effect.provider_status,
+            },
+        )
+    return {"ok": True, "changed": changed}
+
 _DATABASE_UNAVAILABLE_ERRORS = (OperationalError, PoolTimeout)
 _DATABASE_READY_ERRORS = _DATABASE_UNAVAILABLE_ERRORS + (asyncio.TimeoutError,)
 
@@ -237,6 +321,22 @@ async def readyz() -> JSONResponse:
             and not os.environ.get("ELEVENLABS_API_KEY")
         ):
             raise RuntimeError("ELEVENLABS_API_KEY is required")
+        video_adapter = adapters.get("video") if isinstance(adapters, dict) else None
+        if (
+            video_adapter == "replicate"
+            and os.environ.get("DATABASE_URL")
+            and _truthy_env("ORCH_ENABLE_PAID_ADAPTERS")
+        ):
+            required = (
+                "ORCH_PUBLIC_API_BASE_URL",
+                "REPLICATE_WEBHOOK_SIGNING_SECRET",
+                "ORCH_WEBHOOK_CORRELATION_SECRET",
+            )
+            missing = [name for name in required if not os.environ.get(name)]
+            if missing:
+                raise RuntimeError(
+                    "durable Replicate video requires: " + ", ".join(missing)
+                )
         backend = resolve_storage_backend(providers)
         if backend == "local":
             pass
@@ -684,7 +784,7 @@ def _snapshot_from_item(item: Any) -> dict[str, Any]:
     snap: dict[str, Any] = {}
     for key in (
         "id", "creator_ref", "concept", "script", "tier",
-        "attempts", "cost_usd", "dropped", "error",
+        "attempts", "cost_usd", "dropped", "error", "failure",
     ):
         if key in item:
             snap[key] = _safe_serialize(item[key])
@@ -749,6 +849,7 @@ def _complete_item_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
         "assembled": snapshot.get("assembled"),
         "dropped": snapshot.get("dropped", False),
         "error": snapshot.get("error"),
+        "failure": snapshot.get("failure"),
     }
 
 

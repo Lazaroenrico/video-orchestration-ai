@@ -264,7 +264,8 @@ class PostgresOperations:
         async with self._database.connection(self._tenant) as connection:
             run_cursor = await connection.execute(
                 """
-                SELECT id, phase, offer, platform, batch_size, error, summary, state
+                SELECT id, phase, offer, platform, batch_size, error, error_type,
+                       summary, state
                 FROM runs
                 WHERE organization_id = %s AND id = %s
                 """,
@@ -288,7 +289,8 @@ class PostgresOperations:
             job_cursor = await connection.execute(
                 """
                 SELECT id, kind, status, attempt, max_attempts, available_at,
-                       lease_expires_at, worker_id, error, created_at, updated_at
+                       lease_expires_at, worker_id, error, error_type,
+                       created_at, updated_at
                 FROM jobs
                 WHERE organization_id = %s AND run_id = %s
                 ORDER BY created_at, id
@@ -334,7 +336,8 @@ class PostgresOperations:
 
             effect_cursor = await connection.execute(
                 """
-                SELECT effect_key, provider, units, status, result, error,
+                SELECT effect_key, provider, units, status, result, error, error_type,
+                       provider_operation_id, provider_status,
                        created_at, updated_at
                 FROM external_effects
                 WHERE organization_id = %s AND run_id = %s
@@ -344,7 +347,7 @@ class PostgresOperations:
             )
             effect_rows = await effect_cursor.fetchall()
 
-        summary = run_row[6]
+        summary = run_row[7]
         provider_units: dict[str, int] = {}
         for effect in effect_rows:
             provider_units[effect[1]] = provider_units.get(effect[1], 0) + effect[2]
@@ -358,8 +361,9 @@ class PostgresOperations:
                 "platform": run_row[3],
                 "batch_size": run_row[4],
                 "error": run_row[5],
+                "error_type": run_row[6],
                 "summary": summary,
-                "state": run_row[7],
+                "state": run_row[8],
             },
             "items": [row[0] for row in item_rows],
             "jobs": [
@@ -373,8 +377,9 @@ class PostgresOperations:
                     "lease_expires_at": _iso(row[6]),
                     "worker_id": row[7],
                     "error": row[8],
-                    "created_at": _iso(row[9]),
-                    "updated_at": _iso(row[10]),
+                    "error_type": row[9],
+                    "created_at": _iso(row[10]),
+                    "updated_at": _iso(row[11]),
                 }
                 for row in job_rows
             ],
@@ -424,8 +429,11 @@ class PostgresOperations:
                     "status": row[3],
                     "result": row[4],
                     "error": row[5],
-                    "created_at": _iso(row[6]),
-                    "updated_at": _iso(row[7]),
+                    "error_type": row[6],
+                    "provider_operation_id": row[7],
+                    "provider_status": row[8],
+                    "created_at": _iso(row[9]),
+                    "updated_at": _iso(row[10]),
                 }
                 for row in effect_rows
             ],

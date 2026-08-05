@@ -29,8 +29,9 @@ Datas absolutas. Apendar novas decisões ao final.
 ### D5 — TDD estrito + integridade dos testes
 - **Decisão:** red→green→refactor em tudo; **nunca** afrouxar teste para passar — em
   falha, achar a causa raiz.
-- **Consequência:** suíte é a especificação executável; falhas viram aprendizado em
-  `PROGRESS.md`.
+- **Consequência:** suíte é a especificação executável; falhas viram aprendizado na
+  [página da mudança](progress/CHANGE-TEMPLATE.md), com resumo no
+  [painel de progresso](PROGRESS.md).
 
 ### D6 — Frameworks: LangGraph + LangChain + LangSmith
 - **Decisão:** LangGraph como motor (StateGraph, Send, conditional edges, checkpointer);
@@ -771,3 +772,36 @@ Datas absolutas. Apendar novas decisões ao final.
   configuração legada; `/readyz` exige `ELEVENLABS_API_KEY` apenas quando o provider
   direto está selecionado. D43 fica substituída somente no transporte/seleção de voz;
   seus contratos de locução aprovada e montagem FFmpeg continuam válidos.
+
+## 2026-08-04
+
+### D45 — Prediction Replicate durável, reconciliável e isolada por item
+
+- **Contexto:** o SDK `replicate.async_run` escondia criação e polling numa única
+  chamada. Após um `ConnectError` pré-envio, uma nova tentativa podia terminar em
+  `WriteTimeout` com mensagem vazia: a prediction talvez já existisse, mas seu ID não
+  estava persistido. Repetir o POST arriscaria dupla cobrança; propagar a exceção
+  encerrava o job inteiro e ainda aparecia como falha de montagem.
+- **Decisão de lifecycle:** vídeo Replicate usa operações explícitas de criar, consultar
+  e cancelar prediction. O POST só repete `ConnectError`, `ConnectTimeout`,
+  `PoolTimeout` e 429. O `prediction_id` é vinculado imediatamente ao
+  `external_effects`; consultas por ID repetem erros de transporte, 429 e 5xx. O prazo
+  total vem de `clip.timeout_ms` (15 minutos no live). Prediction conhecida é cancelada
+  ao expirar; ausência de confirmação terminal permanece `uncertain`.
+- **Reconciliação:** a criação recebe webhook somente para `start` e `completed`, com
+  URL que carrega organização e `effect_key` autenticados por HMAC próprio. A API valida
+  também a assinatura Replicate sobre o corpo bruto e timestamp com tolerância de cinco
+  minutos. Eventos duplicados ou fora de ordem não regridem estado; status terminal não
+  muda. Webhook tardio atualiza ledger/atividade, mas nunca reabre um run concluído.
+- **Persistência e cobrança:** `external_effects` guarda `provider_operation_id`,
+  `provider_status` e `error_type`; um índice tenant/provider impede a mesma prediction
+  em dois efeitos. O bucket é `replicate_video_seconds`. Request persistido contém
+  modelo, tier, segundos, tentativa e hashes — nunca prompt, roteiro ou URL assinada.
+  Resultado concluído guarda o artifact canônico e o prediction ID.
+- **Falha parcial:** falhas esperadas de efeito viram `FailureDetail` no item e encerram
+  somente seu subgrafo, preservando clips anteriores. Outros itens continuam e o run
+  termina `done` com atenção parcial. Exceções de código/configuração continuam fatais.
+  Retry manual de run realmente falhado continua criando uma campanha nova.
+- **Compatibilidade:** mock/staging permanecem offline, sem quota ou webhook. Readiness
+  exige as três variáveis de webhook apenas quando PostgreSQL, vídeo Replicate e adapters
+  pagos estão ativos. A migração canônica é `20260804_0011`.

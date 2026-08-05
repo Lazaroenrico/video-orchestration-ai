@@ -7,6 +7,9 @@ interface ContainerSecrets {
   CF_ACCESS_TEAM_DOMAIN: string;
   CF_ACCESS_AUDIENCE: string;
   ORCH_INTERNAL_TOKEN: string;
+  ORCH_PUBLIC_API_BASE_URL: string;
+  REPLICATE_WEBHOOK_SIGNING_SECRET: string;
+  ORCH_WEBHOOK_CORRELATION_SECRET: string;
 }
 
 interface Env extends ContainerSecrets {}

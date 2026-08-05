@@ -9,7 +9,7 @@
 - [docs/DECISIONS.md](docs/DECISIONS.md)
   ADR leve do projeto, com decisoes de arquitetura e tradeoffs. Use para: saber por que o grafo, adapters, gateway, retry e UI foram desenhados assim.
 - [docs/PROGRESS.md](docs/PROGRESS.md)
-  Handoff vivo do estado atual, falhas investigadas e correcoes recentes. Use para: entender bugs corrigidos e proximos passos.
+  Painel vivo do estado atual, bloqueios e dez entregas recentes. Use para: encontrar o handoff atual e navegar ao histórico detalhado.
 - [src/orchestrator/graph/builder.py](src/orchestrator/graph/builder.py)
   Topologia LangGraph: grafo de topo, subgrafo por item, fan-out e gates. Use para: localizar o fluxo real.
 - [src/orchestrator/adapters/base.py](src/orchestrator/adapters/base.py)

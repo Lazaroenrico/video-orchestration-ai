@@ -483,6 +483,13 @@ def build_progress(
         stages["review"]["status"] = "waiting"
     elif phase == "done":
         if item_list:
+            def failure_stage(item: dict[str, Any]) -> str | None:
+                failure = item.get("failure")
+                if isinstance(failure, dict):
+                    stage = str(failure.get("stage") or "").strip()
+                    return stage or None
+                return None
+
             for stage_id in (
                 "setup",
                 "concepts",
@@ -495,10 +502,21 @@ def build_progress(
                 stages[stage_id]["status"] = "completed"
                 stages[stage_id]["completed_units"] = 1
                 stages[stage_id]["active_units"] = 0
-            for stage_id in ("talking_head", "product_demo"):
+            talking_failed = [
+                item for item in item_list if failure_stage(item) == "talking_head"
+            ]
+            product_candidates = [item for item in item_list if item not in talking_failed]
+            product_failed = [
+                item for item in product_candidates if failure_stage(item) == "product_demo"
+            ]
+            for stage_id, candidates, failures in (
+                ("talking_head", item_list, talking_failed),
+                ("product_demo", product_candidates, product_failed),
+            ):
                 stages[stage_id]["status"] = "completed"
-                stages[stage_id]["total_units"] = len(item_list)
-                stages[stage_id]["completed_units"] = len(item_list)
+                stages[stage_id]["total_units"] = len(candidates)
+                stages[stage_id]["completed_units"] = len(candidates) - len(failures)
+                stages[stage_id]["failed_units"] = len(failures)
                 stages[stage_id]["active_units"] = 0
 
             dropped = [item for item in item_list if item.get("dropped")]
@@ -507,16 +525,24 @@ def build_progress(
                 for item in item_list
                 if item.get("assembled") or item.get("dropped") or item.get("error")
             ]
+            pre_qc_failed = talking_failed + product_failed
+            qc_candidates = [item for item in item_list if item not in pre_qc_failed]
             qc = stages["qc"]
             qc.update({
                 "status": "completed",
-                "total_units": len(item_list),
-                "completed_units": len(item_list),
+                "total_units": len(qc_candidates),
+                "completed_units": len(qc_candidates),
                 "active_units": 0,
                 "failed_units": len(dropped),
             })
             assembly_candidates = [
-                item for item in item_list if not item.get("dropped")
+                item
+                for item in item_list
+                if not item.get("dropped")
+                and (
+                    not item.get("error")
+                    or failure_stage(item) in {None, "assembly"}
+                )
             ]
             assembled = [
                 item for item in assembly_candidates if item.get("assembled")
@@ -547,7 +573,15 @@ def build_progress(
             item_progress = {
                 str(item["id"]): {
                     "item_id": str(item["id"]),
-                    "stage_id": "qc" if item.get("dropped") else "assembly",
+                    "stage_id": (
+                        "qc"
+                        if item.get("dropped")
+                        else (
+                            failure_stage(item)
+                            if failure_stage(item) in stages
+                            else "assembly"
+                        )
+                    ),
                     "status": (
                         "dropped"
                         if item.get("dropped")

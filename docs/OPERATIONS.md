@@ -62,6 +62,36 @@ no backend; ele não usa listagem cega do bucket como fonte de verdade. `missing
 apagado automaticamente. O purge remove primeiro os bytes expirados e só depois a linha
 do artifact, preservando retry seguro.
 
+## Replicate live durável
+
+Antes de habilitar vídeo pago, configure `ORCH_PUBLIC_API_BASE_URL` com uma origem HTTPS
+alcançável pelo Replicate, `REPLICATE_WEBHOOK_SIGNING_SECRET` com o segredo `whsec_...`
+do provider e `ORCH_WEBHOOK_CORRELATION_SECRET` com um segredo próprio forte. Na borda
+Cloudflare, `/webhooks/replicate/*` deve ficar fora da política Access: essa rota usa a
+assinatura Replicate e o token de correlação, enquanto `/api/*` continua protegido por
+Access. `/readyz` recusa o perfil live durável/pago quando algum desses campos falta.
+
+Reserve o teto global em segundos antes do kill switch:
+
+```bash
+orchestrator db set-provider-quota \
+  --provider replicate_video_seconds \
+  --limit-units TOTAL_DE_SEGUNDOS
+```
+
+No desenvolvimento Compose live, o equivalente é
+`./scripts/dev-local video-quota --seconds TOTAL_DE_SEGUNDOS`; a URL pública ainda precisa
+ser um túnel HTTPS, nunca `localhost`. Só depois habilite `ORCH_ENABLE_PAID_ADAPTERS=true`.
+
+Para uma prediction ambígua, consulte `orchestrator ops inspect-run RUN_ID` e correlacione
+`external_effects.effect_key`, `provider_operation_id`, `provider_status` e `error_type`.
+Não emita outro POST e não altere quota/ledger manualmente. Polling e webhook convergem no
+mesmo registro. Callback recebido depois do timeout registra atividade, mas não reabre a
+campanha; se for necessária nova execução, use retry manual, que cria outro `run_id`.
+
+O canário pago é sempre opt-in: campanha nova, batch 1, quota mínima e crédito confirmado.
+Testes automatizados nunca fazem essa chamada.
+
 ## Exercícios trimestrais
 
 Rode carga mock batch 2, derrube o Runner após o claim, confirme recuperação do lease,

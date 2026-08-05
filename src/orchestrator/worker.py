@@ -61,6 +61,12 @@ def _job_failure_is_retryable(exc: BaseException) -> bool:
     return True
 
 
+def _job_error_fields(exc: BaseException) -> tuple[str, str]:
+    """Persist a useful message even when an exception string is empty."""
+    error_type = type(exc).__name__
+    return (str(exc).strip() or error_type, error_type)
+
+
 def _plain(value: Any) -> Any:
     if hasattr(value, "model_dump"):
         return _plain(value.model_dump(mode="json"))
@@ -403,10 +409,12 @@ async def _run_worker_once_with_database(
         await asyncio.gather(execution, return_exceptions=True)
         if isinstance(exc, LeaseLostError):
             raise
+        error, error_type = _job_error_fields(exc)
         await jobs.fail(
             job.job_id,
             worker_id=worker_id,
-            error=str(exc),
+            error=error,
+            error_type=error_type,
             retryable=_job_failure_is_retryable(exc),
             now=now,
         )

@@ -119,6 +119,15 @@ class CompositeAdapter:
     # llm o implementa; ausente (ex.: adapters futuros sem loop agentic) → o stage
     # executor cai em passthrough. Delegado via __getattr__ para o fallback disparar.
     _OPTIONAL_LLM_ATTRS = frozenset({"run_stage_agent"})
+    _OPTIONAL_VIDEO_ATTRS = frozenset(
+        {
+            "clip_model",
+            "submit_clip_prediction",
+            "get_video_prediction",
+            "cancel_video_prediction",
+            "clip_artifact_from_prediction",
+        }
+    )
 
     def __getattr__(self, name: str) -> Any:
         if name in CompositeAdapter._OPTIONAL_CREATOR_ATTRS:
@@ -127,6 +136,10 @@ class CompositeAdapter:
                 return value
         if name in CompositeAdapter._OPTIONAL_LLM_ATTRS:
             value = getattr(self._by_role["llm"], name, None)
+            if value is not None:
+                return value
+        if name in CompositeAdapter._OPTIONAL_VIDEO_ATTRS:
+            value = getattr(self._by_role["video"], name, None)
             if value is not None:
                 return value
         raise AttributeError(name)

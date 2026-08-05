@@ -11,6 +11,9 @@ const sharedEnv = () => ({
   ORCH_SERVE_LOCAL_MEDIA: "0",
   ORCH_CORS_ORIGINS: env.ORCH_APP_ORIGIN,
   ORCH_ENABLE_PAID_ADAPTERS: "false",
+  ORCH_PUBLIC_API_BASE_URL: env.ORCH_PUBLIC_API_BASE_URL,
+  REPLICATE_WEBHOOK_SIGNING_SECRET: env.REPLICATE_WEBHOOK_SIGNING_SECRET,
+  ORCH_WEBHOOK_CORRELATION_SECRET: env.ORCH_WEBHOOK_CORRELATION_SECRET,
   R2_ENDPOINT_URL: env.R2_ENDPOINT_URL,
   R2_ACCESS_KEY_ID: env.R2_ACCESS_KEY_ID,
   R2_SECRET_ACCESS_KEY: env.R2_SECRET_ACCESS_KEY,
@@ -86,9 +89,19 @@ async function forwardApi(request: Request, bindings: Env): Promise<Response> {
   return response;
 }
 
+async function forwardReplicateWebhook(request: Request, bindings: Env): Promise<Response> {
+  // This public callback bypasses Cloudflare Access headers. Authentication is the
+  // raw-body Replicate HMAC plus the tenant-bound correlation token in the path.
+  const api = await getRandom(bindings.API_CONTAINER, 2);
+  return api.fetch(request);
+}
+
 export default {
   async fetch(request: Request, bindings: Env): Promise<Response> {
     const url = new URL(request.url);
+    if (url.pathname.startsWith("/webhooks/replicate/")) {
+      return forwardReplicateWebhook(request, bindings);
+    }
     if (url.pathname.startsWith("/api/")) {
       return forwardApi(request, bindings);
     }

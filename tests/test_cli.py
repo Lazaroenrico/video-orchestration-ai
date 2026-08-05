@@ -146,6 +146,14 @@ def test_cli_voice_quota_command_exposes_only_operational_buckets():
     assert "elevenlabs_tts_chars" in result.output
 
 
+def test_cli_generic_provider_quota_command_accepts_replicate_video_seconds():
+    result = _invoke(CliRunner(), ["db", "set-provider-quota", "--help"])
+
+    assert result.exit_code == 0, result.output
+    assert "--provider" in result.output
+    assert "--limit-units" in result.output
+
+
 def _mock_config_dir(tmp_path):
     cfg = tmp_path / "config"
     cfg.mkdir()
@@ -314,3 +322,42 @@ def test_cli_sets_tenant_scoped_voice_quota(monkeypatch):
     assert result.exit_code == 0, result.output
     assert calls[-1] == ("quota", "elevenlabs_voice_slots", 3)
     assert "configurada em 3 unidades" in result.output
+
+
+def test_cli_sets_tenant_scoped_replicate_video_quota(monkeypatch):
+    calls = []
+
+    class FakeDatabase:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def resolve_tenant(self, identity):
+            return "tenant-context"
+
+    class FakeLedger:
+        def __init__(self, database, tenant):
+            pass
+
+        async def set_quota(self, provider, *, limit_units):
+            calls.append((provider, limit_units))
+
+    monkeypatch.setattr("orchestrator.cli.Database.from_env", lambda: FakeDatabase())
+    monkeypatch.setattr("orchestrator.cli.PostgresEffectLedger", FakeLedger)
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "db",
+            "set-provider-quota",
+            "--provider",
+            "replicate_video_seconds",
+            "--limit-units",
+            "120",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert calls == [("replicate_video_seconds", 120)]

@@ -42,6 +42,20 @@ def test_summary_breaks_out_voiceover_cost():
     assert summary["total_cost_usd"] == pytest.approx(0.1642)
 
 
+def test_summary_does_not_report_terminal_item_failure_as_in_flight():
+    item = Item(
+        id="item-failed",
+        concept={"hook": "h"},
+        error="video provider operation failed",
+    )
+
+    summary = runner.summarize({"results": [item]})
+
+    assert summary["produced"] == 1
+    assert summary["approved"] == 0
+    assert summary["in_flight"] == 0
+
+
 def test_summary_counts_voice_design_rerolls_once_across_resume() -> None:
     batch = {
         "description_hash": "hash",

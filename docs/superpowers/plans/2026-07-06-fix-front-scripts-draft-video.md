@@ -35,7 +35,8 @@ through endpoint/function tests and `tsc`/Vite build.
 - Modify `front/src/screens/CampaignDetail.tsx`: when phase is `editing`, show a direct action to review concepts/scripts.
 - Modify `tests/test_web_endpoints.py`: cover run-state hydration and draft run startup contracts.
 - Modify `tests/test_stages_coverage.py` or `tests/test_builder.py`: cover seeded roster behavior.
-- Modify `docs/PROGRESS.md`: record symptom, cause, and correction per project rule.
+- Add `docs/progress/changes/YYYY-MM-DD-slug.md`: record symptom, cause, and correction
+  using the required change template; add only its summary link to the progress panel.
 - Modify `docs/DEMO.md` and/or `README.md`: document the frontend flow after it works.
 
 ---
@@ -670,13 +671,14 @@ Expected: build passes and text does not overflow in the campaign detail layout.
 ### Task 6: Documentation, Regression Log, Full Verification
 
 **Files:**
-- Modify: `docs/PROGRESS.md`
+- Add: `docs/progress/changes/YYYY-MM-DD-slug.md`
+- Modify: `docs/PROGRESS.md` (one-line recent-delivery link only)
 - Modify: `docs/DEMO.md`
 - Modify: `README.md` if command docs change
 
 - [ ] **Step 1: Record investigated failure**
 
-In `docs/PROGRESS.md`, add an entry:
+Create the change page from `docs/progress/CHANGE-TEMPLATE.md` and add this entry there:
 
 ```markdown
 ### Falha investigada: scripts vazios no front + Draft Video inerte

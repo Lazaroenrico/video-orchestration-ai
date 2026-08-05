@@ -50,7 +50,7 @@ front/          SPA React/Vite/Tailwind
 infra/          Cloudflare/Neon e AWS staging (OpenTofu)
 deploy/         Worker/Container deployment assets
 tests/          test_*.py + cassettes/ (goldens do judge)
-docs/           DECISIONS.md, PROGRESS.md
+docs/           DECISIONS.md, PROGRESS.md, progress/archive/, progress/changes/
 ```
 
 ## Comandos
@@ -77,8 +77,9 @@ infraestrutura local, não autorização para afrouxar asserções.
 
 ## Convenções
 
-- **TDD estrito**: teste primeiro (red), implementação mínima (green), refactor. A
-  ordem está em `docs/PROGRESS.md`.
+- **TDD estrito**: teste primeiro (red), implementação mínima (green), refactor. As
+  evidências ficam na página da mudança em `docs/progress/changes/`; o painel
+  `docs/PROGRESS.md` recebe somente uma linha com link.
 - **Async**: nodes e adapters são `async`; o grafo roda via `ainvoke`. Por isso o
   checkpointer precisa ser async (`AsyncSqliteCompatSaver` local ou `AsyncPostgresSaver`
   com `DATABASE_URL`).
@@ -124,8 +125,21 @@ Todos os testes devem passar. Quando um falha, **investigue a causa raiz e corri
 código** (ou o teste, só se ele estava errado quanto ao comportamento desejado).
 **Nunca** afrouxe uma asserção, remova um caso, marque `xfail`/`skip` ou troque o valor
 esperado só para ficar verde. Um teste verde tem que significar comportamento correto.
-Registre toda falha investigada (sintoma → causa → correção) em `docs/PROGRESS.md`.
+Registre toda falha investigada (sintoma → causa → correção) na página da mudança em
+`docs/progress/changes/`, usando `docs/progress/CHANGE-TEMPLATE.md`. O painel
+`docs/PROGRESS.md` recebe somente o resumo com link.
 (Skips legítimos: testes `--live` que exigem infra externa — opt-in, documentados.)
+
+## Registro de progresso
+
+- `docs/PROGRESS.md` é um painel de no máximo 250 linhas: estado atual, bloqueios
+  acionáveis, exatamente 10 entregas recentes e índice do histórico.
+- Cada nova entrega ganha `docs/progress/changes/YYYY-MM-DD-slug.md` com resultado,
+  mudanças de contrato, RED → GREEN, falhas investigadas, verificação e pendências.
+- Decisões arquiteturais ficam em `docs/DECISIONS.md`/ADRs; procedimentos ficam nos
+  runbooks. A página da mudança apenas aponta para o documento canônico.
+- Não duplique comandos ou justificativas já documentados e nunca altere
+  `docs/progress/archive/`; correções posteriores ganham uma nova página.
 
 ## Como plugar ou trocar um adapter real
 

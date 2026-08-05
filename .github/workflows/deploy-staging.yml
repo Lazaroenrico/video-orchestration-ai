@@ -21,10 +21,10 @@ jobs:
         image: postgres:16
         env:
           POSTGRES_HOST_AUTH_METHOD: trust
-          POSTGRES_DB: pytest_db
+          POSTGRES_DB: postgres
         ports: ["55432:5432"]
         options: >-
-          --health-cmd "pg_isready -U postgres -d pytest_db"
+          --health-cmd "pg_isready -U postgres -d postgres"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
@@ -78,6 +78,14 @@ jobs:
           tags: |
             registry.cloudflare.com/${{ vars.CLOUDFLARE_ACCOUNT_ID }}/ugc-orchestrator:${{ github.sha }}
             ${{ vars.AWS_ECR_REGISTRY }}/ugc-orchestrator:${{ github.sha }}
+      - name: Smoke-test FFmpeg assembly in the runtime image
+        env:
+          IMAGE: registry.cloudflare.com/${{ vars.CLOUDFLARE_ACCOUNT_ID }}/ugc-orchestrator:${{ github.sha }}
+        run: |
+          docker pull "$IMAGE"
+          docker run --rm --entrypoint python \
+            -v "$PWD/tests/runtime_ffmpeg_smoke.py:/tests/runtime_ffmpeg_smoke.py:ro" \
+            "$IMAGE" /tests/runtime_ffmpeg_smoke.py
 
   migrate:
     needs: build

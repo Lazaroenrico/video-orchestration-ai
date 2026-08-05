@@ -107,6 +107,7 @@ async def test_inspect_run_reconstructs_durable_state_by_run_id(postgresql):
         "platform": "tiktok",
         "batch_size": 1,
         "error": None,
+        "error_type": None,
         "summary": {"total_cost_usd": 1.25},
         "state": {"quality": "ready"},
     }

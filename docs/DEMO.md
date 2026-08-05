@@ -43,7 +43,9 @@ ORCH_DEV_CONFIG_DIR=config-staging ORCH_DEV_STORAGE_BACKEND=local \
 
 O teste live usa o mesmo comando sem `ORCH_DEV_CONFIG_DIR`, cria uma campanha com
 batch 1 e chama somente Vercel AI Gateway, Replicate (clips + voz) e Cloudflare
-R2. A montagem roda localmente com FFmpeg.
+R2. Antes da campanha, configure as quotas locais em outro terminal com
+`./scripts/dev-local quotas --design-chars 500 --voice-slots 2 --tts-chars 1000`.
+A montagem roda localmente com FFmpeg.
 
 ## 1. Setup
 
@@ -61,7 +63,7 @@ pytest
 
 Os 2 skips são testes `--live` (opt-in, exigem gateway externo). Os warnings são benignos
 (deprecation de import do LangSmith; comportamento interno do LangGraph ao cancelar tasks no
-resume parcial — ver `docs/PROGRESS.md`, falha #5).
+resume parcial — ver a [falha #5 no histórico de junho](progress/archive/2026-06.md#falhas-de-teste-investigadas-sintoma--causa-raiz--correção)).
 
 > Nota: o hook do `rtk` colapsa a saída do pytest. Para ver o resultado real, rode
 > `rtk proxy python -m pytest`.
@@ -219,4 +221,5 @@ O foco do v1 é o **motor**; a saída hoje é **agregada**. Ao testar, tenha em 
   `node_assembly`, com `assembled` preenchido.
 
 Esses pontos são candidatos a um próximo passo, fora do escopo desta prova de conceito.
-Ver `docs/PROGRESS.md` (próximos passos do v2) e `docs/DECISIONS.md`.
+Veja o registro legado de [próximos passos do v2](progress/archive/2026-06.md#próximos-passos-v2-pós-mvp),
+o [painel atual](PROGRESS.md) e as [decisões](DECISIONS.md).

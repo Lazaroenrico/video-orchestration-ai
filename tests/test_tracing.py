@@ -103,6 +103,8 @@ def test_drop_self_removes_config_and_headers_like_values():
         "client": object(),
         "headers": {"Authorization": "Bearer secret"},
         "token": "secret",
+        "reference_image_uri": "https://signed.example/image?token=secret",
+        "revision": "PRIVATE creative direction",
         "item_id": "abc",
     })
 

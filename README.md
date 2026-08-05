@@ -61,6 +61,19 @@ Serviços disponibilizados:
 - **API FastAPI / Readiness**: `http://localhost:8000/readyz`
 - **PostgreSQL**: `127.0.0.1:55432`
 
+Para validar adapters pagos no perfil live, mantenha `./scripts/dev-local up` aberto e,
+em outro terminal, configure limites absolutos e cumulativos no tenant local:
+
+```bash
+./scripts/dev-local quotas \
+  --design-chars 500 \
+  --voice-slots 2 \
+  --tts-chars 1000
+```
+
+A ação só aceita `ORCH_DEV_CONFIG_DIR=config`, exige o serviço `api` ativo e executa o
+CLI dentro do container, garantindo o PostgreSQL local em vez do `DATABASE_URL` do host.
+
 Para encerrar o ambiente preservando os dados ou limpar todos os volumes locais:
 
 ```bash
@@ -197,5 +210,6 @@ rtk proxy python -m pytest tests/test_judge_eval.py --live
 - `AGENTS.md` — Regras do agente, arquitetura de nodes e convenções do projeto.
 - `Context.md` — Visão conceitual e operacional da pipeline de AI UGC em escala.
 - `docs/DECISIONS.md` — Registro de Decisões de Arquitetura (ADRs).
-- `docs/PROGRESS.md` — Log detalhado de progresso e correções Red → Green.
+- [docs/PROGRESS.md](docs/PROGRESS.md) — Painel atual; o histórico e as evidências
+  Red → Green ficam no índice apontado pelo próprio painel.
 - `docs/DEMO.md` — Passo a passo detalhado de demonstração e saída de comandos.

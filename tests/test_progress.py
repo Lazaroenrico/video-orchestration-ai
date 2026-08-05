@@ -155,6 +155,35 @@ def test_completed_progress_counts_dropped_clips_without_claiming_they_were_asse
     ]
 
 
+def test_completed_progress_attributes_structured_video_failure_to_its_real_stage():
+    progress = build_progress(
+        [],
+        phase="done",
+        items=[
+            {
+                "id": "clip-failed",
+                "error": "video provider operation failed",
+                "failure": {"stage": "talking_head", "type": "WriteTimeout"},
+                "assembled": None,
+                "dropped": False,
+            },
+            {
+                "id": "clip-ok",
+                "assembled": {"uri": "mock://final"},
+                "dropped": False,
+            },
+        ],
+        batch_size=2,
+    )
+
+    stages = {stage["id"]: stage for stage in progress["stages"]}
+    items = {item["item_id"]: item for item in progress["items"]}
+    assert stages["talking_head"]["failed_units"] == 1
+    assert stages["assembly"]["total_units"] == 1
+    assert stages["assembly"]["failed_units"] == 0
+    assert items["clip-failed"]["stage_id"] == "talking_head"
+
+
 def test_progress_translator_ignores_noise_and_recovers_process_item_output():
     translator = ProgressEventTranslator()
 
