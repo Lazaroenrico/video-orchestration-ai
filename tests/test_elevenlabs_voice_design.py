@@ -93,8 +93,19 @@ async def test_elevenlabs_voice_design_adapter_calls_design_endpoint() -> None:
 
 @pytest.mark.asyncio
 async def test_elevenlabs_voice_design_adapter_calls_create_endpoint() -> None:
+    payloads: list[dict[str, Any]] = []
+
     async def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/v1/text-to-voice":
+            payload = json.loads(request.content)
+            payloads.append(payload)
+            description = payload.get("voice_description", "")
+            if not 20 <= len(description) <= 1000:
+                return httpx.Response(
+                    422,
+                    headers={"request-id": "req-short-description"},
+                    json={"detail": "voice_description must contain 20 to 1000 characters"},
+                )
             return httpx.Response(
                 200,
                 json={"voice_id": "eleven_permanent_123"},
@@ -124,6 +135,9 @@ async def test_elevenlabs_voice_design_adapter_calls_create_endpoint() -> None:
             organization_id="org-test",
         )
         assert finalized.voice_ref == "eleven_permanent_123"
+        assert payloads[0]["generated_voice_id"] == "gen_voice_001"
+        assert payloads[0]["voice_name"] == "ugc-org-test-creator-0-deschash12"
+        assert 20 <= len(payloads[0]["voice_description"]) <= 1000
 
 
 @pytest.mark.parametrize("preview_text", ["curto", "x" * 1001])

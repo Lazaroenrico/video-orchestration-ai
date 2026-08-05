@@ -226,7 +226,7 @@ class FfmpegAssemblyAdapter:
             audio_filter = (
                 f"atempo={speed:.6f},"
                 "loudnorm=I=-16:LRA=11:TP=-1.5,"
-                "aresample=48000,"
+                "aresample=48000:out_chlayout=mono,"
                 f"apad,atrim=duration={final_duration}"
             )
             filter_complex = (

@@ -161,7 +161,6 @@ async def test_ffmpeg_run_surfaces_missing_binary_failure_and_timeout():
     adapter = FfmpegAssemblyAdapter(
         final_duration_seconds=2,
         clip_duration_seconds=1,
-        timeout_seconds=0.01,
     )
     with pytest.raises(RuntimeError, match="binary is missing"):
         await adapter._run("/definitely/missing/ffmpeg")
@@ -171,8 +170,13 @@ async def test_ffmpeg_run_surfaces_missing_binary_failure_and_timeout():
             "-c",
             "printf expected-error >&2; exit 2",
         )
+    timeout_adapter = FfmpegAssemblyAdapter(
+        final_duration_seconds=2,
+        clip_duration_seconds=1,
+        timeout_seconds=0.01,
+    )
     with pytest.raises(RuntimeError, match="timed out"):
-        await adapter._run("/bin/sh", "-c", "sleep 1")
+        await timeout_adapter._run("/bin/sh", "-c", "sleep 1")
 
 
 async def test_ffmpeg_materializes_data_file_http_and_rejects_missing(

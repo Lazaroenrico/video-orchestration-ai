@@ -32,6 +32,7 @@ DEFAULT_PREVIEW_TEXT = (
     "Olá! Este é um exemplo de demonstração da minha nova voz sintética gerada "
     "por inteligência artificial para vídeos criativos de UGC."
 )
+FINALIZED_VOICE_DESCRIPTION = "Synthetic voice for an AI UGC creator"
 
 
 def voice_description(spec: CreatorVoiceSpec) -> str:
@@ -293,7 +294,7 @@ class ElevenLabsVoiceDesignAdapter:
                 payload={
                     "generated_voice_id": candidate_id,
                     "voice_name": voice_name,
-                    "voice_description": "UGC creator voice",
+                    "voice_description": FINALIZED_VOICE_DESCRIPTION,
                 },
             )
             data = response.json()
