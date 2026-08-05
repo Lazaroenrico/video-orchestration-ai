@@ -46,8 +46,15 @@ function phasePill(phase: RunPhase): { status: Status; label: string } {
   }
 }
 
-function itemStatus(it: Item): { status: Status; label: string } {
-  if (it.error) return { status: "failed", label: "Assembly Failed" };
+function failureStage(stage?: string | null): string {
+  if (stage === "talking_head" || stage === "product_demo" || stage === "video") return "Video Generation";
+  if (stage === "voiceover") return "Voiceover";
+  if (stage === "assembly") return "Assembly";
+  return stage ? stageLabel(stage) : "Production";
+}
+
+export function itemStatus(it: Item): { status: Status; label: string } {
+  if (it.error) return { status: "failed", label: `${failureStage(it.failure?.stage)} Failed` };
   if (it.dropped) return { status: "failed", label: "Failed QC" };
   if (it.assembled) return { status: "done", label: "Done" };
   if (it.qc) return { status: it.qc.passed ? "approved" : "review", label: it.qc.passed ? "QC Pass" : "QC Review" };
@@ -602,7 +609,7 @@ export function CampaignDetail() {
 
       <div className="mb-gutter grid grid-cols-2 gap-3 xl:grid-cols-4">
         <StatTile label="Finished clips" value={`${doneItems}/${items.length || "—"}`} />
-        <StatTile label="Needs attention" value={attentionItems.length} hint={attentionItems.length ? "QC / assembly" : "Clear"} hintTone={attentionItems.length ? "error" : "success"} />
+        <StatTile label="Needs attention" value={attentionItems.length} hint={attentionItems.length ? "QC / production" : "Clear"} hintTone={attentionItems.length ? "error" : "success"} />
         <StatTile label="In progress" value={Math.max(0, items.length - doneItems)} hint={run.phase === "running" ? "Live" : undefined} hintTone="muted" />
         <StatTile label="Run cost" value={usd(totalCost)} />
       </div>

@@ -22,6 +22,8 @@ usage() {
   cat >&2 <<'EOF'
 Uso:
   ./scripts/dev-local up
+  ./scripts/dev-local quotas --design-chars N --voice-slots N --tts-chars N
+  ./scripts/dev-local video-quota --seconds N
   ./scripts/dev-local down
   ./scripts/dev-local reset --yes
 EOF
@@ -118,6 +120,46 @@ run_compose() {
     "$@"
 }
 
+is_positive_integer() {
+  [[ "$1" =~ ^[1-9][0-9]*$ ]]
+}
+
+configure_voice_quotas() {
+  local limit
+  [[ $# -eq 6 ]] || usage
+  [[ "$1" == "--design-chars" && "$3" == "--voice-slots" \
+    && "$5" == "--tts-chars" ]] || usage
+  [[ "$ORCH_DEV_CONFIG_DIR" == "config" ]] \
+    || die "quotas pagas exigem ORCH_DEV_CONFIG_DIR=config"
+  for limit in "$2" "$4" "$6"; do
+    is_positive_integer "$limit" \
+      || die "limites de quota devem ser um inteiro positivo"
+  done
+  if ! run_compose exec -T api true >/dev/null 2>&1; then
+    die "serviço api não está em execução; rode ./scripts/dev-local up primeiro"
+  fi
+
+  run_compose exec -T api orchestrator db set-voice-quota \
+    --bucket elevenlabs_voice_design_chars --limit-units "$2"
+  run_compose exec -T api orchestrator db set-voice-quota \
+    --bucket elevenlabs_voice_slots --limit-units "$4"
+  run_compose exec -T api orchestrator db set-voice-quota \
+    --bucket elevenlabs_tts_chars --limit-units "$6"
+}
+
+configure_video_quota() {
+  [[ $# -eq 2 && "$1" == "--seconds" ]] || usage
+  [[ "$ORCH_DEV_CONFIG_DIR" == "config" ]] \
+    || die "quota de vídeo paga exige ORCH_DEV_CONFIG_DIR=config"
+  is_positive_integer "$2" \
+    || die "limite de quota deve ser um inteiro positivo"
+  if ! run_compose exec -T api true >/dev/null 2>&1; then
+    die "serviço api não está em execução; rode ./scripts/dev-local up primeiro"
+  fi
+  run_compose exec -T api orchestrator db set-provider-quota \
+    --provider replicate_video_seconds --limit-units "$2"
+}
+
 main() {
   local action="${1-}"
   detect_compose
@@ -138,6 +180,14 @@ main() {
         run_compose down --remove-orphans
       fi
       run_compose up --build
+      ;;
+    quotas)
+      shift
+      configure_voice_quotas "$@"
+      ;;
+    video-quota)
+      shift
+      configure_video_quota "$@"
       ;;
     down)
       [[ $# -eq 1 ]] || usage

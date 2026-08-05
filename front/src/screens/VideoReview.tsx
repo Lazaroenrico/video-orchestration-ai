@@ -13,8 +13,15 @@ import { useRunStream } from "../api/useRunStream";
 import type { Item } from "../types";
 import { usd } from "../lib/format";
 
-function itemStatus(it: Item): { status: Status; label: string } {
-  if (it.error) return { status: "failed", label: "Assembly Failed" };
+function failureStage(stage?: string | null): string {
+  if (stage === "talking_head" || stage === "product_demo" || stage === "video") return "Video Generation";
+  if (stage === "voiceover") return "Voiceover";
+  if (stage === "assembly") return "Assembly";
+  return stage ? stage.split(/[_-]+/).map((part) => part.charAt(0).toUpperCase() + part.slice(1)).join(" ") : "Production";
+}
+
+export function itemStatus(it: Item): { status: Status; label: string } {
+  if (it.error) return { status: "failed", label: `${failureStage(it.failure?.stage)} Failed` };
   if (it.dropped) return { status: "failed", label: "QC Failed" };
   if (it.assembled) return { status: "done", label: "Final Video Ready" };
   if (it.qc?.passed) return { status: "approved", label: "QC Passed" };
@@ -102,7 +109,7 @@ export function VideoReview() {
                 <div className="mx-4 mb-4 flex items-start gap-2 p-3 rounded-lg bg-error-container font-body-md text-body-md text-on-error-container">
                   <Icon name="error" size={18} className="mt-0.5 shrink-0" />
                   <span>
-                    <strong className="font-semibold">Assembly did not finish.</strong> {current.error} Source clips remain available above when the provider returned them.
+                    <strong className="font-semibold">{failureStage(current.failure?.stage)} did not finish.</strong> {current.error} Source clips remain available above when the provider returned them.
                   </span>
                 </div>
               )}

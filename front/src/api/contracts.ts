@@ -16,6 +16,18 @@ export interface QC {
   reasons: string[];
 }
 
+export interface FailureDetail {
+  code: string;
+  type: string;
+  message: string;
+  stage: string;
+  provider: string;
+  item_id: string;
+  effect_key: string;
+  retryable: boolean;
+  uncertain: boolean;
+}
+
 export interface VoiceCandidate {
   candidate_id: string;
   preview: Artifact;
@@ -66,6 +78,7 @@ export interface Item {
   assembled?: Artifact | null;
   dropped: boolean;
   error?: string | null;
+  failure?: FailureDetail | null;
 }
 
 export interface RunSummary {

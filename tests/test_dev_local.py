@@ -5,6 +5,7 @@ import os
 import subprocess
 from pathlib import Path
 
+import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -175,6 +176,250 @@ def test_dev_local_up_falls_back_to_compose_v1_for_free_staging_smoke(
     invocations = log_file.read_text(encoding="utf-8").splitlines()
     assert "down --remove-orphans" in invocations[0]
     assert "up --build" in invocations[1]
+
+
+def test_dev_local_quotas_configures_all_voice_buckets_inside_api(tmp_path) -> None:
+    env_file = tmp_path / "dev.env"
+    _write_live_env(env_file)
+    log_file = tmp_path / "compose.log"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    docker = fake_bin / "docker"
+    docker.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = "compose" ] && [ "$2" = "version" ]; then exit 0; fi\n'
+        'printf "%s\\n" "$*" >> "$ORCH_TEST_LOG"\n',
+        encoding="utf-8",
+    )
+    docker.chmod(0o755)
+    env = {
+        **os.environ,
+        "PATH": f"{fake_bin}:/usr/bin:/bin",
+        "ORCH_DEV_ENV_FILE": str(env_file),
+        "ORCH_DEV_CONFIG_DIR": "config",
+        "ORCH_TEST_LOG": str(log_file),
+    }
+
+    result = subprocess.run(
+        [
+            str(DEV_LOCAL_PATH),
+            "quotas",
+            "--design-chars",
+            "500",
+            "--voice-slots",
+            "2",
+            "--tts-chars",
+            "1000",
+        ],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    invocations = log_file.read_text(encoding="utf-8").splitlines()
+    expected = {
+        "elevenlabs_voice_design_chars": "500",
+        "elevenlabs_voice_slots": "2",
+        "elevenlabs_tts_chars": "1000",
+    }
+    for bucket, limit in expected.items():
+        assert any(
+            "exec -T api orchestrator db set-voice-quota "
+            f"--bucket {bucket} --limit-units {limit}" in invocation
+            for invocation in invocations
+        )
+    combined_output = result.stdout + result.stderr + "\n".join(invocations)
+    assert "gateway-secret" not in combined_output
+    assert "replicate-secret" not in combined_output
+    assert "elevenlabs-secret" not in combined_output
+
+
+def test_dev_local_quotas_rejects_incomplete_arguments_before_compose(tmp_path) -> None:
+    env_file = tmp_path / "dev.env"
+    env_file.write_text("", encoding="utf-8")
+    log_file = tmp_path / "compose.log"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    docker = fake_bin / "docker"
+    docker.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = "compose" ] && [ "$2" = "version" ]; then exit 0; fi\n'
+        'printf "%s\\n" "$*" >> "$ORCH_TEST_LOG"\n',
+        encoding="utf-8",
+    )
+    docker.chmod(0o755)
+    env = {
+        **os.environ,
+        "PATH": f"{fake_bin}:/usr/bin:/bin",
+        "ORCH_DEV_ENV_FILE": str(env_file),
+        "ORCH_DEV_CONFIG_DIR": "config",
+        "ORCH_TEST_LOG": str(log_file),
+    }
+
+    result = subprocess.run(
+        [
+            str(DEV_LOCAL_PATH),
+            "quotas",
+            "--design-chars",
+            "500",
+            "--voice-slots",
+            "2",
+        ],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 2
+    assert "--tts-chars N" in result.stderr
+    assert not log_file.exists()
+
+
+@pytest.mark.parametrize("invalid_limit", ["0", "-1", "many"])
+def test_dev_local_quotas_rejects_invalid_limits_before_compose(
+    tmp_path,
+    invalid_limit,
+) -> None:
+    env_file = tmp_path / "dev.env"
+    env_file.write_text("", encoding="utf-8")
+    log_file = tmp_path / "compose.log"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    docker = fake_bin / "docker"
+    docker.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = "compose" ] && [ "$2" = "version" ]; then exit 0; fi\n'
+        'printf "%s\\n" "$*" >> "$ORCH_TEST_LOG"\n',
+        encoding="utf-8",
+    )
+    docker.chmod(0o755)
+    env = {
+        **os.environ,
+        "PATH": f"{fake_bin}:/usr/bin:/bin",
+        "ORCH_DEV_ENV_FILE": str(env_file),
+        "ORCH_DEV_CONFIG_DIR": "config",
+        "ORCH_TEST_LOG": str(log_file),
+    }
+
+    result = subprocess.run(
+        [
+            str(DEV_LOCAL_PATH),
+            "quotas",
+            "--design-chars",
+            invalid_limit,
+            "--voice-slots",
+            "2",
+            "--tts-chars",
+            "1000",
+        ],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 1
+    assert "inteiro positivo" in result.stderr
+    assert not log_file.exists()
+
+
+def test_dev_local_quotas_refuses_non_live_config_before_compose(tmp_path) -> None:
+    env_file = tmp_path / "dev.env"
+    env_file.write_text("", encoding="utf-8")
+    log_file = tmp_path / "compose.log"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    docker = fake_bin / "docker"
+    docker.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = "compose" ] && [ "$2" = "version" ]; then exit 0; fi\n'
+        'printf "%s\\n" "$*" >> "$ORCH_TEST_LOG"\n',
+        encoding="utf-8",
+    )
+    docker.chmod(0o755)
+    env = {
+        **os.environ,
+        "PATH": f"{fake_bin}:/usr/bin:/bin",
+        "ORCH_DEV_ENV_FILE": str(env_file),
+        "ORCH_DEV_CONFIG_DIR": "config-staging",
+        "ORCH_TEST_LOG": str(log_file),
+    }
+
+    result = subprocess.run(
+        [
+            str(DEV_LOCAL_PATH),
+            "quotas",
+            "--design-chars",
+            "500",
+            "--voice-slots",
+            "2",
+            "--tts-chars",
+            "1000",
+        ],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 1
+    assert "ORCH_DEV_CONFIG_DIR=config" in result.stderr
+    assert not log_file.exists()
+
+
+def test_dev_local_quotas_reports_when_api_is_not_running(tmp_path) -> None:
+    env_file = tmp_path / "dev.env"
+    env_file.write_text("", encoding="utf-8")
+    log_file = tmp_path / "compose.log"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    docker = fake_bin / "docker"
+    docker.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = "compose" ] && [ "$2" = "version" ]; then exit 0; fi\n'
+        'printf "%s\\n" "$*" >> "$ORCH_TEST_LOG"\n'
+        'case "$*" in *"exec -T api true"*) exit 1;; esac\n',
+        encoding="utf-8",
+    )
+    docker.chmod(0o755)
+    env = {
+        **os.environ,
+        "PATH": f"{fake_bin}:/usr/bin:/bin",
+        "ORCH_DEV_ENV_FILE": str(env_file),
+        "ORCH_DEV_CONFIG_DIR": "config",
+        "ORCH_TEST_LOG": str(log_file),
+    }
+
+    result = subprocess.run(
+        [
+            str(DEV_LOCAL_PATH),
+            "quotas",
+            "--design-chars",
+            "500",
+            "--voice-slots",
+            "2",
+            "--tts-chars",
+            "1000",
+        ],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 1
+    assert "serviço api não está em execução" in result.stderr
+    invocations = log_file.read_text(encoding="utf-8").splitlines()
+    assert any("exec -T api true" in invocation for invocation in invocations)
+    assert all("set-voice-quota" not in invocation for invocation in invocations)
 
 
 def test_dev_local_preflight_lists_missing_names_without_printing_secrets(

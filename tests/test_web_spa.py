@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 from contextlib import asynccontextmanager
+from types import SimpleNamespace
 
 import pytest
 from fastapi import FastAPI, HTTPException
@@ -236,6 +237,53 @@ async def test_readyz_requires_elevenlabs_key_only_for_direct_voice_design(
     )
     legacy = await web_server.readyz()
     assert legacy.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_readyz_requires_replicate_webhook_env_only_for_durable_paid_live_video(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(web_server, "load_pipeline", lambda path=None: {})
+    monkeypatch.setattr(web_server, "load_judge", lambda path=None: {})
+    monkeypatch.setattr(
+        web_server,
+        "load_providers",
+        lambda path=None: {
+            "storage": {"backend": "local"},
+            "adapters": {"video": "replicate"},
+        },
+    )
+    monkeypatch.setenv("DATABASE_URL", "postgresql://unused")
+    monkeypatch.setenv("ORCH_ENABLE_PAID_ADAPTERS", "true")
+    monkeypatch.setattr(web_server, "get_shared_database", lambda: pytest.fail("DB probe must follow env validation"))
+    for name in (
+        "ORCH_PUBLIC_API_BASE_URL",
+        "REPLICATE_WEBHOOK_SIGNING_SECRET",
+        "ORCH_WEBHOOK_CORRELATION_SECRET",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    missing = await web_server.readyz()
+    assert missing.status_code == 503
+    assert "ORCH_PUBLIC_API_BASE_URL" in json.loads(missing.body)["reason"]
+
+    # Same durable infrastructure with paid adapters disabled (staging) remains valid.
+    monkeypatch.setenv("ORCH_ENABLE_PAID_ADAPTERS", "false")
+
+    class Database:
+        @asynccontextmanager
+        async def connection(self):
+            async def execute(_sql):
+                return None
+
+            yield SimpleNamespace(execute=execute)
+
+    async def database():
+        return Database()
+
+    monkeypatch.setattr(web_server, "get_shared_database", database)
+    ready = await web_server.readyz()
+    assert ready.status_code == 200
 
 
 @pytest.mark.asyncio
