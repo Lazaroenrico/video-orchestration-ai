@@ -30,7 +30,7 @@ from orchestrator.creative_contracts import (
     ScriptResult,
     script_result_from_text,
 )
-from orchestrator.graph.state import Artifact, Item
+from orchestrator.graph.state import Artifact, FailureDetail, Item
 from orchestrator.nodes.base import as_item, get_pipeline
 from orchestrator.stage_executor import StageExecutionError, execute_stage_tool
 from orchestrator.storage.base import is_downloadable
@@ -57,7 +57,7 @@ from orchestrator.tools.creators import (
 from orchestrator.tools.persona import write_persona_tool
 from orchestrator.tools.qc import qc_check_tool
 from orchestrator.tools.scripts import write_script_tool
-from orchestrator.tools.video import generate_clip_tool
+from orchestrator.tools.video import VideoEffectError, generate_clip_tool
 from orchestrator.tracing import add_trace_metadata, traced
 
 _log = logging.getLogger(__name__)
@@ -915,6 +915,7 @@ async def node_scripts(state: dict[str, Any], config: RunnableConfig) -> dict[st
     pipeline = config["configurable"].get("pipeline") or {}
     assembly_cfg = pipeline.get("assembly", {})
     narration_target = assembly_cfg.get("narration_target_seconds")
+    narration_min_words = assembly_cfg.get("narration_min_words", 28)
     narration_max_words = assembly_cfg.get("narration_max_words")
     platform = campaign.platform
     concepts = state.get("concepts") or []
@@ -934,6 +935,7 @@ async def node_scripts(state: dict[str, Any], config: RunnableConfig) -> dict[st
             revision_feedback=(state.get("revision_request") or {}).get("feedback"),
             return_contract=True,
             target_duration_seconds=narration_target,
+            min_spoken_words=narration_min_words,
             max_spoken_words=narration_max_words,
         )
         if not isinstance(result, ScriptResult):
@@ -1281,6 +1283,39 @@ def _assembly_prompt(item: Item, run_prompt: str | None, *, platform: str) -> st
     parts.append("No mock footage. No placeholder frames. No captions burned into the video.")
     return "\n\n".join(parts)
 
+
+def _video_failure_update(
+    item: Item,
+    exc: VideoEffectError,
+    *,
+    stage: str,
+) -> dict[str, Any]:
+    """Convert only an expected paid-video failure into an item terminal state."""
+    failure = FailureDetail(
+        code=exc.code,
+        type=exc.error_type,
+        message=str(exc),
+        stage=stage,
+        provider=exc.provider,
+        item_id=item.id,
+        effect_key=exc.effect_key,
+        retryable=exc.retryable,
+        uncertain=exc.uncertain,
+    )
+    add_trace_metadata(
+        stage=stage,
+        item_id=item.id,
+        failure_code=failure.code,
+        failure_type=failure.type,
+        uncertain=failure.uncertain,
+    )
+    return {
+        "clips": item.clips,
+        "cost_usd": item.cost_usd,
+        "error": failure.message,
+        "failure": failure,
+    }
+
 def make_gen_node(tier: str):
     """Fabrica o node de geração de talking-head (Step 4) para um tier."""
 
@@ -1294,20 +1329,23 @@ def make_gen_node(tier: str):
             step=4, stage="talking_head", item_id=item.id, tier=tier,
             attempt=item.attempts,
         )
-        run = await execute_stage_tool(
-            config,
-            tool_ctx,
-            catalog_stage="video",
-            tool_name="generate_clip",
-            tool_fn=generate_clip_tool,
-            with_attempts=True,
-            item_id=item.id, tier=tier, seconds=seconds, attempt=item.attempts,
-            system_prompt=_video_prompt(
-                item, run_cfg.get("video_prompt"), stage="talking-head"
-            ),
-            reference_image_uri=item.creator_image_uri,
-            stage="talking_head",
-        )
+        try:
+            run = await execute_stage_tool(
+                config,
+                tool_ctx,
+                catalog_stage="video",
+                tool_name="generate_clip",
+                tool_fn=generate_clip_tool,
+                with_attempts=True,
+                item_id=item.id, tier=tier, seconds=seconds, attempt=item.attempts,
+                system_prompt=_video_prompt(
+                    item, run_cfg.get("video_prompt"), stage="talking-head"
+                ),
+                reference_image_uri=item.creator_image_uri,
+                stage="talking_head",
+            )
+        except VideoEffectError as exc:
+            return _video_failure_update(item, exc, stage="talking_head")
         clip, takes_cost = _settle_takes(run)
         # Surfaça se o clip veio do provider real ou de fallback mock,
         # + o modelo e a URI de saída — responde "está gerando o vídeo mesmo?".
@@ -1356,21 +1394,24 @@ async def node_product_demo(state: Any, config: RunnableConfig) -> dict[str, Any
         attempt=item.attempts,
         tier=product_demo_tier,
     )
-    run = await execute_stage_tool(
-        config,
-        tool_ctx,
-        catalog_stage="video",
-        tool_name="generate_clip",
-        tool_fn=generate_clip_tool,
-        with_attempts=True,
-        item_id=f"{item.id}:demo",
-        tier=product_demo_tier,
-        seconds=seconds,
-        attempt=item.attempts,
-        system_prompt=_video_prompt(item, run_cfg.get("video_prompt"), stage="product-demo"),
-        reference_image_uri=item.creator_image_uri,
-        stage="product_demo",
-    )
+    try:
+        run = await execute_stage_tool(
+            config,
+            tool_ctx,
+            catalog_stage="video",
+            tool_name="generate_clip",
+            tool_fn=generate_clip_tool,
+            with_attempts=True,
+            item_id=f"{item.id}:demo",
+            tier=product_demo_tier,
+            seconds=seconds,
+            attempt=item.attempts,
+            system_prompt=_video_prompt(item, run_cfg.get("video_prompt"), stage="product-demo"),
+            reference_image_uri=item.creator_image_uri,
+            stage="product_demo",
+        )
+    except VideoEffectError as exc:
+        return _video_failure_update(item, exc, stage="product_demo")
     demo, takes_cost = _settle_takes(run)
     add_trace_metadata(
         step=5, stage="product_demo_done", item_id=item.id,

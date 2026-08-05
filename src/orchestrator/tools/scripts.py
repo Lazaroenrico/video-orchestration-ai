@@ -34,6 +34,7 @@ async def write_script_tool(
     return_contract: bool = False,
     agent_submission: bool = False,
     target_duration_seconds: Optional[int] = None,
+    min_spoken_words: Optional[int] = None,
     max_spoken_words: Optional[int] = None,
 ) -> str | ScriptResult:
     add_trace_metadata(
@@ -74,9 +75,13 @@ async def write_script_tool(
     spoken_words = sum(
         len(beat.text.split()) for beat in submission.spoken_beats
     )
+    if min_spoken_words is not None and spoken_words < min_spoken_words:
+        raise ValueError(
+            f"narration requires at least {min_spoken_words} spoken words (got {spoken_words})"
+        )
     if max_spoken_words is not None and spoken_words > max_spoken_words:
         raise ValueError(
-            f"narration exceeds {max_spoken_words} spoken words"
+            f"narration exceeds {max_spoken_words} spoken words (got {spoken_words})"
         )
 
     concept_id = str(concept.get("id") or "")

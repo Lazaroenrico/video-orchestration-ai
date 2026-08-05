@@ -344,10 +344,10 @@ class MockAdapter:
         hook = concept.get("hook", "hook")
         pacing = "fast" if platform.lower() == "tiktok" else "medium"
         script = (
-            f"HOOK: {hook}\n"
+            f"HOOK: {hook} Se você não conhece precisa ver isso.\n"
             f"BODY: ({platform} / pacing={pacing}) creator={creator_ref} fala sobre "
-            f"{concept.get('offer', 'o produto')} no ângulo {concept.get('angle')}.\n"
-            f"CTA: confere o link e testa hoje."
+            f"{concept.get('offer', 'o produto')} com resultados reais comprovados no dia a dia.\n"
+            f"CTA: confere o link e garante o seu hoje mesmo."
         )
         if persona:
             tag = hashlib.sha256(persona.encode()).hexdigest()[:8]

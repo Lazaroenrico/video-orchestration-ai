@@ -34,6 +34,7 @@ clip:
 assembly:
   final_duration_seconds: 16
   narration_target_seconds: 14
+  narration_min_words: 28
   narration_max_words: 35
   audio_speedup_max: 1.10
   resolution: "1080x1920"
