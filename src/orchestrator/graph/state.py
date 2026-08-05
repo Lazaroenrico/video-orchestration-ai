@@ -59,6 +59,20 @@ class JudgeVerdict(BaseModel):
         return cls(score=score, verdict=verdict, passed=passed, raw=raw or {})
 
 
+class FailureDetail(BaseModel):
+    """Safe, persisted description of an expected per-item failure."""
+
+    code: str
+    type: str
+    message: str
+    stage: str
+    provider: str
+    item_id: str
+    effect_key: str
+    retryable: bool
+    uncertain: bool
+
+
 class Item(BaseModel):
     """Estado per-item que flui pelo subgrafo de produção."""
 
@@ -77,6 +91,7 @@ class Item(BaseModel):
     assembled: Optional[Artifact] = None
     dropped: bool = False
     error: Optional[str] = None
+    failure: Optional[FailureDetail] = None
     cost_usd: float = 0.0
 
 

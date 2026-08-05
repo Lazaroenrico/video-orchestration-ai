@@ -11,11 +11,13 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     ForeignKeyConstraint,
+    Index,
     Integer,
     PrimaryKeyConstraint,
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
@@ -234,6 +236,7 @@ class Run(Base):
     batch_size: Mapped[Optional[int]] = mapped_column(Integer)
     phase: Mapped[str] = mapped_column(Text, nullable=False)
     error: Mapped[Optional[str]] = mapped_column(Text)
+    error_type: Mapped[Optional[str]] = mapped_column(Text)
     summary: Mapped[dict[str, Any]] = mapped_column(
         JSONB, nullable=False, server_default=func.text("'{}'::jsonb")
     )
@@ -305,6 +308,7 @@ class Job(Base):
     lease_expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     worker_id: Mapped[Optional[str]] = mapped_column(Text)
     error: Mapped[Optional[str]] = mapped_column(Text)
+    error_type: Mapped[Optional[str]] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.current_timestamp()
     )
@@ -429,6 +433,19 @@ class EffectLedger(Base):
             "status IN ('reserved', 'succeeded', 'uncertain', 'failed')",
             name="ck_external_effects_status",
         ),
+        CheckConstraint(
+            "provider_status IS NULL OR provider_status IN "
+            "('starting', 'processing', 'succeeded', 'failed', 'canceled')",
+            name="ck_external_effects_provider_status",
+        ),
+        Index(
+            "uq_external_effects_provider_operation",
+            "organization_id",
+            "provider",
+            "provider_operation_id",
+            unique=True,
+            postgresql_where=text("provider_operation_id IS NOT NULL"),
+        ),
     )
 
     organization_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True))
@@ -440,6 +457,9 @@ class EffectLedger(Base):
     request: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     result: Mapped[Optional[dict[str, Any]]] = mapped_column(JSONB)
     error: Mapped[Optional[str]] = mapped_column(Text)
+    error_type: Mapped[Optional[str]] = mapped_column(Text)
+    provider_operation_id: Mapped[Optional[str]] = mapped_column(Text)
+    provider_status: Mapped[Optional[str]] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.current_timestamp()
     )

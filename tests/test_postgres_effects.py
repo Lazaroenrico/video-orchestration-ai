@@ -252,6 +252,74 @@ async def test_effect_ledger_rejects_invalid_and_ambiguous_transitions(postgresq
     assert reconciled.result == {"provider_id": "reconciled"}
 
 
+async def test_prediction_binding_is_idempotent_unique_and_status_is_monotonic(postgresql):
+    runtime_url = _runtime_url(postgresql)
+    identity = TenantIdentity("prediction-acme", "Prediction Acme", "oidc|runner")
+
+    async with Database(runtime_url) as database:
+        tenant = await database.ensure_tenant(identity)
+        ledger = PostgresEffectLedger(database, tenant)
+        await ledger.set_quota("replicate_video_seconds", limit_units=16)
+        await ledger.reserve(
+            "video:run-1:item-1:talking_head:0:hash",
+            run_id="run-1",
+            provider="replicate_video_seconds",
+            units=8,
+            request={"model": "prunaai/p-video", "prompt_hash": "hash"},
+        )
+        uncertain = await ledger.mark_uncertain(
+            "video:run-1:item-1:talking_head:0:hash",
+            error="WriteTimeout",
+            error_type="WriteTimeout",
+        )
+        bound = await ledger.bind_provider_operation(
+            "video:run-1:item-1:talking_head:0:hash",
+            provider_operation_id="prediction-1",
+            provider_status="processing",
+        )
+        duplicate = await ledger.bind_provider_operation(
+            "video:run-1:item-1:talking_head:0:hash",
+            provider_operation_id="prediction-1",
+            provider_status="processing",
+        )
+        terminal = await ledger.update_provider_status(
+            "video:run-1:item-1:talking_head:0:hash",
+            provider_status="succeeded",
+        )
+        regressed = await ledger.update_provider_status(
+            "video:run-1:item-1:talking_head:0:hash",
+            provider_status="starting",
+        )
+        succeeded = await ledger.mark_succeeded(
+            "video:run-1:item-1:talking_head:0:hash",
+            result={"provider_prediction_id": "prediction-1", "artifact": {"uri": "r2://clip"}},
+        )
+
+        await ledger.reserve(
+            "video:run-1:item-2:talking_head:0:hash",
+            run_id="run-1",
+            provider="replicate_video_seconds",
+            units=8,
+            request={"model": "prunaai/p-video", "prompt_hash": "hash-2"},
+        )
+        with pytest.raises(ValueError, match="prediction-1"):
+            await ledger.bind_provider_operation(
+                "video:run-1:item-2:talking_head:0:hash",
+                provider_operation_id="prediction-1",
+                provider_status="processing",
+            )
+
+    assert uncertain.status == "uncertain"
+    assert uncertain.error_type == "WriteTimeout"
+    assert bound.status == "reserved"
+    assert bound.provider_operation_id == "prediction-1"
+    assert duplicate.provider_operation_id == "prediction-1"
+    assert terminal.provider_status == "succeeded"
+    assert regressed.provider_status == "succeeded"
+    assert regressed.error_type == "WriteTimeout"
+    assert succeeded.status == "succeeded"
+
+
 async def test_definitive_failure_releases_quota_exactly_once(postgresql):
     runtime_url = _runtime_url(postgresql)
     identity = TenantIdentity("failed-acme", "Failed Acme", "oidc|runner")

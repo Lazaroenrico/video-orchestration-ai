@@ -24,6 +24,7 @@ class RunSnapshot:
     platform: Optional[str] = None
     batch_size: Optional[int] = None
     error: Optional[str] = None
+    error_type: Optional[str] = None
     summary: dict[str, Any] = field(default_factory=dict)
     state: dict[str, Any] = field(default_factory=dict)
     items: list[dict[str, Any]] = field(default_factory=list)
@@ -34,6 +35,7 @@ class RunIndexEntry:
     run_id: str
     phase: str
     error: Optional[str] = None
+    error_type: Optional[str] = None
 
 
 class PostgresRunRepository:
@@ -71,6 +73,7 @@ class PostgresRunRepository:
                     "batch_size": batch_size,
                     "phase": "running",
                     "error": None,
+                    "error_type": None,
                     "summary": {},
                     "state": {},
                 },
@@ -93,6 +96,7 @@ class PostgresRunRepository:
         summary: dict[str, Any],
         items: list[dict[str, Any]],
         error: Optional[str] = None,
+        error_type: Optional[str] = None,
     ) -> None:
         if phase not in _RUN_PHASES:
             raise ValueError(f"unknown run phase {phase!r}")
@@ -110,6 +114,7 @@ class PostgresRunRepository:
                 id=run_id,
                 phase=phase,
                 error=error,
+                error_type=error_type,
                 summary=summary,
                 state=state,
             )
@@ -118,6 +123,7 @@ class PostgresRunRepository:
                 set_={
                     "phase": phase,
                     "error": error,
+                    "error_type": error_type,
                     "summary": summary,
                     "state": state,
                 },
@@ -166,6 +172,7 @@ class PostgresRunRepository:
                 Run.batch_size,
                 Run.phase,
                 Run.error,
+                Run.error_type,
                 Run.summary,
                 Run.state,
             )
@@ -198,14 +205,15 @@ class PostgresRunRepository:
             batch_size=row[3],
             phase=row[4],
             error=row[5],
-            summary=row[6],
-            state=row[7],
+            error_type=row[6],
+            summary=row[7],
+            state=row[8],
             items=items,
         )
 
     async def list_index(self) -> list[RunIndexEntry]:
         stmt = (
-            select(Run.id, Run.phase, Run.error)
+            select(Run.id, Run.phase, Run.error, Run.error_type)
             .where(Run.organization_id == self._tenant.organization_id)
             .order_by(Run.position.desc())
         )
@@ -213,6 +221,6 @@ class PostgresRunRepository:
             cursor = await self._database.execute(connection, stmt)
             rows = await cursor.fetchall()
         return [
-            RunIndexEntry(run_id=row[0], phase=row[1], error=row[2])
+            RunIndexEntry(run_id=row[0], phase=row[1], error=row[2], error_type=row[3])
             for row in rows
         ]

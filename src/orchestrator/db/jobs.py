@@ -44,6 +44,7 @@ class Job:
     lease_expires_at: datetime | None
     worker_id: str | None
     error: str | None
+    error_type: str | None = None
 
 
 @dataclass(frozen=True)
@@ -118,6 +119,7 @@ def _job(row: tuple[Any, ...]) -> Job:
         lease_expires_at=row[8],
         worker_id=row[9],
         error=row[10],
+        error_type=row[11],
     )
 
 
@@ -133,6 +135,7 @@ _JOB_COLUMNS = (
     JobModel.lease_expires_at,
     JobModel.worker_id,
     JobModel.error,
+    JobModel.error_type,
 )
 
 
@@ -273,6 +276,7 @@ class PostgresJobRepository:
                 worker_id=worker_id,
                 lease_expires_at=timestamp + timedelta(seconds=LEASE_SECONDS),
                 error=None,
+                error_type=None,
                 updated_at=timestamp,
             )
             .returning(*_JOB_COLUMNS)
@@ -376,6 +380,7 @@ class PostgresJobRepository:
         *,
         worker_id: str,
         error: str,
+        error_type: str | None = None,
         retryable: bool = True,
         now: datetime | None = None,
     ) -> Job:
@@ -412,6 +417,7 @@ class PostgresJobRepository:
                     lease_expires_at=None,
                     worker_id=None,
                     error=error[:2000],
+                    error_type=(error_type or "Error")[:200],
                     updated_at=timestamp,
                 )
                 .returning(*_JOB_COLUMNS)
@@ -429,6 +435,7 @@ class PostgresJobRepository:
                     "job_id": str(job_id),
                     "attempt": failed.attempt,
                     "error": failed.error,
+                    "error_type": failed.error_type,
                 },
                 timestamp,
             )
@@ -442,6 +449,7 @@ class PostgresJobRepository:
                     .values(
                         phase="error",
                         error=failed.error,
+                        error_type=failed.error_type,
                         updated_at=timestamp,
                     )
                 )

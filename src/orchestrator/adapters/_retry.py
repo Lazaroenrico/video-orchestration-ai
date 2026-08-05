@@ -66,6 +66,18 @@ def _is_retryable(exc: BaseException) -> bool:
     return False
 
 
+def _is_idempotent_retryable(exc: BaseException) -> bool:
+    """GET/cancel polling may safely retry any transport error and 5xx/429."""
+    if isinstance(exc, httpx.TransportError):
+        return True
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code == 429 or exc.response.status_code >= 500
+    if isinstance(exc, ReplicateError):
+        status = getattr(exc, "status", None)
+        return status == 429 or bool(isinstance(status, int) and status >= 500)
+    return False
+
+
 async def with_transport_retry(
     fn: Callable[[], Awaitable[Any]],
     *,
@@ -104,5 +116,36 @@ async def with_transport_retry(
             _log.warning(
                 "%s falhou (%d/%d): %s; retry",
                 label, attempt + 1, max_retries + 1, type(exc).__name__,
+            )
+            attempt += 1
+
+
+async def with_idempotent_retry(
+    fn: Callable[[], Awaitable[Any]],
+    *,
+    max_retries: int = 3,
+    backoff_base: float = 1.0,
+    max_delay: float = 60.0,
+    label: str = "provider.poll",
+) -> Any:
+    """Retry a provider operation that is safe to repeat by operation id."""
+    attempt = 0
+    while True:
+        try:
+            return await fn()
+        except Exception as exc:
+            if not _is_idempotent_retryable(exc) or attempt >= max_retries:
+                raise
+            delay = backoff_base * (2 ** attempt)
+            hint = _throttle_reset_hint(exc)
+            if hint is not None:
+                delay = max(delay, hint + 1.0)
+            await asyncio.sleep(min(delay, max_delay))
+            _log.warning(
+                "%s falhou (%d/%d): %s; retry",
+                label,
+                attempt + 1,
+                max_retries + 1,
+                type(exc).__name__,
             )
             attempt += 1

@@ -1,6 +1,7 @@
 """ReplicateVideoAdapter via SDK oficial, sem rede."""
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
@@ -296,6 +297,43 @@ async def test_generate_clip_retries_transport_errors_then_succeeds():
 
     assert artifact.uri == "https://cdn.replicate.com/ok.mp4"
     assert calls == 2
+
+
+async def test_prediction_get_retries_read_timeout_and_server_error():
+    calls = 0
+
+    async def async_get(prediction_id):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise httpx.ReadTimeout("poll response timed out")
+        if calls == 2:
+            request = httpx.Request("GET", f"https://api.replicate.com/v1/predictions/{prediction_id}")
+            response = httpx.Response(503, request=request)
+            raise httpx.HTTPStatusError("unavailable", request=request, response=response)
+        return SimpleNamespace(
+            id=prediction_id,
+            status="succeeded",
+            output="https://cdn.replicate.com/polled.mp4",
+            error=None,
+        )
+
+    predictions = SimpleNamespace(
+        async_get=async_get,
+        async_create=None,
+        async_cancel=None,
+    )
+    adapter = ReplicateVideoAdapter(
+        tiers=TIERS,
+        prediction_client=SimpleNamespace(predictions=predictions),
+        max_retries=2,
+        backoff_base=0,
+    )
+
+    prediction = await adapter.get_video_prediction("prediction-1")
+
+    assert prediction.status == "succeeded"
+    assert calls == 3
 
 
 async def test_unsupported_models_fallback_to_mock_clip():

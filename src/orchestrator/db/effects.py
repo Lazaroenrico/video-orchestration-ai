@@ -1,11 +1,14 @@
 """Ledger tenant-scoped para quotas e efeitos externos idempotentes."""
 from __future__ import annotations
 
+import asyncio
+import time
 from dataclasses import dataclass
 from typing import Any
 
 from sqlalchemy import select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.exc import IntegrityError
 
 from orchestrator.db.database import Database
 from orchestrator.db.models import EffectLedger as EffectLedgerModel
@@ -24,6 +27,9 @@ class EffectReservation:
     created: bool
     result: dict[str, Any] | None = None
     error: str | None = None
+    error_type: str | None = None
+    provider_operation_id: str | None = None
+    provider_status: str | None = None
 
 
 class QuotaExceededError(RuntimeError):
@@ -44,6 +50,9 @@ def _reservation(row: tuple[Any, ...], *, created: bool) -> EffectReservation:
         request=row[5],
         result=row[6],
         error=row[7],
+        error_type=row[8],
+        provider_operation_id=row[9],
+        provider_status=row[10],
         created=created,
     )
 
@@ -57,7 +66,31 @@ _EFFECT_COLUMNS = (
     EffectLedgerModel.request,
     EffectLedgerModel.result,
     EffectLedgerModel.error,
+    EffectLedgerModel.error_type,
+    EffectLedgerModel.provider_operation_id,
+    EffectLedgerModel.provider_status,
 )
+
+_PROVIDER_STATUS_ORDER = {"starting": 0, "processing": 1}
+_PROVIDER_TERMINAL_STATUSES = frozenset({"succeeded", "failed", "canceled"})
+
+
+def _merge_provider_status(current: str | None, incoming: str) -> str:
+    incoming = incoming.strip().lower()
+    valid = set(_PROVIDER_STATUS_ORDER) | set(_PROVIDER_TERMINAL_STATUSES)
+    if incoming not in valid:
+        raise ValueError(f"provider status inválido: {incoming!r}")
+    if current is None:
+        return incoming
+    if current in _PROVIDER_TERMINAL_STATUSES:
+        return current
+    if incoming in _PROVIDER_TERMINAL_STATUSES:
+        return incoming
+    return (
+        incoming
+        if _PROVIDER_STATUS_ORDER[incoming] >= _PROVIDER_STATUS_ORDER[current]
+        else current
+    )
 
 
 class PostgresEffectLedger:
@@ -66,6 +99,22 @@ class PostgresEffectLedger:
     def __init__(self, database: Database, tenant: TenantContext) -> None:
         self._database = database
         self._tenant = tenant
+
+    @property
+    def organization_slug(self) -> str:
+        return self._tenant.organization_slug
+
+    async def get(self, effect_key: str) -> EffectReservation:
+        stmt = select(*_EFFECT_COLUMNS).where(
+            EffectLedgerModel.organization_id == self._tenant.organization_id,
+            EffectLedgerModel.effect_key == effect_key,
+        )
+        async with self._database.connection(self._tenant) as connection:
+            cursor = await self._database.execute(connection, stmt)
+            row = await cursor.fetchone()
+        if row is None:
+            raise ValueError(f"efeito {effect_key!r} inexistente")
+        return _reservation(row, created=False)
 
     async def set_quota(self, provider: str, *, limit_units: int) -> None:
         if limit_units < 0:
@@ -192,16 +241,19 @@ class PostgresEffectLedger:
         effect_key: str,
         *,
         error: str,
+        error_type: str | None = None,
     ) -> EffectReservation:
         stmt = (
             update(EffectLedgerModel)
             .where(
                 EffectLedgerModel.organization_id == self._tenant.organization_id,
                 EffectLedgerModel.effect_key == effect_key,
+                EffectLedgerModel.status == "reserved",
             )
             .values(
                 status="uncertain",
                 error=error[:2000],
+                **({"error_type": error_type[:200]} if error_type else {}),
             )
             .returning(*_EFFECT_COLUMNS)
         )
@@ -209,8 +261,143 @@ class PostgresEffectLedger:
             cursor = await self._database.execute(connection, stmt)
             row = await cursor.fetchone()
             if row is None:
-                raise ValueError(f"efeito {effect_key!r} inexistente")
+                existing = await self._database.execute(
+                    connection,
+                    select(*_EFFECT_COLUMNS).where(
+                        EffectLedgerModel.organization_id == self._tenant.organization_id,
+                        EffectLedgerModel.effect_key == effect_key,
+                    ),
+                )
+                row = await existing.fetchone()
+                if row is None:
+                    raise ValueError(f"efeito {effect_key!r} inexistente")
         return _reservation(row, created=False)
+
+    async def bind_provider_operation(
+        self,
+        effect_key: str,
+        *,
+        provider_operation_id: str,
+        provider_status: str,
+    ) -> EffectReservation:
+        operation_id = provider_operation_id.strip()
+        if not operation_id:
+            raise ValueError("provider_operation_id não pode ser vazio")
+        try:
+            async with self._database.connection(self._tenant) as connection:
+                cursor = await self._database.execute(
+                    connection,
+                    select(*_EFFECT_COLUMNS)
+                    .where(
+                        EffectLedgerModel.organization_id == self._tenant.organization_id,
+                        EffectLedgerModel.effect_key == effect_key,
+                    )
+                    .with_for_update(),
+                )
+                row = await cursor.fetchone()
+                if row is None:
+                    raise ValueError(f"efeito {effect_key!r} inexistente")
+                current = _reservation(row, created=False)
+                if (
+                    current.provider_operation_id is not None
+                    and current.provider_operation_id != operation_id
+                ):
+                    raise ValueError(
+                        f"efeito {effect_key!r} já vinculado a "
+                        f"{current.provider_operation_id!r}"
+                    )
+                duplicate = await self._database.execute(
+                    connection,
+                    select(EffectLedgerModel.effect_key).where(
+                        EffectLedgerModel.organization_id == self._tenant.organization_id,
+                        EffectLedgerModel.provider == current.provider,
+                        EffectLedgerModel.provider_operation_id == operation_id,
+                        EffectLedgerModel.effect_key != effect_key,
+                    ),
+                )
+                if await duplicate.fetchone() is not None:
+                    raise ValueError(
+                        f"provider operation {operation_id!r} já vinculada a outro efeito"
+                    )
+                merged = _merge_provider_status(current.provider_status, provider_status)
+                updated = await self._database.execute(
+                    connection,
+                    update(EffectLedgerModel)
+                    .where(
+                        EffectLedgerModel.organization_id == self._tenant.organization_id,
+                        EffectLedgerModel.effect_key == effect_key,
+                    )
+                    .values(
+                        provider_operation_id=operation_id,
+                        provider_status=merged,
+                        status=(
+                            "reserved" if current.status == "uncertain" else current.status
+                        ),
+                    )
+                    .returning(*_EFFECT_COLUMNS),
+                )
+                updated_row = await updated.fetchone()
+                assert updated_row is not None
+        except IntegrityError as exc:
+            raise ValueError(
+                f"provider operation {operation_id!r} já vinculada a outro efeito"
+            ) from exc
+        return _reservation(updated_row, created=False)
+
+    async def update_provider_status(
+        self,
+        effect_key: str,
+        *,
+        provider_status: str,
+        error_type: str | None = None,
+    ) -> EffectReservation:
+        async with self._database.connection(self._tenant) as connection:
+            cursor = await self._database.execute(
+                connection,
+                select(*_EFFECT_COLUMNS)
+                .where(
+                    EffectLedgerModel.organization_id == self._tenant.organization_id,
+                    EffectLedgerModel.effect_key == effect_key,
+                )
+                .with_for_update(),
+            )
+            row = await cursor.fetchone()
+            if row is None:
+                raise ValueError(f"efeito {effect_key!r} inexistente")
+            current = _reservation(row, created=False)
+            merged = _merge_provider_status(current.provider_status, provider_status)
+            values: dict[str, Any] = {"provider_status": merged}
+            if error_type:
+                values["error_type"] = error_type[:200]
+            updated = await self._database.execute(
+                connection,
+                update(EffectLedgerModel)
+                .where(
+                    EffectLedgerModel.organization_id == self._tenant.organization_id,
+                    EffectLedgerModel.effect_key == effect_key,
+                )
+                .values(**values)
+                .returning(*_EFFECT_COLUMNS),
+            )
+            updated_row = await updated.fetchone()
+            assert updated_row is not None
+        return _reservation(updated_row, created=False)
+
+    async def wait_for_provider_operation(
+        self,
+        effect_key: str,
+        *,
+        timeout_seconds: float,
+        poll_interval_seconds: float = 1.0,
+    ) -> EffectReservation:
+        deadline = time.monotonic() + max(timeout_seconds, 0)
+        while True:
+            reservation = await self.get(effect_key)
+            if reservation.provider_operation_id:
+                return reservation
+            if time.monotonic() >= deadline:
+                return reservation
+            await asyncio.sleep(max(poll_interval_seconds, 0))
 
     async def mark_succeeded(
         self,
@@ -228,7 +415,7 @@ class PostgresEffectLedger:
             .values(
                 status="succeeded",
                 result=result,
-                error=None,
+                provider_status="succeeded",
             )
             .returning(*_EFFECT_COLUMNS)
         )
@@ -260,6 +447,7 @@ class PostgresEffectLedger:
         *,
         error: str,
         release_quota: bool,
+        error_type: str | None = None,
     ) -> EffectReservation:
         """Mark a definitive failure; release quota at most once when unbilled."""
         stmt_update = (
@@ -269,7 +457,11 @@ class PostgresEffectLedger:
                 EffectLedgerModel.effect_key == effect_key,
                 EffectLedgerModel.status == "reserved",
             )
-            .values(status="failed", error=error[:2000])
+            .values(
+                status="failed",
+                error=error[:2000],
+                **({"error_type": error_type[:200]} if error_type else {}),
+            )
             .returning(*_EFFECT_COLUMNS)
         )
         stmt_existing = select(*_EFFECT_COLUMNS).where(
@@ -321,7 +513,11 @@ class PostgresEffectLedger:
                 EffectLedgerModel.effect_key == effect_key,
                 EffectLedgerModel.status == "uncertain",
             )
-            .values(status="succeeded", result=result, error=None)
+            .values(
+                status="succeeded",
+                result=result,
+                provider_status="succeeded",
+            )
             .returning(*_EFFECT_COLUMNS)
         )
         async with self._database.connection(self._tenant) as connection:

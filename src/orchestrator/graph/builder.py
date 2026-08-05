@@ -66,8 +66,16 @@ def build_item_graph(pipeline: dict[str, Any]):
         START, make_script_route_node(tns), {t: t for t in tns}
     )
     for t in tns:
-        sg.add_edge(t, "product_demo")
-    sg.add_edge("product_demo", "qc")
+        sg.add_conditional_edges(
+            t,
+            route_after_video_node,
+            {"continue": "product_demo", "end": END},
+        )
+    sg.add_conditional_edges(
+        "product_demo",
+        route_after_video_node,
+        {"continue": "qc", "end": END},
+    )
     sg.add_conditional_edges(
         "voiceover",
         route_after_voiceover_node,
@@ -109,6 +117,11 @@ def make_script_route_node(tns: list[str]):
 async def route_after_voiceover_node(state: dict[str, Any]) -> str:
     """Mantém o roteamento no event loop, sem criar executor apenas para uma decisão."""
     return route_after_voiceover(as_item(state))
+
+
+async def route_after_video_node(state: dict[str, Any]) -> str:
+    """An expected provider failure ends only this item's subgraph."""
+    return "end" if as_item(state).error else "continue"
 
 
 # Chaves de checkpoint do LangGraph: não podem vazar para o subgrafo per-item (que é
