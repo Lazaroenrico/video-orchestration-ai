@@ -398,18 +398,3 @@ def summarize(out: dict[str, Any]) -> dict[str, Any]:
         },
         "winning_styles": (out.get("feedback") or {}).get("winning_styles", []),
     }
-
-
-def format_report(out: dict[str, Any]) -> str:
-    s = summarize(out)
-    lines = [
-        f"run {s['run_id']}",
-        f"  produzidos : {s['produced']}",
-        f"  aprovados  : {s['approved']}",
-        f"  descartados: {s['dropped']}",
-        f"  em andamento: {s['in_flight']}",
-        f"  tentativas : {s['total_attempts']}",
-        f"  custo total: ${s['total_cost_usd']:.4f}  {s['cost_by_stage']}",
-        f"  hooks top  : {s['winning_styles']}",
-    ]
-    return "\n".join(lines)
