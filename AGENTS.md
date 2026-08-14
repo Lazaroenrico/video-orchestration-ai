@@ -143,6 +143,18 @@ Registre toda falha investigada (sintoma → causa → correção) na página da
    `ORCH_ENABLE_PAID_ADAPTERS=true` quando a reserva/idempotência de efeitos estiver
    validada para o caminho que será rodado.
 
+
+## Delegation
+
+When a task has already been sufficiently explored and its expected
+behavior and implementation scope are clear, architecture ande review delegate this
+to the .codex/agents.
+
+The main agent should retain ownership of architectural decisions.
+
+Do not delegate ambiguous requirements directly to the implementer.
+Resolve ambiguity and define the implementation boundary first.
+
 <!-- rtk-instructions v2 -->
 # RTK (Rust Token Killer) - Token-Optimized Commands
 

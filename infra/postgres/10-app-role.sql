@@ -9,6 +9,8 @@ BEGIN
             NOCREATEDB
             NOCREATEROLE
             NOBYPASSRLS;
+    ELSE
+        ALTER ROLE orchestrator NOSUPERUSER NOBYPASSRLS;
     END IF;
 END
 $$;

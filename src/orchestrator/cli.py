@@ -339,6 +339,31 @@ def runner_command(
     click.echo("job processado" if worked else "fila vazia")
 
 
+DEFAULT_DEV_QUOTAS = {
+    "elevenlabs_voice_design_chars": 100000,
+    "elevenlabs_voice_slots": 50,
+    "elevenlabs_tts_chars": 200000,
+    "replicate_video_seconds": 300,
+}
+
+
+async def _seed_default_dev_quotas() -> None:
+    async with Database.from_env() as database:
+        tenant = await database.resolve_tenant(TenantIdentity.from_env())
+        ledger = PostgresEffectLedger(database, tenant)
+        for bucket, default_limit in DEFAULT_DEV_QUOTAS.items():
+            try:
+                row = await database.fetch_one(
+                    "SELECT limit_units FROM provider_quotas WHERE organization_id = $1 AND provider = $2",
+                    tenant.organization_id,
+                    bucket,
+                )
+                if row is None:
+                    await ledger.set_quota(bucket, limit_units=default_limit)
+            except Exception:
+                pass
+
+
 @cli.command()
 @click.option("--db", default=None, help="Checkpointer sqlite (default: .orchestrator/runs.sqlite).")
 @click.option("--artifacts-db", default=None, help="ArtifactDB sqlite (default: .orchestrator/artifacts.sqlite).")
@@ -373,6 +398,11 @@ def migrate(db, artifacts_db, migration_database_url, legacy_database_url):
         )
     if database_url:
         upgrade_database(database_url)
+        if os.environ.get("ORCH_ENV", "local") == "local":
+            try:
+                asyncio.run(_seed_default_dev_quotas())
+            except Exception:
+                pass
         click.echo("PostgreSQL migrado: revision=head")
         return
 
