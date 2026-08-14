@@ -202,10 +202,9 @@ async def test_openai_image_wraps_custom_prompt_with_safety_guardrails() -> None
     body = json.loads(calls[0].content)
     prompt = body["prompt"]
     assert "adult professional UGC creator" in prompt
-    assert "modest everyday clothing" in prompt
-    assert "head-and-shoulders portrait" in prompt
-    assert "conservative commercial profile portrait" in prompt
-    assert "brand-safe product review context" in prompt
+    assert "modest everyday casual clothing" in prompt
+    assert "natural window lighting" in prompt
+    assert "unposed commercial UGC profile" in prompt
     assert "Influencer feminina, 25 anos. Look casual." in prompt
     assert "creator-3" in prompt
 

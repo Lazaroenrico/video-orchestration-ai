@@ -109,3 +109,45 @@ async def test_mock_adapter_voice_design_methods() -> None:
     )
     assert finalized.selected_candidate_id == batch.candidates[0].candidate_id
     assert "creator-0" in finalized.voice_ref
+
+
+@pytest.mark.asyncio
+async def test_derive_creator_voice_spec_tool_gender_alignment() -> None:
+    from orchestrator.tools.base import ToolContext
+    from orchestrator.tools.creators import derive_creator_voice_spec_tool
+
+    ctx = ToolContext(adapter=None, pipeline={}, run={}, run_id="run-1")
+
+    # 1. Deve usar voice_profile.preset ("male") se gravado no criador
+    spec_male = await derive_creator_voice_spec_tool(
+        ctx,
+        profile={
+            "id": "creator-0",
+            "voice_profile": {"preset": "male", "prompt": ""},
+            "voice_brief": "Warm, conversational and practical.",
+            "visual_brief": "Adult creator, casual style.",
+        },
+    )
+    assert spec_male["vocal_presentation"] == "masculine"
+
+    # 2. Deve ler palavras-chave de gênero do visual_brief ("mulher")
+    spec_female_pt = await derive_creator_voice_spec_tool(
+        ctx,
+        profile={
+            "id": "creator-1",
+            "visual_brief": "Criadora mulher adulta, estilo natural.",
+            "voice_brief": "Voz acolhedora e direta.",
+        },
+    )
+    assert spec_female_pt["vocal_presentation"] == "feminine"
+
+    # 3. Fallback por índice: creator-1 sem keywords deve derivar masculine (index 1 é ímpar)
+    spec_fallback_male = await derive_creator_voice_spec_tool(
+        ctx,
+        profile={
+            "id": "creator-1",
+            "voice_brief": "Voz acolhedora e direta.",
+            "visual_brief": "Criador neutro.",
+        },
+    )
+    assert spec_fallback_male["vocal_presentation"] == "masculine"

@@ -46,17 +46,12 @@ _log = logging.getLogger(__name__)
 _VERCEL_GATEWAY_OPENAI_BASE_URL = "https://ai-gateway.vercel.sh/v1"
 _VERCEL_GATEWAY_IMAGE_MODEL = "openai/gpt-image-2"
 _SAFE_CREATOR_PROMPT = (
-    "Create a realistic image of one adult professional UGC creator for a "
-    "marketing video, wearing modest everyday clothing. "
-    "Skin with natural texture, visible pores, slight redness, and small "
-    "imperfections (camera-ready)—a slightly imperfect look, no over-styling. "
-    "Framed as a head-and-shoulders portrait, front view, natural "
-    "smartphone-style lighting, neutral background, friendly expression, "
-    "conservative commercial profile portrait. "
-    "Eyes engaged with the camera, a friendly, subtle smile, and a lively, "
-    "focused expression. "
-    "Set in a brand-safe product review context, clearly adult, original "
-    "non-famous person."
+    "Create an unretouched, highly realistic photographic portrait of one adult professional UGC creator "
+    "for a marketing video, wearing modest everyday casual clothing. "
+    "Skin must show authentic human micro-texture with visible pores, subtle organic freckles, natural skin tone variation, "
+    "slight facial asymmetry, and small natural blemishes (no plastic skin, no airbrushing, no beauty filter, no cgi). "
+    "Shot on a smartphone 85mm lens at f/1.8 in natural window lighting, candid handheld framing, neutral realistic room background. "
+    "Engaged catchlight in eyes, authentic friendly expression, unposed commercial UGC profile."
 )
 
 
@@ -225,7 +220,7 @@ class OpenAIImageAdapter:
 def build_openai_image_vercel_adapter(pipeline: dict[str, Any]) -> "OpenAIImageAdapter":
     """Cria OpenAIImageAdapter apontado para o Vercel AI Gateway.
 
-    Usa o mesmo token ``AI_GATEWAY_API_KEY`` do LLMPort. O Gateway expõe os
+    Usa o mesmo token ``AI_GATEWAY_API_KEY`` do language runtime. O Gateway expõe os
     image-only models (GPT Image 2) no mesmo endpoint OpenAI-compatível
     ``{base}/images/generations`` — base ``https://ai-gateway.vercel.sh/v1``
     (NÃO ``/openai/v1``). O model precisa do prefixo do provider:

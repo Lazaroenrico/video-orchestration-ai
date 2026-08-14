@@ -65,16 +65,34 @@ async def derive_creator_voice_spec_tool(
     )
     from orchestrator.creative_contracts import CreatorVoiceSpec
 
+    import re
+
+    voice_prof = profile.get("voice_profile") or {}
+    preset = voice_prof.get("preset") if isinstance(voice_prof, dict) else getattr(voice_prof, "preset", None)
+
     voice_brief = (profile.get("voice_brief") or "").casefold()
     perf_style = (profile.get("performance_style") or "").casefold()
     archetype = (profile.get("archetype") or "").casefold()
+    vis_brief = (profile.get("visual_brief") or visual_brief or "").casefold()
 
-    if any(k in voice_brief or k in archetype for k in ("female", "woman", "mulher", "feminina")):
+    _FEMALE_TOKENS = ("female", "woman", "mulher", "feminina", "feminino", "girl", "moça", "garota", "ela", "her", "women")
+    _MALE_TOKENS = ("male", "man", "homem", "masculino", "boy", "rapaz", "moço", "garoto", "ele", "his", "men")
+
+    all_text = " ".join([voice_brief, perf_style, archetype, vis_brief])
+
+    if preset == "female":
         vocal_pres = "feminine"
-    elif any(k in voice_brief or k in archetype for k in ("male", "man", "homem", "masculino")):
+    elif preset == "male":
+        vocal_pres = "masculine"
+    elif any(token in all_text for token in _FEMALE_TOKENS):
+        vocal_pres = "feminine"
+    elif any(token in all_text for token in _MALE_TOKENS):
         vocal_pres = "masculine"
     else:
-        vocal_pres = "neutral"
+        creator_id = str(profile.get("id") or "")
+        match = re.search(r"(\d+)$", creator_id)
+        idx = int(match.group(1)) if match else 0
+        vocal_pres = "feminine" if idx % 2 == 0 else "masculine"
 
     if "young" in voice_brief or "jovem" in voice_brief:
         vocal_age = "young_adult"
