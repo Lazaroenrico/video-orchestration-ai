@@ -28,10 +28,10 @@ def test_route_after_script_uses_current_attempt():
 
 # --- QC gate (Step 7): aprovado segue, reprovado volta, esgotado descarta ---
 
-def test_qc_gate_pass_goes_to_voiceover():
+def test_qc_gate_pass_goes_to_assembly_after_pre_video_voiceover():
     item = new_item({"x": 1})
     item.qc = QCResult(passed=True, score=0.9)
-    assert route_after_qc(item, max_attempts=3, tier_names=TIER_NAMES) == "voiceover"
+    assert route_after_qc(item, max_attempts=3, tier_names=TIER_NAMES) == "assembly"
 
 
 def test_qc_gate_fail_within_budget_regenerates_on_ltx():

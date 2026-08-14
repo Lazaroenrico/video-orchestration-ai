@@ -178,6 +178,7 @@ class VideoPort(Protocol):
         self, item_id: str, tier: str, seconds: int, attempt: int,
         system_prompt: Optional[str] = None,
         reference_image_uri: Optional[str] = None,
+        audio_uri: Optional[str] = None,
     ) -> Artifact: ...
 
 

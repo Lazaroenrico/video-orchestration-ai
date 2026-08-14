@@ -168,6 +168,7 @@ async def test_gen_node_passes_video_prompt(pipeline_cfg, adapter):
             attempt,
             system_prompt=None,
             reference_image_uri=None,
+            audio_uri=None,
         ):
             received.append(
                 {
@@ -182,6 +183,7 @@ async def test_gen_node_passes_video_prompt(pipeline_cfg, adapter):
                 attempt,
                 system_prompt=system_prompt,
                 reference_image_uri=reference_image_uri,
+                audio_uri=audio_uri,
             )
 
     spy = SpyAdapter(tiers=TIERS)
@@ -221,6 +223,7 @@ async def test_node_product_demo_passes_video_prompt(pipeline_cfg, adapter):
             attempt,
             system_prompt=None,
             reference_image_uri=None,
+            audio_uri=None,
         ):
             received.append(
                 {
@@ -235,6 +238,7 @@ async def test_node_product_demo_passes_video_prompt(pipeline_cfg, adapter):
                 attempt,
                 system_prompt=system_prompt,
                 reference_image_uri=reference_image_uri,
+                audio_uri=audio_uri,
             )
 
     spy = SpyAdapter(tiers=TIERS)

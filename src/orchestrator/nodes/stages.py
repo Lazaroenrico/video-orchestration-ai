@@ -1298,6 +1298,7 @@ def make_gen_node(tier: str):
                     item, run_cfg.get("video_prompt"), stage="talking-head"
                 ),
                 reference_image_uri=item.creator_image_uri,
+                audio_uri=item.voiceover.uri if item.voiceover else None,
                 stage="talking_head",
             )
         except VideoEffectError as exc:

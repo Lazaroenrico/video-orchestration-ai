@@ -402,7 +402,7 @@ async def test_persist_voice_candidates_rejects_unmaterializable_preview(
         ),
         (
             {"voice_brief": "voz madura", "performance_style": "neutral"},
-            "neutral",
+            "feminine",
             "mature",
             "balanced",
             "conversational",

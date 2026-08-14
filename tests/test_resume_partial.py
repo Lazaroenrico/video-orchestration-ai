@@ -46,6 +46,7 @@ class FlakyAdapter(MockAdapter):
         attempt: int,
         system_prompt=None,
         reference_image_uri=None,
+        audio_uri=None,
     ) -> Artifact:
         self.generate_clip_call_count += 1
         if not self._failed_once and self.generate_clip_call_count == self._fail_on_call:
@@ -61,6 +62,7 @@ class FlakyAdapter(MockAdapter):
             attempt=attempt,
             system_prompt=system_prompt,
             reference_image_uri=reference_image_uri,
+            audio_uri=audio_uri,
         )
 
 

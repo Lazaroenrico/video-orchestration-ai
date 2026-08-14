@@ -24,16 +24,16 @@ def route_after_script(item: Item, tier_names: list[str]) -> str:
 
 
 def route_after_qc(item: Item, max_attempts: int, tier_names: list[str]) -> str:
-    """QC gate: 'voiceover' (aprovado), tier (regen) ou 'drop' (esgotado)."""
+    """QC gate: 'assembly' (aprovado), tier (regen) ou 'drop' (esgotado)."""
     if item.qc is None:
         raise ValueError("route_after_qc chamado sem QCResult no item")
     if item.qc.passed:
-        return "voiceover"
+        return "assembly"
     if item.attempts < max_attempts:
         return select_tier(item.attempts, tier_names)
     return "drop"
 
 
 def route_after_voiceover(item: Item) -> str:
-    """Only a valid persisted voiceover may proceed to final assembly."""
-    return "assembly" if item.voiceover is not None and not item.error else "end"
+    """Only a valid persisted voiceover may proceed to video generation."""
+    return "continue" if item.voiceover is not None and not item.error else "end"

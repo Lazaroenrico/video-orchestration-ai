@@ -409,6 +409,7 @@ async def generate_clip_tool(
     attempt: int,
     system_prompt: Optional[str] = None,
     reference_image_uri: Optional[str] = None,
+    audio_uri: Optional[str] = None,
     revision: Optional[str] = None,
     stage: str = "video",
 ) -> Artifact:
@@ -423,6 +424,7 @@ async def generate_clip_tool(
         item_id=item_id,
         tier=tier,
         has_revision=bool((revision or "").strip()),
+        has_audio=bool(audio_uri),
     )
     prompt = _compose_prompt(system_prompt, revision)
     if ctx.durable and hasattr(ctx.adapter, "submit_clip_prediction"):
@@ -444,5 +446,6 @@ async def generate_clip_tool(
             attempt=attempt,
             system_prompt=prompt,
             reference_image_uri=reference_image_uri,
+            audio_uri=audio_uri,
         )
     return require_artifact(clip, tool_name="generate_clip_tool")

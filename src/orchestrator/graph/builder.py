@@ -47,23 +47,27 @@ def build_item_graph(pipeline: dict[str, Any]):
     tns = tier_names(pipeline)
     max_attempts = int(pipeline.get("qc", {}).get("max_attempts", 3))
     qc_map: dict[str, str] = {t: t for t in tns}
-    qc_map.update({"voiceover": "voiceover", "drop": "drop"})
+    qc_map.update({"assembly": "assembly", "drop": "drop"})
+    tier_routing_map = {t: t for t in tns}
+    tier_routing_map["end"] = END
 
     sg = StateGraph(Item)
+    sg.add_node("voiceover", node_voiceover)
     for t in tns:
         sg.add_node(t, make_gen_node(t))
     sg.add_node("product_demo", node_product_demo)
 
     sg.add_node("qc", make_qc_route_node(tns, max_attempts), destinations=qc_map)
-    sg.add_node("voiceover", node_voiceover)
     sg.add_node("assembly", node_assembly)
     sg.add_node("upscale", node_upscale)
     sg.add_node("drop", node_drop)
 
-    # O script já vem pronto no Item (batch-level, antes do creator): o subgrafo entra
-    # direto no roteamento de tier.
+    # Entra primeiro no voiceover para que o áudio sintetizado guie a sincronização facial (lip sync)
+    sg.add_edge(START, "voiceover")
     sg.add_conditional_edges(
-        START, make_script_route_node(tns), {t: t for t in tns}
+        "voiceover",
+        make_script_route_node(tns),
+        tier_routing_map,
     )
     for t in tns:
         sg.add_conditional_edges(
@@ -75,11 +79,6 @@ def build_item_graph(pipeline: dict[str, Any]):
         "product_demo",
         route_after_video_node,
         {"continue": "qc", "end": END},
-    )
-    sg.add_conditional_edges(
-        "voiceover",
-        route_after_voiceover_node,
-        {"assembly": "assembly", "end": END},
     )
     sg.add_edge("assembly", "upscale")
     sg.add_edge("upscale", END)
