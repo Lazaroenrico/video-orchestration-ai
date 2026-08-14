@@ -118,32 +118,17 @@ npm run dev          # Server de dev Vite com proxy para o backend em :8000
 
 O executável `orchestrator` fornece comandos para execução offline, gestão de banco de dados e disparo do runner worker.
 
-### Comandos de Pipeline
+### API V2 e Workers
 ```bash
-# Roda uma pipeline em dry-run (config-mock)
-orchestrator run --batch 12 --offer "serum X" --config-dir config-mock
+# Inicia a API REST/SSE V2 (criação, state, stream, review e retry)
+orchestrator api --port 8000
 
-# Roda múltiplos ciclos encadeados com feedback loop (close-the-loop)
-orchestrator loop --cycles 3 --feedback-store fb.json --config-dir config-mock
-
-# Exibe o status e relatório de um run pelo ID
-orchestrator status <run_id> --config-dir config-mock
-
-# Retoma a execução de um run a partir do checkpointer
-orchestrator resume <run_id> --config-dir config-mock
-
-# Lista os IDs de runs armazenados
-orchestrator list
+# Processa exatamente um job durável; --once é obrigatório
+orchestrator runner --once
 ```
 
 ### Comandos de Servidor e Workers (OCI / Durável)
 ```bash
-# Inicia a API REST + SSE FastAPI + SPA
-orchestrator api --port 8000
-
-# Worker durável: consome 1 job pendente da fila PostgreSQL
-orchestrator runner --once
-
 # Servidor interno de launcher para containers runner
 orchestrator runner-service
 

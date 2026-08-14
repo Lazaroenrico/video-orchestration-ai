@@ -1,5 +1,6 @@
 # Config-dir de DEMO OFFLINE — todos os papéis em "mock" (dry-run, custo zero).
-# Uso: orchestrator run --batch 12 --offer "serum X" --config-dir config-mock
+# Uso: suba a API V2 com config-mock e crie runs pelo endpoint REST/SSE; o runner
+# durável consome jobs com: orchestrator runner --once
 # ou:  orchestrator ...  (com ORCH_CONFIG_DIR=config-mock)
 #
 # Diferença vs. config/: aqui NENHUM adapter real é instanciado, então não exige

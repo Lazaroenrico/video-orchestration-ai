@@ -68,10 +68,11 @@ resume parcial — ver a [falha #5 no histórico de junho](progress/archive/2026
 > Nota: o hook do `rtk` colapsa a saída do pytest. Para ver o resultado real, rode
 > `rtk proxy python -m pytest`.
 
-## 2. Rodar um batch
+## 2. Criar uma campanha pela API V2
 
 ```bash
-orchestrator run --batch 12 --offer "serum X" --run-id demo-run --config-dir config-mock
+curl -X POST http://localhost:8000/api/v2/runs -H 'content-type: application/json' \
+  -d '{"campaign":{"offer":"serum X","audience":"adultos","platform":"tiktok","batch_size":12},"config_dir":"config-mock"}'
 ```
 
 ```
@@ -110,30 +111,27 @@ FFmpeg concatena os dois clips, descarta o áudio de origem e entrega H.264/AAC.
 `voiceover` (8) → `assembly` (9) → `feedback` (10). Tudo em
 `src/orchestrator/nodes/stages.py`.
 
-## 3. Inspecionar, listar e retomar
+## 3. Inspecionar e revisar
 
 O estado de cada run fica checkpointado (sqlite); `thread_id = run_id`.
 
 ```bash
-orchestrator status demo-run --config-dir config-mock   # relê o relatório do checkpoint
-orchestrator list                                   # lista os run_ids conhecidos
-orchestrator resume demo-run --config-dir config-mock    # retoma no mesmo thread_id
+curl http://localhost:8000/api/v2/runs/demo-run/state
+curl http://localhost:8000/api/v2/runs/demo-run/stream
+# Após o gate, envie a decisão para POST /api/v2/runs/demo-run/review.
 ```
 
-`status` e `resume` de um run já completo reproduzem o mesmo relatório do passo 2 (o run
-terminou; não há nada pendente). O valor do `resume` aparece quando um batch é
-interrompido no meio: os itens concluídos **não** re-executam, só os pendentes — o
-checkpoint é granular por item.
+O estado e o stream são derivados do checkpoint LangGraph; o mesmo `run_id` é usado
+para retomar uma execução durável.
 
-## 4. O loop de feedback (Step 10 → Step 1)
+## 4. Worker durável
 
 É a parte que faz o sistema "se afiar" a cada ciclo. Rode N ciclos encadeados
 compartilhando um `--feedback-store`: cada ciclo lê os hooks vencedores do anterior e os
 usa como **viés** na geração de conceitos do próximo.
 
 ```bash
-orchestrator loop --cycles 3 --batch 8 --offer "serum X" \
-  --run-id-prefix demo --feedback-store fb.json --config-dir config-mock
+orchestrator runner --once
 ```
 
 ```

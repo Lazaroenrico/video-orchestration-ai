@@ -25,6 +25,7 @@ novas entregas usam uma página própria em `docs/progress/changes/`.
 
 ## Últimas 10 entregas
 
+- [Runtime de linguagem nativo LangChain](progress/changes/2026-08-14-langchain-native-runtime.md) — composição central de dependências, models/agents nativos, mock determinístico e vídeo sem `agent_takes` novo.
 - [Prediction Replicate durável e falha parcial por item](progress/changes/2026-08-04-replicate-prediction-duravel.md) — criação/polling/webhook reconciliam timeout ambíguo sem POST duplicado nem encerrar os demais itens.
 - [Compatibilidade de layout mono na montagem FFmpeg](progress/changes/2026-08-04-ffmpeg-layout-mono.md) — runtime Bookworm monta locução mono a 48 kHz e testa o FFmpeg da própria imagem antes do deploy.
 - [Finalização de voz compatível com o contrato ElevenLabs](progress/changes/2026-08-04-elevenlabs-finalizacao-voice-description.md) — descrição server-owned válida elimina o 422 antes da criação da voz permanente.
@@ -34,7 +35,6 @@ novas entregas usam uma página própria em `docs/progress/changes/`.
 - [Vídeo final com locução e montagem FFmpeg](progress/archive/2026-07.md#correção--vídeo-final-com-locução-elevenlabs-e-montagem-ffmpeg-2026-07-29) — finais passaram a concatenar clips e incluir áudio validado.
 - [QC aceita ponteiros canônicos R2/S3](progress/archive/2026-07.md#correção--qc-aceita-ponteiros-canônicos-de-vídeo-r2s3-2026-07-29) — mídia persistida deixou de falhar no gate de integridade.
 - [Montagem PrunaAI de baixo custo](progress/archive/2026-07.md#mudança--montagem-prunaai-para-validação-e2e-de-baixo-custo-2026-07-29) — assembly Replicate foi validado antes da migração para FFmpeg.
-- [Clips live retornam ao Replicate com PrunaAI](progress/archive/2026-07.md#mudança--clips-live-retornam-ao-replicate-com-prunaai-2026-07-29) — geração live adotou PrunaAI com throttle compartilhado.
 
 ## Índice do histórico
 

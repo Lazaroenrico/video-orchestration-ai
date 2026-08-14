@@ -57,13 +57,15 @@ docs/           DECISIONS.md, PROGRESS.md, progress/archive/, progress/changes/
 
 ```bash
 uv venv --python 3.12 && uv pip install -e ".[dev]"
-orchestrator run --batch 12 --offer "serum X" --config-dir config-mock   # dry-run sem rede
-orchestrator loop --cycles 3 --feedback-store fb.json --config-dir config-mock
-orchestrator status <run_id> --config-dir config-mock
-orchestrator resume <run_id> --config-dir config-mock
-orchestrator list
 orchestrator api
-orchestrator runner --once
+orchestrator runner --once              # consome um job durável
+orchestrator runner-service
+orchestrator sqs-runner
+orchestrator migrate
+orchestrator db
+orchestrator ops
+orchestrator storage
+orchestrator import-legacy
 
 pytest                                 # suíte; testes PostgreSQL exigem servidor local/externo
 pytest tests/test_judge_eval.py        # LLM Judge via cassette

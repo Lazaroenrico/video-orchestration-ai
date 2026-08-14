@@ -805,3 +805,20 @@ Datas absolutas. Apendar novas decisões ao final.
 - **Compatibilidade:** mock/staging permanecem offline, sem quota ou webhook. Readiness
   exige as três variáveis de webhook apenas quando PostgreSQL, vídeo Replicate e adapters
   pagos estão ativos. A migração canônica é `20260804_0011`.
+
+## 2026-08-14
+
+### D46 — Runtime de linguagem nativo LangChain
+
+D46 reafirma D6 e mantém D38 como decisão canônica para contratos V2 e agents
+criativos. `RunDependencies` é a composição única compartilhada por API, runner e
+worker; LangGraph continua único dono de estado, checkpoints, resume, gate e fan-out.
+`LanguageRuntime` resolve `BaseChatModel`, `create_agent` e `ToolStrategy`; o
+`CompositeAdapter` permanece somente domínio/mídia. O gateway OpenAI termina em
+`/v1`; o gateway Anthropic usa base raiz, sem `/v1`, pois o SDK acrescenta
+`/v1/messages`.
+
+As partes aplicáveis de D16–D18, D29, D31, D32 e D34 ficam substituídas por D46;
+D33 já foi substituída por D38. D7, D8, Judge, `judge.yaml`, cassettes, banco,
+REST/SSE e adapters de mídia permanecem preservados. Detalhes e matriz completa:
+[`ADR-D46`](ADR-D46-langchain-native-language-runtime.md).
