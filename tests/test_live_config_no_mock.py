@@ -83,7 +83,6 @@ def test_live_config_activates_agent_mode_only_on_creative_stages():
         assert spec.schema_version == "creative-v2"
 
     for stage in (
-        "persona",
         "video",
         "roster",
         "qc",

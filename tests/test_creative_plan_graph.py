@@ -5,6 +5,7 @@ from langgraph.checkpoint.memory import MemorySaver
 
 from orchestrator.agent_catalog import default_agent_catalog
 from orchestrator.graph.builder import build_graph
+from orchestrator.language_runtime import LanguageRuntime
 from orchestrator.nodes.stages import (
     apply_review_concept_updates,
     apply_review_creator_updates,
@@ -20,6 +21,7 @@ def _config(pipeline_cfg: dict, *, review_plan: bool) -> dict:
                 {"adapters": {"llm": "mock"}},
                 pipeline_cfg,
             ),
+            "language_runtime": LanguageRuntime.from_provider("mock", pipeline_cfg),
             "pipeline": pipeline_cfg,
             "agent_catalog": default_agent_catalog(),
             "run": {

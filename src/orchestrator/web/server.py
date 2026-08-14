@@ -58,6 +58,7 @@ from orchestrator.db import (
     close_shared_database,
     get_shared_database,
 )
+from orchestrator.dependencies import RunDependencies
 from orchestrator.graph.builder import build_graph
 from orchestrator.graph.checkpoint import open_checkpointer
 from orchestrator.nodes.stages import (
@@ -66,7 +67,6 @@ from orchestrator.nodes.stages import (
     validate_voice_selections,
 )
 from orchestrator.progress import ProgressEventTranslator, build_activity, build_progress
-from orchestrator.registry import build_adapter_from_providers
 from orchestrator.replicate_webhook import (
     ReplicateWebhookError,
     apply_replicate_event,
@@ -1016,15 +1016,16 @@ async def _execute_run(
         pipeline = load_pipeline(config_dir)
         providers = load_providers(config_dir)
         agent_catalog = load_agent_catalog(config_dir)
-        adapter = build_adapter_from_providers(providers, pipeline)
-        run_state["adapter"] = adapter
+        dependencies = RunDependencies.build(
+            pipeline, providers, agent_catalog=agent_catalog
+        )
+        run_state["adapter"] = dependencies.adapter
 
         cfg: dict[str, Any] = {
-            "configurable": {
-                "adapter": adapter,
-                "pipeline": pipeline,
-                "agent_catalog": agent_catalog,
-                "run": {
+            "configurable": dependencies.configurable(
+                run_id=run_id,
+                platform=platform,
+                run_options={
                     "platform": platform,
                     "creator_prompt": creator_prompt,
                     "video_prompt": video_prompt,
@@ -1042,8 +1043,7 @@ async def _execute_run(
                         else bool(approve_creators or edit_concepts)
                     ),
                 },
-                "thread_id": run_id,
-            },
+            ),
             "max_concurrency": int(pipeline.get("batch", {}).get("max_concurrency", 8)),
             "recursion_limit": 100,
         }

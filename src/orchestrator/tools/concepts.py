@@ -49,10 +49,12 @@ async def generate_concepts_tool(
         }
         if persona is not None:
             kwargs["persona"] = persona
-        return require_dict_list(
-            await ctx.adapter.generate_concepts(**kwargs),
-            tool_name="generate_concepts_tool",
+        generated = (
+            await ctx.language_runtime.generate_concepts(**kwargs)
+            if ctx.language_runtime is not None
+            else await ctx.adapter.generate_concepts(**kwargs)
         )
+        return require_dict_list(generated, tool_name="generate_concepts_tool")
 
     campaign_input = CampaignInput.model_validate(
         campaign
@@ -78,10 +80,12 @@ async def generate_concepts_tool(
         }
         if persona is not None:
             kwargs["persona"] = persona
-        generated = require_dict_list(
-            await ctx.adapter.generate_concepts(**kwargs),
-            tool_name="generate_concepts_tool",
+        generated = (
+            await ctx.language_runtime.generate_concepts(**kwargs)
+            if ctx.language_runtime is not None
+            else await ctx.adapter.generate_concepts(**kwargs)
         )
+        generated = require_dict_list(generated, tool_name="generate_concepts_tool")
         submissions = [
             ConceptSubmission(
                 hook=str(concept.get("hook") or "Untitled hook"),

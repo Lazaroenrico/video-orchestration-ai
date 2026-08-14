@@ -1923,10 +1923,22 @@ async def test_execute_run_rejects_an_unknown_human_gate(monkeypatch, tmp_path):
     monkeypatch.setattr(web_server, "load_pipeline", lambda _path: {"batch": {}})
     monkeypatch.setattr(web_server, "load_providers", lambda _path: {})
     monkeypatch.setattr(web_server, "load_agent_catalog", lambda _path: object())
+    class FakeDependencies:
+        adapter = object()
+
+        def configurable(self, *, run_id, platform, run_options=None):
+            return {
+                "configurable": {
+                    "thread_id": run_id,
+                    "platform": platform,
+                    **(run_options or {}),
+                }
+            }
+
     monkeypatch.setattr(
-        web_server,
-        "build_adapter_from_providers",
-        lambda *_args: object(),
+        web_server.RunDependencies,
+        "build",
+        lambda *_args, **_kwargs: FakeDependencies(),
     )
     monkeypatch.setattr(web_server, "run_trace_config", lambda *_args, **_kwargs: {})
     monkeypatch.setattr(web_server, "open_checkpointer", open_fake_checkpointer)

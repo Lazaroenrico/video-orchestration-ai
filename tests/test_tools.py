@@ -410,7 +410,6 @@ def test_tool_registry_lists_static_tool_specs():
     specs = {spec.name: spec for spec in TOOL_REGISTRY}
 
     assert set(specs) == {
-        "write_persona",
         "generate_concepts",
         "write_script",
         "design_creator_roster",
@@ -424,7 +423,6 @@ def test_tool_registry_lists_static_tool_specs():
         "assemble_video",
         "upscale_video",
     }
-    assert specs["write_persona"].role == "llm"
     assert specs["generate_concepts"].role == "llm"
     assert specs["generate_clip"].role == "video"
     assert specs["upscale_video"].stage == "upscale"
@@ -486,65 +484,17 @@ def test_tool_registry_lookup_by_name_and_stage():
         get_tool_spec("unknown_tool")
 
 
-def test_tool_registry_exposes_terminal_creative_submission_schemas():
-    from orchestrator.tools.registry import TOOL_REGISTRY, get_tool_spec
+def test_tool_strategy_schemas_come_from_canonical_pydantic_models():
+    from orchestrator.language_runtime import agent_output_model, agent_output_schema
+    from orchestrator.tools.registry import TOOL_REGISTRY
 
-    for spec in TOOL_REGISTRY:
-        assert isinstance(spec.parameters, dict)
-        assert spec.parameters.get("type", "object") == "object"
-
-    creative = {
-        "generate_concepts": "proposals",
-        "write_script": "draft",
-        "design_creator_roster": "creators",
-    }
-    for name, required_field in creative.items():
-        spec = get_tool_spec(name)
-        params = spec.parameters
-        assert spec.terminal_submission is True
-        assert required_field in params["properties"]
-        assert required_field in params["required"]
-        assert params["additionalProperties"] is False
-
-    for name in (
-        "write_persona",
-        "build_creator",
-        "generate_clip",
-        "qc_check",
-        "assemble_video",
-        "upscale_video",
-    ):
-        assert get_tool_spec(name).terminal_submission is False
-        assert get_tool_spec(name).parameters["properties"] == {}
-
-
-def test_generate_clip_schema_keeps_tier_server_authoritative():
-    """``tier`` nunca entra no schema: vem do tier routing e define o custo (D33)."""
-    from orchestrator.tools.registry import get_tool_spec
-
-    props = get_tool_spec("generate_clip").parameters["properties"]
-    for server_owned in ("tier", "item_id", "seconds", "attempt", "system_prompt",
-                         "reference_image_uri"):
-        assert server_owned not in props
-
-
-def test_tool_call_schemas_builds_neutral_schema_for_allowed_tools():
-    """``tool_call_schemas`` monta o contrato neutro (name/description/parameters) que os
-    adapters formatam para o provider (OpenAI function-calling ou Anthropic input_schema)."""
-    from orchestrator.tools.registry import tool_call_schemas
-
-    schemas = tool_call_schemas(("generate_concepts",))
-    assert len(schemas) == 1
-    schema = schemas[0]
-    assert schema["name"] == "generate_concepts"
-    assert schema["description"].strip()
-    proposals = schema["parameters"]["properties"]["proposals"]
-    assert proposals["type"] == "array"
-    assert "hook" in proposals["items"]["required"]
-
-    # nomes desconhecidos estouram (contrato: só tools registradas viram schema).
-    with pytest.raises(KeyError, match="nope"):
-        tool_call_schemas(("nope",))
+    creative_stages = {"concepts", "scripts", "creator_profiles"}
+    assert all(not hasattr(spec, "parameters") for spec in TOOL_REGISTRY)
+    for stage in creative_stages:
+        model = agent_output_model(stage)
+        schema = agent_output_schema(stage)
+        assert schema == model.model_json_schema()
+        assert schema["additionalProperties"] is False
 
 
 def test_tool_registry_covers_tool_functions_imported_by_stage_nodes():

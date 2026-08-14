@@ -1,10 +1,11 @@
-"""CompositeAdapter: roteamento por papel + default mock (integração dos adapters reais)."""
+"""Domain/media adapter registry boundaries."""
+
 import pytest
 
 from orchestrator.adapters.ffmpeg_assembly import FfmpegAssemblyAdapter
-from orchestrator.adapters.gateway_llm import GatewayLLMAdapter
 from orchestrator.adapters.integrity_qc import IntegrityQCAdapter
 from orchestrator.adapters.mock import MockAdapter
+from orchestrator.adapters.passthrough_upscale import PassthroughUpscaleAdapter
 from orchestrator.adapters.vercel_gateway_video import VercelGatewayVideoAdapter
 from orchestrator.adapters.vercel_seedance_assembly import VercelSeedanceAssemblyAdapter
 from orchestrator.registry import (
@@ -14,92 +15,76 @@ from orchestrator.registry import (
     register_adapter,
 )
 
-PROVIDERS_EMPTY: dict = {}
+
+def test_default_roles_share_one_domain_mock(pipeline_cfg):
+    composite = build_adapter_from_providers({}, pipeline_cfg)
+    assert isinstance(composite, CompositeAdapter)
+    assert set(composite._by_role) == set(ROLES)
+    assert len({id(composite._by_role[role]) for role in ROLES}) == 1
+    assert isinstance(composite._by_role["video"], MockAdapter)
+    assert not hasattr(composite, "generate_concepts")
 
 
-def test_default_all_roles_share_one_mock(pipeline_cfg):
-    comp = build_adapter_from_providers(PROVIDERS_EMPTY, pipeline_cfg)
-    assert isinstance(comp, CompositeAdapter)
-    # papéis ausentes caem em mock; e é a MESMA instância (preserva determinismo)
-    instances = {id(comp._by_role[r]) for r in ROLES}
-    assert len(instances) == 1
-    assert isinstance(comp._by_role["llm"], MockAdapter)
-
-
-async def test_routes_each_role_to_its_adapter(pipeline_cfg):
-    class FakeLLM:
-        async def generate_concepts(self, **kwargs):
-            return [{"marker": "fake-llm"}]
-
-    register_adapter("fake_llm", lambda pipeline: FakeLLM())
-    comp = build_adapter_from_providers({"adapters": {"llm": "fake_llm"}}, pipeline_cfg)
-
-    # o papel llm vai para o fake; os demais seguem mock
-    out = await comp.generate_concepts(offer="o", n=1, seed="s")
-    assert out == [{"marker": "fake-llm"}]
-    assert isinstance(comp._by_role["video"], MockAdapter)
-    assert isinstance(comp._by_role["creator"], MockAdapter)
-
-
-def test_vercel_gateway_llm_routes_only_llm_role(monkeypatch, pipeline_cfg):
-    monkeypatch.setenv("AI_GATEWAY_API_KEY", "test-gateway-key")
-    comp = build_adapter_from_providers(
-        {"adapters": {"llm": "vercel_gateway_llm"}},
-        pipeline_cfg,
+def test_language_provider_names_are_not_domain_adapters(pipeline_cfg):
+    composite = build_adapter_from_providers(
+        {"adapters": {"llm": "vercel_gateway_llm"}}, pipeline_cfg
     )
-
-    assert isinstance(comp._by_role["llm"], GatewayLLMAdapter)
-    assert isinstance(comp._by_role["creator"], MockAdapter)
-    assert isinstance(comp._by_role["video"], MockAdapter)
-    assert isinstance(comp._by_role["qc"], MockAdapter)
-    assert isinstance(comp._by_role["assembly"], MockAdapter)
+    assert "llm" not in composite._by_role
+    assert not hasattr(composite, "generate_concepts")
 
 
-def test_live_video_qc_and_seedance_assembly_adapters_are_registered(pipeline_cfg):
-    comp = build_adapter_from_providers(
+def test_registered_domain_adapters_are_resolved_by_role(pipeline_cfg):
+    composite = build_adapter_from_providers(
         {
             "adapters": {
                 "video": "vercel_gateway_video",
                 "qc": "integrity_qc",
                 "assembly": "vercel_seedance_assembly",
+                "upscale": "passthrough_upscale",
             }
         },
         pipeline_cfg,
     )
-
-    assert isinstance(comp._by_role["video"], VercelGatewayVideoAdapter)
-    assert isinstance(comp._by_role["qc"], IntegrityQCAdapter)
-    assert isinstance(comp._by_role["assembly"], VercelSeedanceAssemblyAdapter)
-    assert isinstance(comp._by_role["llm"], MockAdapter)
+    assert isinstance(composite._by_role["video"], VercelGatewayVideoAdapter)
+    assert isinstance(composite._by_role["qc"], IntegrityQCAdapter)
+    assert isinstance(composite._by_role["assembly"], VercelSeedanceAssemblyAdapter)
+    assert isinstance(composite._by_role["upscale"], PassthroughUpscaleAdapter)
 
 
 def test_ffmpeg_assembly_adapter_is_registered(pipeline_cfg):
-    comp = build_adapter_from_providers(
-        {"adapters": {"assembly": "ffmpeg_assembly"}},
-        pipeline_cfg,
+    composite = build_adapter_from_providers({"adapters": {"assembly": "ffmpeg_assembly"}}, pipeline_cfg)
+    assert isinstance(composite._by_role["assembly"], FfmpegAssemblyAdapter)
+
+
+def test_optional_creator_voice_capabilities_remain_domain_only(pipeline_cfg):
+    class CreatorWithVoice:
+        def __init__(self):
+            self.voice = object()
+
+    register_adapter("creator_with_voice_native", lambda _pipeline: CreatorWithVoice())
+    composite = build_adapter_from_providers(
+        {"adapters": {"creator": "creator_with_voice_native"}}, pipeline_cfg
     )
+    assert composite.voice is not None
+    assert getattr(build_adapter_from_providers({}, pipeline_cfg), "voice", None) is None
 
-    assert isinstance(comp._by_role["assembly"], FfmpegAssemblyAdapter)
 
-
-def test_composite_delegates_reroll_creator_voice_when_creator_role_has_it(pipeline_cfg):
+@pytest.mark.asyncio
+async def test_composite_delegates_reroll_creator_voice_when_creator_role_has_it(pipeline_cfg):
     class CreatorWithReroll:
         async def reroll_creator_voice(self, **kwargs):
-            return {"voice_id": "new"}
+            return {"voice_id": "new", **kwargs}
 
-    register_adapter("creator_with_reroll", lambda pipeline: CreatorWithReroll())
-    comp = build_adapter_from_providers(
-        {"adapters": {"creator": "creator_with_reroll"}}, pipeline_cfg
+    register_adapter("creator_with_reroll_native", lambda _pipeline: CreatorWithReroll())
+    composite = build_adapter_from_providers(
+        {"adapters": {"creator": "creator_with_reroll_native"}}, pipeline_cfg
     )
-
-    reroll = getattr(comp, "reroll_creator_voice", None)
-    assert callable(reroll)
+    assert await composite.reroll_creator_voice(marker="x") == {"voice_id": "new", "marker": "x"}
 
 
-def test_composite_hides_reroll_when_creator_role_lacks_it(pipeline_cfg):
-    """MockAdapter não tem reroll → o stage precisa cair no fallback (getattr None)."""
-    comp = build_adapter_from_providers(PROVIDERS_EMPTY, pipeline_cfg)
-    assert getattr(comp, "reroll_creator_voice", None) is None
+def test_composite_hides_optional_voice_reroll_when_creator_lacks_it(pipeline_cfg):
+    composite = build_adapter_from_providers({}, pipeline_cfg)
+    assert getattr(composite, "reroll_creator_voice", None) is None
 
 
 async def test_composite_routes_upscale_to_upscale_role(pipeline_cfg):
@@ -107,50 +92,27 @@ async def test_composite_routes_upscale_to_upscale_role(pipeline_cfg):
         async def upscale(self, media_uri):
             return f"{media_uri}#4k"
 
-    register_adapter("fake_upscale", lambda pipeline: FakeUpscale())
-    comp = build_adapter_from_providers({"adapters": {"upscale": "fake_upscale"}}, pipeline_cfg)
-
-    out = await comp.upscale("data:video/mp4;base64,AAA")
-    assert out == "data:video/mp4;base64,AAA#4k"
-    assert isinstance(comp._by_role["assembly"], MockAdapter)  # demais papéis seguem mock
+    register_adapter("fake_upscale_native", lambda _pipeline: FakeUpscale())
+    composite = build_adapter_from_providers(
+        {"adapters": {"upscale": "fake_upscale_native"}}, pipeline_cfg
+    )
+    assert await composite.upscale("data:video/mp4;base64,AAA") == "data:video/mp4;base64,AAA#4k"
+    assert isinstance(composite._by_role["assembly"], MockAdapter)
 
 
 async def test_live_upscale_role_is_passthrough(pipeline_cfg):
-    from orchestrator.adapters.passthrough_upscale import PassthroughUpscaleAdapter
-
-    comp = build_adapter_from_providers(
+    composite = build_adapter_from_providers(
         {"adapters": {"upscale": "passthrough_upscale"}}, pipeline_cfg
     )
-    assert isinstance(comp._by_role["upscale"], PassthroughUpscaleAdapter)
-    assert await comp.upscale("/videos/run/assembled.mp4") == "/videos/run/assembled.mp4"
+    assert isinstance(composite._by_role["upscale"], PassthroughUpscaleAdapter)
+    assert await composite.upscale("/videos/run/assembled.mp4") == "/videos/run/assembled.mp4"
 
 
-def test_composite_exposes_voice_subadapter_of_creator_role(pipeline_cfg):
-    class VoiceSub:
-        pass
-
-    class CreatorWithVoice:
-        def __init__(self):
-            self.voice = VoiceSub()
-
-    register_adapter("creator_with_voice", lambda pipeline: CreatorWithVoice())
-    comp = build_adapter_from_providers(
-        {"adapters": {"creator": "creator_with_voice"}}, pipeline_cfg
-    )
-
-    assert isinstance(comp.voice, VoiceSub)
-    # Mock não tem sub-adapter de voz → atributo ausente, como antes.
-    mock_comp = build_adapter_from_providers(PROVIDERS_EMPTY, pipeline_cfg)
-    assert getattr(mock_comp, "voice", None) is None
-
-
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "method",
-    ["design_voice_candidates", "finalize_voice", "reconcile_voice"],
+    "method", ["design_voice_candidates", "finalize_voice", "reconcile_voice"]
 )
-async def test_composite_falls_back_to_creator_voice_subadapter(
-    pipeline_cfg, method: str,
-) -> None:
+async def test_composite_falls_back_to_creator_voice_subadapter(pipeline_cfg, method):
     sentinel = object()
 
     class VoiceSub:
@@ -167,41 +129,36 @@ async def test_composite_falls_back_to_creator_voice_subadapter(
         def __init__(self):
             self.voice = VoiceSub()
 
-    register_adapter("voice_subadapter_fallback", lambda pipeline: CreatorWithVoice())
-    comp = build_adapter_from_providers(
-        {"adapters": {"creator": "voice_subadapter_fallback"}}, pipeline_cfg
+    register_adapter("voice_subadapter_native", lambda _pipeline: CreatorWithVoice())
+    composite = build_adapter_from_providers(
+        {"adapters": {"creator": "voice_subadapter_native"}}, pipeline_cfg
     )
+    assert await getattr(composite, method)("argument", field="value") is sentinel
 
-    assert await getattr(comp, method)("argument", field="value") is sentinel
 
-
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "method",
-    ["design_voice_candidates", "finalize_voice", "reconcile_voice"],
+    "method", ["design_voice_candidates", "finalize_voice", "reconcile_voice"]
 )
-async def test_composite_reports_missing_voice_design_capability(
-    pipeline_cfg, method: str,
-) -> None:
+async def test_composite_reports_missing_voice_design_capability(pipeline_cfg, method):
     class CreatorWithoutVoice:
         pass
 
-    register_adapter("creator_without_voice_design", lambda pipeline: CreatorWithoutVoice())
-    comp = build_adapter_from_providers(
-        {"adapters": {"creator": "creator_without_voice_design"}}, pipeline_cfg
+    register_adapter("creator_without_voice_native", lambda _pipeline: CreatorWithoutVoice())
+    composite = build_adapter_from_providers(
+        {"adapters": {"creator": "creator_without_voice_native"}}, pipeline_cfg
     )
-
     with pytest.raises(AttributeError, match=method):
-        await getattr(comp, method)()
+        await getattr(composite, method)()
 
 
-async def test_composite_prefers_creator_level_reconcile(pipeline_cfg) -> None:
+async def test_composite_prefers_creator_level_reconcile(pipeline_cfg):
     class CreatorWithReconcile:
         async def reconcile_voice(self, *args, **kwargs):
             return {"voice_ref": "creator-level"}
 
-    register_adapter("creator_level_reconcile", lambda pipeline: CreatorWithReconcile())
-    comp = build_adapter_from_providers(
-        {"adapters": {"creator": "creator_level_reconcile"}}, pipeline_cfg
+    register_adapter("creator_level_reconcile_native", lambda _pipeline: CreatorWithReconcile())
+    composite = build_adapter_from_providers(
+        {"adapters": {"creator": "creator_level_reconcile_native"}}, pipeline_cfg
     )
-
-    assert await comp.reconcile_voice() == {"voice_ref": "creator-level"}
+    assert await composite.reconcile_voice() == {"voice_ref": "creator-level"}

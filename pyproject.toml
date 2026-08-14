@@ -9,6 +9,9 @@ dependencies = [
     "langgraph-checkpoint-postgres>=3.0.0",
     "langgraph-checkpoint-sqlite>=2.0.0",
     "langchain-core>=0.3.0",
+    "langchain>=1.0.0",
+    "langchain-openai>=1.0.0",
+    "langchain-anthropic>=1.0.0",
     "langsmith>=0.1.140",
     "pydantic>=2.7",
     "pyyaml>=6.0",
@@ -73,4 +76,3 @@ line-length = 100
 [tool.ruff.lint]
 select = ["E", "F", "I"]
 ignore = ["E501"]
-

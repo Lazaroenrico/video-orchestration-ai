@@ -13,20 +13,16 @@ import orchestrator.feedback_store as _feedback_store
 from orchestrator.agent_catalog import AgentCatalog, default_agent_catalog
 from orchestrator.config import (
     default_artifacts_db_path,
-    default_media_path,
-    default_videos_path,
 )
+from orchestrator.dependencies import RunDependencies
 from orchestrator.graph.builder import build_graph
 from orchestrator.graph.checkpoint import open_checkpointer
 from orchestrator.graph.state import Item
 from orchestrator.progress import ProgressEventTranslator
-from orchestrator.registry import build_adapter_from_providers
 from orchestrator.storage.db import (
-    ArtifactDB,
     ArtifactRepository,
     open_artifact_repository,
 )
-from orchestrator.storage.factory import build_media_storage
 from orchestrator.tracing import run_trace_config
 
 ProgressEventSink = Callable[[dict[str, Any]], Awaitable[None]]
@@ -44,32 +40,23 @@ def _build_config(
     effect_ledger: Any | None = None,
     durable: bool = False,
 ) -> dict[str, Any]:
-    adapter = build_adapter_from_providers(providers, pipeline)
     catalog = agent_catalog or default_agent_catalog()
 
     # Storage e DB de artifacts (D30) são resolvidos uma vez por run, como o adapter:
     # construí-los por chamada recriaria o client S3 a cada clip.
-    if artifact_repository is None:
-        artifact_repository = ArtifactDB(default_artifacts_db_path())
-        artifact_repository.setup()
-
-    configurable: dict[str, Any] = {
-        "adapter": adapter,
-        "pipeline": pipeline,
-        "agent_catalog": catalog,
-        "run": {"platform": platform},
-        "thread_id": run_id,
-        "media_storage": build_media_storage(
-            providers, root=default_media_path(), web_prefix="/media",
-        ),
-        "videos_storage": build_media_storage(
-            providers, root=default_videos_path(), web_prefix="/videos",
-        ),
-        "artifact_db": artifact_repository,
-        "effect_ledger": effect_ledger,
-        "durable": durable,
-    }
-    configurable["run"].update(run_options or {})
+    dependencies = RunDependencies.build(
+        pipeline,
+        providers,
+        agent_catalog=catalog,
+        artifact_repository=artifact_repository,
+        effect_ledger=effect_ledger,
+        durable=durable,
+    )
+    configurable = dependencies.configurable(
+        run_id=run_id,
+        platform=platform,
+        run_options=run_options,
+    )
     if feedback_store is not None:
         configurable["feedback_store"] = str(feedback_store)
     return {

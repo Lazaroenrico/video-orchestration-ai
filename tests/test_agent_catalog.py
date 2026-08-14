@@ -185,7 +185,6 @@ def test_project_config_dirs_ship_valid_agents_yaml(config_dir):
     assert catalog.stage("concepts").tools == ("generate_concepts",)
     assert catalog.stage("scripts").tools == ("write_script",)
     assert catalog.stage("creator_profiles").tools == ("design_creator_roster",)
-    assert catalog.stage("persona").tools == ("write_persona",)
     assert catalog.stage("video").tools == ("generate_clip",)
 
     expected_executor = "agent" if config_dir == "config" else "tool"
@@ -203,7 +202,7 @@ def test_project_config_dirs_ship_valid_agents_yaml(config_dir):
         assert spec.prompt_version
         assert spec.prompt_hash
         assert spec.schema_version == "creative-v2"
-    for stage in ("persona", "video"):
+    for stage in ("video",):
         spec = catalog.stage(stage)
         assert spec.system_prompt_path is None
         assert spec.system_prompt is None
@@ -228,34 +227,6 @@ def test_runner_config_includes_agent_catalog(pipeline_cfg):
     assert cfg["configurable"]["agent_catalog"] is catalog
 
 
-def test_cli_run_loads_and_passes_agent_catalog(monkeypatch, tmp_path):
-    from click.testing import CliRunner
-
-    from orchestrator.agent_catalog import default_agent_catalog
-    from orchestrator.cli import cli
-
-    catalog = default_agent_catalog()
-    observed = {}
-
-    async def fake_run_pipeline(*args, **kwargs):
-        observed["agent_catalog"] = kwargs["agent_catalog"]
-        return "cli-catalog", {"results": []}
-
-    monkeypatch.setattr("orchestrator.cli.load_pipeline", lambda config_dir=None: {})
-    monkeypatch.setattr("orchestrator.cli.load_providers", lambda config_dir=None: {})
-    monkeypatch.setattr("orchestrator.cli.load_agent_catalog", lambda config_dir=None: catalog)
-    monkeypatch.setattr("orchestrator.cli.runner.run_pipeline", fake_run_pipeline)
-
-    result = CliRunner().invoke(
-        cli,
-        ["run", "--run-id", "cli-catalog", "--db", str(tmp_path / "runs.sqlite")],
-        env={"LANGSMITH_TRACING": "false"},
-    )
-
-    assert result.exit_code == 0, result.output
-    assert observed["agent_catalog"] is catalog
-
-
 async def test_web_execute_run_injects_agent_catalog(monkeypatch, tmp_path):
     from types import SimpleNamespace
 
@@ -265,33 +236,42 @@ async def test_web_execute_run_injects_agent_catalog(monkeypatch, tmp_path):
     catalog = default_agent_catalog()
     observed = {}
 
-    class _Checkpoint:
+    class FakeDependencies:
+        adapter = object()
+
+        def configurable(self, *, run_id, platform, run_options=None):
+            observed["catalog"] = catalog
+            return {
+                "thread_id": run_id,
+                "platform": platform,
+                "agent_catalog": catalog,
+            }
+
+    class Checkpoint:
         async def __aenter__(self):
             return object()
 
-        async def __aexit__(self, exc_type, exc, tb):
+        async def __aexit__(self, *_args):
             return False
 
-    class _Graph:
-        async def astream_events(self, resume_input, cfg, version):
-            observed["agent_catalog"] = cfg["configurable"]["agent_catalog"]
-            yield {
-                "event": "on_chain_end",
-                "name": "LangGraph",
-                "metadata": {},
-                "data": {"output": {"results": []}},
-            }
+    class Repository:
+        async def save(self, *_args, **_kwargs):
+            return None
 
-        async def aget_state(self, cfg):
+    class Graph:
+        async def astream_events(self, _input, config, version):
+            observed["agent_catalog"] = config["configurable"]["agent_catalog"]
+            yield {"event": "on_chain_end", "name": "LangGraph", "metadata": {}, "data": {"output": {"results": []}}}
+
+        async def aget_state(self, _config):
             return SimpleNamespace(tasks=[], next=(), values={"results": []})
 
-    monkeypatch.setattr(web_server, "load_pipeline", lambda config_dir=None: {})
-    monkeypatch.setattr(web_server, "load_providers", lambda config_dir=None: {})
-    monkeypatch.setattr(web_server, "load_agent_catalog", lambda config_dir=None: catalog)
-    monkeypatch.setattr(web_server, "build_adapter_from_providers", lambda providers, pipeline: object())
-    monkeypatch.setattr(web_server, "open_checkpointer", lambda db_path: _Checkpoint())
-    monkeypatch.setattr(web_server, "build_graph", lambda pipeline, checkpointer=None: _Graph())
-
+    monkeypatch.setattr(web_server, "load_pipeline", lambda _path: {})
+    monkeypatch.setattr(web_server, "load_providers", lambda _path: {})
+    monkeypatch.setattr(web_server, "load_agent_catalog", lambda _path: catalog)
+    monkeypatch.setattr(web_server.RunDependencies, "build", lambda *_a, **_k: FakeDependencies())
+    monkeypatch.setattr(web_server, "open_checkpointer", lambda _path: Checkpoint())
+    monkeypatch.setattr(web_server, "build_graph", lambda *_a, **_k: Graph())
     web_server._runs["web-catalog"] = {"queues": [], "buffer": [], "done": False}
 
     await web_server._execute_run(
@@ -303,6 +283,10 @@ async def test_web_execute_run_injects_agent_catalog(monkeypatch, tmp_path):
         db_path=str(tmp_path / "runs.sqlite"),
         approve_creators=False,
         edit_concepts=False,
+        campaign_payload={
+            "offer": "serum X", "audience": "adults", "platform": "tiktok", "batch_size": 1
+        },
+        _run_repository=Repository(),
     )
 
     assert observed["agent_catalog"] is catalog

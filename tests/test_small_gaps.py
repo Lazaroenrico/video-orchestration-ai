@@ -11,7 +11,6 @@ import pytest
 
 from orchestrator import creator_store, feedback_store, media_store, prompt_store
 from orchestrator.adapters import integrity_qc, mock, replicate_voice
-from orchestrator.adapters._agent_loop import AgentRunResult, ToolAttempt, ToolCall
 from orchestrator.adapters.base import VoiceProfile
 from orchestrator.graph.routing import select_tier
 from orchestrator.graph.state import Artifact, Item
@@ -85,16 +84,21 @@ def test_build_mock_adapter_passes_latency():
     assert adapter.latency == 0.5
 
 
-def test_mock_agent_brain_includes_the_configured_system_prompt():
-    brain = mock._MockAgentBrain(lambda *_args: None, system_prompt="safe prompt")
+def test_native_agent_includes_the_configured_system_prompt(monkeypatch):
+    from orchestrator.language_runtime import LanguageRuntime
 
-    messages = brain.initial_messages(
-        "concepts",
-        {},
-        [{"name": "submit_concepts"}],
+    captured = {}
+
+    def fake_create_agent(**kwargs):
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr("langchain.agents.create_agent", fake_create_agent)
+    LanguageRuntime.from_provider("mock", {}).agent_for(
+        "concepts", system_prompt="safe prompt"
     )
 
-    assert messages[0]["system_prompt"] == "safe prompt"
+    assert captured["system_prompt"] == "safe prompt"
 
 
 def test_mock_terminal_submission_rejects_an_unknown_stage():
@@ -268,46 +272,6 @@ async def test_review_regeneration_routes_to_the_requested_creative_stage(target
     assert await route_after_review(
         {"review_approved": False, "revision_request": {"target": target}}
     ) == expected
-
-
-# ------------------------------------------------------------------ #
-# video-agent take settlement                                       #
-# ------------------------------------------------------------------ #
-
-def test_settle_takes_records_paid_superseded_outputs():
-    from orchestrator.nodes.stages import _settle_takes
-
-    first = Artifact(kind="clip", uri="mock://take-1", meta={"cost_usd": 0.1})
-    final = Artifact(kind="clip", uri="mock://take-2", meta={"cost_usd": 0.2})
-    run = AgentRunResult(
-        result=final,
-        attempts=(
-            ToolAttempt(
-                call=ToolCall(
-                    id="one",
-                    name="generate_clip",
-                    arguments={"revision": "fix hands"},
-                ),
-                result=first,
-            ),
-            ToolAttempt(
-                call=ToolCall(id="two", name="generate_clip"),
-                result=final,
-            ),
-        ),
-    )
-
-    settled, cost = _settle_takes(run)
-
-    assert cost == 0.3
-    assert settled.meta["agent_takes"] == 2
-    assert settled.meta["superseded_takes"] == [
-        {
-            "uri": "mock://take-1",
-            "cost_usd": 0.1,
-            "revision": "fix hands",
-        }
-    ]
 
 
 # ------------------------------------------------------------------ #

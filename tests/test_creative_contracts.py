@@ -229,23 +229,31 @@ def test_creator_roster_is_exactly_two_and_assignments_reference_known_concepts(
     assert roster.assignments[1].creator_id == "creator-1"
 
 
-@pytest.mark.parametrize(
-    "payload",
-    [
-        {"creators": [], "assignments": []},
+def _creator_profiles(count: int) -> list[dict]:
+    return [
         {
-            "creators": [
-                {
-                    "archetype": "Only one",
-                    "visual_brief": "Adult creator.",
-                    "voice_brief": "Warm.",
-                    "performance_style": "Direct.",
-                }
-            ],
-            "assignments": [],
-        },
-    ],
-)
-def test_creator_roster_submission_requires_exactly_two_profiles(payload: dict) -> None:
+            "archetype": f"Creator {index}",
+            "visual_brief": "Adult creator in a safe studio setting.",
+            "voice_brief": "Warm and conversational.",
+            "performance_style": "Calm and practical.",
+        }
+        for index in range(count)
+    ]
+
+
+@pytest.mark.parametrize("creator_count", [0, 1, 3, 48])
+def test_creator_roster_submission_requires_exactly_two_profiles(creator_count: int) -> None:
     with pytest.raises(ValidationError):
-        CreatorRosterSubmission.model_validate(payload)
+        CreatorRosterSubmission.model_validate(
+            {"creators": _creator_profiles(creator_count), "assignments": []}
+        )
+
+
+def test_creator_roster_submission_rejects_assignment_outside_two_profile_roster() -> None:
+    with pytest.raises(ValidationError):
+        CreatorRosterSubmission.model_validate(
+            {
+                "creators": _creator_profiles(2),
+                "assignments": [{"concept_id": "concept-1", "creator_index": 2}],
+            }
+        )

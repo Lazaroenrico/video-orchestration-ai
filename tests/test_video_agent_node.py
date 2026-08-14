@@ -6,7 +6,6 @@ from typing import Any
 
 import pytest
 
-from orchestrator.adapters._agent_loop import AgentRunResult
 from orchestrator.adapters.mock import MockAdapter
 from orchestrator.agent_catalog import AgentCatalog, StageExecutionSpec
 from orchestrator.graph.state import Item
@@ -26,28 +25,6 @@ def _catalog(executor: str) -> AgentCatalog:
             ),
         )
     )
-
-
-class _MultiTakeAdapter(MockAdapter):
-    """A trap adapter: its agent entrypoint must never be reached by video nodes."""
-
-    def __init__(self, takes: int = 3) -> None:
-        super().__init__(tiers=TIERS)
-        self.takes = takes
-
-    async def run_stage_agent(
-        self,
-        *,
-        stage: str,
-        allowed_tools: tuple[str, ...],
-        run_tool: Any,
-        inputs: dict[str, Any],
-        target_model: Any = None,
-        system_prompt: str | None = None,
-        max_steps: int = 4,
-        max_tool_calls: int | None = None,
-    ) -> AgentRunResult:
-        raise AssertionError("video must not enter the agent loop")
 
 
 def _item() -> Item:
@@ -74,7 +51,7 @@ def _config(adapter: Any, pipeline_cfg: dict[str, Any], executor: str) -> dict[s
 async def test_video_node_charges_the_single_adapter_take(pipeline_cfg, node_name):
     from orchestrator.nodes.stages import make_gen_node, node_product_demo
 
-    adapter = _MultiTakeAdapter(takes=3)
+    adapter = MockAdapter(tiers=TIERS)
     node = make_gen_node("ltx") if node_name == "gen" else node_product_demo
     out = await node(_item().model_dump(), _config(adapter, pipeline_cfg, "tool"))
 
@@ -86,7 +63,7 @@ async def test_video_node_charges_the_single_adapter_take(pipeline_cfg, node_nam
 async def test_video_node_appends_one_adapter_result(pipeline_cfg, node_name):
     from orchestrator.nodes.stages import make_gen_node, node_product_demo
 
-    adapter = _MultiTakeAdapter(takes=3)
+    adapter = MockAdapter(tiers=TIERS)
     node = make_gen_node("ltx") if node_name == "gen" else node_product_demo
     out = await node(_item().model_dump(), _config(adapter, pipeline_cfg, "tool"))
 
@@ -96,7 +73,7 @@ async def test_video_node_appends_one_adapter_result(pipeline_cfg, node_name):
 async def test_video_node_does_not_create_agent_take_provenance(pipeline_cfg):
     from orchestrator.nodes.stages import make_gen_node
 
-    adapter = _MultiTakeAdapter(takes=3)
+    adapter = MockAdapter(tiers=TIERS)
     out = await make_gen_node("ltx")(
         _item().model_dump(),
         _config(adapter, pipeline_cfg, "tool"),
@@ -111,7 +88,7 @@ async def test_video_node_single_take_has_no_superseded_metadata(pipeline_cfg):
     """Uma take só (o caso comum) não polui o meta do clip."""
     from orchestrator.nodes.stages import make_gen_node
 
-    adapter = _MultiTakeAdapter(takes=1)
+    adapter = MockAdapter(tiers=TIERS)
     out = await make_gen_node("ltx")(
         _item().model_dump(),
         _config(adapter, pipeline_cfg, "tool"),
@@ -126,7 +103,7 @@ async def test_video_node_in_tool_mode_keeps_single_take_accounting(pipeline_cfg
     """Regressão: sem agent, o node cobra uma take e não anota proveniência."""
     from orchestrator.nodes.stages import make_gen_node
 
-    adapter = MockAdapter(tiers=TIERS)  # sem run_stage_agent → modo tool
+    adapter = MockAdapter(tiers=TIERS)
     out = await make_gen_node("ltx")(_item().model_dump(), _config(adapter, pipeline_cfg, "tool"))
 
     assert len(out["clips"]) == 1

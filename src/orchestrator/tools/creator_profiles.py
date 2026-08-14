@@ -43,24 +43,27 @@ async def design_creator_roster_tool(
         raise ValueError("agent must submit creators and assignments")
     if creators is None or assignments is None:
         direction = campaign_input.creator_direction or "commercial UGC"
-        creators = [
-            {
-                "archetype": "Warm routine guide",
-                "visual_brief": f"Adult creator, approachable {direction} styling.",
-                "voice_brief": "Warm, conversational, and practical.",
-                "performance_style": "Calm explanation with natural reactions.",
-                "exclusions": ["medical authority", "guaranteed outcomes"],
-            },
-            {
-                "archetype": "Direct product tester",
-                "visual_brief": f"Adult creator, confident {direction} styling.",
-                "voice_brief": "Direct, energetic, and concise.",
-                "performance_style": "Fast demonstration with a clear point of view.",
-                "exclusions": ["celebrity likeness", "guaranteed outcomes"],
-            },
+        archetype_templates = [
+            ("Warm routine guide", "Warm, conversational, and practical.", "Calm explanation with natural reactions."),
+            ("Direct product tester", "Direct, energetic, and concise.", "Fast demonstration with a clear point of view."),
+            ("Authentic storyteller", "Empathetic, personal, and engaging.", "Unfiltered personal experience and honest reaction."),
+            ("Expert reviewer", "Clear, articulate, and confident.", "Detailed breakdown of features and benefits."),
         ]
+        # The casting stage always produces the two reusable profiles promised by
+        # the V2 creative-plan contract; assignments fan out across the batch.
+        count = 2
+        creators = []
+        for idx in range(count):
+            tpl_archetype, tpl_voice, tpl_style = archetype_templates[idx % len(archetype_templates)]
+            creators.append({
+                "archetype": f"{tpl_archetype} {idx + 1}" if count > len(archetype_templates) else tpl_archetype,
+                "visual_brief": f"Adult creator {idx + 1}, approachable {direction} styling.",
+                "voice_brief": tpl_voice,
+                "performance_style": tpl_style,
+                "exclusions": ["medical authority", "guaranteed outcomes"],
+            })
         assignments = [
-            {"concept_id": concept_id, "creator_index": index % 2}
+            {"concept_id": concept_id, "creator_index": index % count}
             for index, concept_id in enumerate(concept_ids)
         ]
     submission = CreatorRosterSubmission.model_validate(

@@ -1,0 +1,234 @@
+"""Contrato observável do runtime de linguagem nativo."""
+
+import pytest
+
+
+def test_mock_language_runtime_is_deterministic_and_offline():
+    from orchestrator.language_runtime import LanguageRuntime
+
+    runtime = LanguageRuntime.from_provider("mock", {})
+    first = runtime.model_for("concepts").invoke("same input")
+    second = runtime.model_for("concepts").invoke("same input")
+
+    assert first.content == second.content
+    assert runtime.provider == "mock"
+
+
+@pytest.mark.asyncio
+async def test_mock_agent_returns_schema_submission_to_server_materializer():
+    from orchestrator.language_runtime import LanguageRuntime
+
+    runtime = LanguageRuntime.from_provider("mock", {})
+    materialized: dict[str, object] = {}
+
+    async def materialize(submission: dict[str, object]) -> object:
+        materialized.update(submission)
+        return "materialized"
+
+    result = await runtime.run_agent(
+        stage="concepts",
+        inputs={"offer": "offer", "n": 2, "campaign": {"offer": "offer", "batch_size": 2}},
+        materialize=materialize,
+    )
+
+    assert result == "materialized"
+    assert len(materialized["proposals"]) == 2  # type: ignore[arg-type]
+
+
+def test_live_language_provider_fails_before_model_construction_without_credentials(monkeypatch):
+    from orchestrator.language_runtime import LanguageRuntime
+
+    monkeypatch.delenv("AI_GATEWAY_API_KEY", raising=False)
+    monkeypatch.delenv("VERCEL_OIDC_TOKEN", raising=False)
+    runtime = LanguageRuntime.from_provider("vercel_gateway_llm", {})
+
+    with pytest.raises(RuntimeError, match="AI_GATEWAY_API_KEY"):
+        runtime.model_for("concepts")
+
+
+def test_gateway_models_use_provider_specific_base_urls_and_retry_policy(monkeypatch):
+    from orchestrator import language_runtime
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    class FakeAnthropic:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    monkeypatch.setenv("AI_GATEWAY_API_KEY", "gateway-secret")
+    monkeypatch.setenv("AI_GATEWAY_BASE_URL", "https://gateway.example/v1")
+    monkeypatch.setattr("langchain_openai.ChatOpenAI", FakeOpenAI)
+    monkeypatch.setattr("langchain_anthropic.ChatAnthropic", FakeAnthropic)
+
+    openai_model = language_runtime.LanguageRuntime.from_provider(
+        "vercel_gateway_llm", {}
+    ).model_for("concepts", "openai-model")
+    anthropic_model = language_runtime.LanguageRuntime.from_provider(
+        "anthropic_sdk_gateway", {}
+    ).model_for("concepts", "anthropic-model")
+
+    assert openai_model.kwargs == {
+        "model": "openai-model",
+        "api_key": "gateway-secret",
+        "base_url": "https://gateway.example/v1",
+        "timeout": 120,
+        "max_retries": 3,
+    }
+    assert anthropic_model.kwargs == {
+        "model": "anthropic-model",
+        "api_key": "gateway-secret",
+        "base_url": "https://gateway.example",
+        "timeout": 120,
+        "max_retries": 4,
+    }
+
+
+def test_native_agents_are_limited_to_creative_stages():
+    from orchestrator.language_runtime import LanguageRuntime
+
+    runtime = LanguageRuntime.from_provider("mock", {})
+    with pytest.raises(ValueError, match="only supported"):
+        runtime.agent_for("video")
+
+
+def test_agent_budgets_use_pipeline_overrides_and_are_not_silenced(monkeypatch):
+    from langchain.agents.middleware import ModelCallLimitMiddleware, ToolCallLimitMiddleware
+
+    from orchestrator.language_runtime import LanguageRuntime
+
+    captured: list[dict[str, object]] = []
+
+    def fake_create_agent(**kwargs):
+        captured.append(kwargs)
+        return object()
+
+    monkeypatch.setattr("langchain.agents.create_agent", fake_create_agent)
+    runtime = LanguageRuntime.from_provider(
+        "mock",
+        {
+            "agent": {
+                "max_steps": 2,
+                "max_tool_calls": 1,
+                "max_steps_by_stage": {"scripts": 3},
+                "max_tool_calls_by_stage": {"scripts": 2},
+            }
+        },
+    )
+
+    runtime.agent_for("scripts", system_prompt="scripts-v1")
+    runtime.agent_for("concepts", system_prompt="concepts-v1")
+
+    scripts_limits = captured[0]["middleware"]
+    concepts_limits = captured[1]["middleware"]
+    assert isinstance(scripts_limits[0], ModelCallLimitMiddleware)
+    assert scripts_limits[0].run_limit == 3
+    assert isinstance(scripts_limits[1], ToolCallLimitMiddleware)
+    assert scripts_limits[1].run_limit == 2
+    assert scripts_limits[0].exit_behavior == "error"
+    assert scripts_limits[1].exit_behavior == "error"
+    assert concepts_limits[0].run_limit == 2
+    assert concepts_limits[1].run_limit == 1
+    assert type(captured[0]["model"]).__name__ == "_SerialToolCallsChatModel"
+    assert captured[0]["model"].wrapped is runtime.model_for("scripts")
+
+    runtime.agent_for("scripts", system_prompt="scripts-v2")
+    assert len(captured) == 3
+
+    uncapped_tools = LanguageRuntime.from_provider(
+        "mock", {"agent": {"max_steps": 5}}
+    )
+    uncapped_tools.agent_for("concepts", system_prompt="concepts-v1")
+    assert len(captured[3]["middleware"]) == 1
+    assert captured[3]["middleware"][0].run_limit == 5
+
+
+@pytest.mark.asyncio
+async def test_native_agent_keeps_base_model_and_binds_serial_structured_output():
+    """Exercise the real create_agent seam used by live creative stages."""
+    import asyncio
+    from typing import Any, ClassVar
+
+    from langchain_core.language_models import BaseChatModel
+    from langchain_core.messages import AIMessage, HumanMessage
+    from langchain_core.outputs import ChatGeneration, ChatResult
+
+    from orchestrator.language_runtime import LanguageRuntime
+
+    class FakeStructuredModel(BaseChatModel):
+        bind_calls: ClassVar[list[dict[str, Any]]] = []
+        bound_tools: ClassVar[list[Any]] = []
+
+        @property
+        def _llm_type(self) -> str:
+            return "fake-structured"
+
+        def bind_tools(self, tools: Any, **kwargs: Any) -> Any:
+            type(self).bind_calls.append(dict(kwargs))
+            type(self).bound_tools = list(tools)
+            return self.bind(**kwargs)
+
+        def _generate(
+            self,
+            messages: list[Any],
+            stop: list[str] | None = None,
+            **kwargs: Any,
+        ) -> ChatResult:
+            del messages, stop, kwargs
+            tool = type(self).bound_tools[0]
+            return ChatResult(
+                generations=[
+                    ChatGeneration(
+                        message=AIMessage(
+                            content="",
+                            tool_calls=[
+                                {
+                                    "name": tool.name,
+                                    "args": {
+                                        "proposals": [
+                                            {
+                                                "hook": "hook",
+                                                "angle": "angle",
+                                                "audience_problem": "problem",
+                                                "product_mechanism": "mechanism",
+                                                "evidence_basis": "provided_fact",
+                                                "format": "talking_head",
+                                                "hook_style": "problem",
+                                            }
+                                        ]
+                                    },
+                                    "id": "call-1",
+                                    "type": "tool_call",
+                                }
+                            ],
+                        )
+                    )
+                ]
+            )
+
+        async def _agenerate(
+            self,
+            messages: list[Any],
+            stop: list[str] | None = None,
+            **kwargs: Any,
+        ) -> ChatResult:
+            return self._generate(messages, stop=stop, **kwargs)
+
+    FakeStructuredModel.bind_calls = []
+    FakeStructuredModel.bound_tools = []
+    runtime = LanguageRuntime.from_provider("mock", {"agent": {"max_steps": 2}})
+    model = FakeStructuredModel()
+    runtime._models["mock"] = model
+    agent = runtime.agent_for("concepts", system_prompt="safe system prompt")
+    result = await asyncio.wait_for(
+        agent.ainvoke({"messages": [HumanMessage(content="untrusted input")]}),
+        timeout=3,
+    )
+
+    assert result["structured_response"].proposals[0].hook == "hook"
+    assert FakeStructuredModel.bind_calls
+    assert all(
+        call.get("parallel_tool_calls") is False
+        for call in FakeStructuredModel.bind_calls
+    )

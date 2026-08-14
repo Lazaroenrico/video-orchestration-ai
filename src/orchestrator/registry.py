@@ -1,10 +1,11 @@
-"""Resolução de adapters a partir dos configs (papel -> adapter).
+"""Resolução de adapters de domínio/mídia a partir dos configs.
 
-Cada **papel** da pipeline (llm, creator, video, qc, assembly) é
-mapeado em ``config/providers.yaml`` para o nome de um adapter registrado aqui.
-``build_adapter_from_providers`` monta um ``CompositeAdapter`` que roteia cada
-método para o adapter do papel correspondente — assim dá para misturar adapters
-reais e mock por papel (ex.: ``llm: anthropic`` + resto ``mock``) sem tocar o grafo.
+Cada papel de domínio da pipeline (creator, video, qc, assembly, upscale) é
+mapeado em ``config/providers.yaml`` para um adapter registrado aqui.
+O provider de linguagem é resolvido exclusivamente por ``LanguageRuntime``.
+``build_adapter_from_providers`` monta um ``CompositeAdapter`` que roteia métodos
+de domínio para o adapter correspondente, permitindo misturar implementações
+reais e mock sem tocar o grafo.
 
 Papéis não especificados em ``providers.yaml`` caem em ``mock`` (dry-run, custo zero).
 """
@@ -13,10 +14,6 @@ from __future__ import annotations
 from typing import Any, Callable
 
 from orchestrator.adapters._throttle import get_replicate_throttle
-from orchestrator.adapters.anthropic_llm import (
-    build_anthropic_llm_adapter,
-    build_vercel_gateway_llm_adapter,
-)
 from orchestrator.adapters.creator_real import (
     build_real_creator_adapter,
     build_real_creator_replicate_adapter,
@@ -26,7 +23,6 @@ from orchestrator.adapters.elevenlabs_voice_design import (
     ElevenLabsVoiceDesignAdapter,
 )
 from orchestrator.adapters.ffmpeg_assembly import build_ffmpeg_assembly_adapter
-from orchestrator.adapters.gateway_llm import build_gateway_llm_adapter
 from orchestrator.adapters.integrity_qc import build_integrity_qc_adapter
 from orchestrator.adapters.mock import MockAdapter
 from orchestrator.adapters.passthrough_upscale import build_passthrough_upscale_adapter
@@ -41,7 +37,7 @@ from orchestrator.tracing import traced
 
 # Papéis que o grafo exerce (cada método de node mapeia para um destes).
 # ``upscale`` roda pós-montagem, sobre o vídeo final (não a imagem do creator).
-ROLES = ("llm", "creator", "video", "qc", "assembly", "upscale")
+ROLES = ("creator", "video", "qc", "assembly", "upscale")
 
 
 def _build_replicate(pipeline: dict[str, Any]) -> ReplicateVideoAdapter:
@@ -63,12 +59,6 @@ _ADAPTERS: dict[str, Callable[[dict[str, Any]], Any]] = {
         tiers=pipeline["tiers"], latency=float(pipeline.get("latency", 0.0))
     ),
     "replicate": _build_replicate,
-    # llm gateway-nativo (httpx OpenAI-compatible; sem SDK anthropic) — default live.
-    "vercel_gateway_llm": build_gateway_llm_adapter,
-    # SDK anthropic direto (legado opt-in): "anthropic" fala com api.anthropic.com;
-    # "anthropic_sdk_gateway" usa o SDK anthropic apontado para o gateway.
-    "anthropic": build_anthropic_llm_adapter,
-    "anthropic_sdk_gateway": build_vercel_gateway_llm_adapter,
     "creator_real": build_real_creator_adapter,
     "creator_real_vercel": build_real_creator_vercel_adapter,
     "creator_real_replicate": build_real_creator_replicate_adapter,
@@ -87,7 +77,7 @@ _ADAPTERS: dict[str, Callable[[dict[str, Any]], Any]] = {
 
 
 def resolve_adapter(name: str, pipeline: dict[str, Any]) -> Any:
-    """Instancia o adapter pelo nome (ex.: 'mock', 'anthropic')."""
+    """Instancia um adapter de domínio pelo nome (ex.: ``mock`` ou ``replicate``)."""
     if name not in _ADAPTERS:
         raise KeyError(f"adapter desconhecido: {name!r} (registrados: {sorted(_ADAPTERS)})")
     return _ADAPTERS[name](pipeline)
@@ -99,11 +89,11 @@ def register_adapter(name: str, factory: Callable[[dict[str, Any]], Any]) -> Non
 
 
 class CompositeAdapter:
-    """Roteia cada método de port para o adapter do papel correspondente.
+    """Roteia cada método de domínio para o adapter do papel correspondente.
 
     Os nodes chamam um único objeto adapter (via ``config['configurable']['adapter']``)
-    e esperam que ele implemente TODOS os ports. Este composite delega cada chamada
-    para a instância configurada para aquele papel em ``providers.yaml``.
+    para operações de mídia e efeitos. Linguagem, modelos e agents ficam fora deste
+    composite e são fornecidos por ``LanguageRuntime``.
     """
 
     def __init__(self, by_role: dict[str, Any]) -> None:
@@ -115,10 +105,6 @@ class CompositeAdapter:
     # (ex.: MockAdapter) — por isso delegamos via __getattr__ em vez de métodos
     # fixos, que fariam o fallback nunca disparar.
     _OPTIONAL_CREATOR_ATTRS = frozenset({"reroll_creator_voice", "voice"})
-    # Port OPCIONAL do papel llm: execução agentic (Fase 7). Só existe quando o adapter
-    # llm o implementa; ausente (ex.: adapters futuros sem loop agentic) → o stage
-    # executor cai em passthrough. Delegado via __getattr__ para o fallback disparar.
-    _OPTIONAL_LLM_ATTRS = frozenset({"run_stage_agent"})
     _OPTIONAL_VIDEO_ATTRS = frozenset(
         {
             "clip_model",
@@ -134,28 +120,11 @@ class CompositeAdapter:
             value = getattr(self._by_role["creator"], name, None)
             if value is not None:
                 return value
-        if name in CompositeAdapter._OPTIONAL_LLM_ATTRS:
-            value = getattr(self._by_role["llm"], name, None)
-            if value is not None:
-                return value
         if name in CompositeAdapter._OPTIONAL_VIDEO_ATTRS:
             value = getattr(self._by_role["video"], name, None)
             if value is not None:
                 return value
         raise AttributeError(name)
-
-    # --- llm (persona, Steps 1 e 2) ---
-    @traced("adapter.llm.write_persona", run_type="chain", role="llm", step=0)
-    async def write_persona(self, *args: Any, **kwargs: Any) -> Any:
-        return await self._by_role["llm"].write_persona(*args, **kwargs)
-
-    @traced("adapter.llm.generate_concepts", run_type="chain", role="llm", step=1)
-    async def generate_concepts(self, *args: Any, **kwargs: Any) -> Any:
-        return await self._by_role["llm"].generate_concepts(*args, **kwargs)
-
-    @traced("adapter.llm.write_script", run_type="chain", role="llm", step=2)
-    async def write_script(self, *args: Any, **kwargs: Any) -> Any:
-        return await self._by_role["llm"].write_script(*args, **kwargs)
 
     # --- creator (Step 3) ---
     @traced("adapter.creator.build_creator", run_type="chain", role="creator", step=3)

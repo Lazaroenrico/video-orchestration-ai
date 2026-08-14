@@ -1,9 +1,5 @@
 # Staging profile: same contracts and prompts, deterministic direct tools.
 stages:
-  persona:
-    executor: tool
-    tools: [write_persona]
-    agent_enabled: false
   concepts:
     executor: tool
     tools: [generate_concepts]

@@ -21,6 +21,7 @@ class ToolContext:
     pipeline: dict[str, Any]
     run: dict[str, Any]
     run_id: str
+    language_runtime: Any | None = None
     effect_ledger: Any | None = None
     durable: bool = False
 
@@ -30,6 +31,7 @@ def tool_context_from_config(config: RunnableConfig) -> ToolContext:
     configurable = config["configurable"]
     return ToolContext(
         adapter=configurable["adapter"],
+        language_runtime=configurable.get("language_runtime"),
         pipeline=configurable.get("pipeline", {}),
         run=configurable.get("run", {}),
         run_id=configurable.get("thread_id", "run"),

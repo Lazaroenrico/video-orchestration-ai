@@ -21,7 +21,6 @@ from langgraph.types import interrupt
 
 import orchestrator.feedback_store as _feedback_store
 from orchestrator import media_store, stream_bus
-from orchestrator.adapters._agent_loop import AgentRunResult
 from orchestrator.adapters.base import RenderedMedia, VoiceProfile, assign_voice_profile
 from orchestrator.config import default_media_path, default_videos_path
 from orchestrator.creative_contracts import (
@@ -54,7 +53,6 @@ from orchestrator.tools.creators import (
     design_creator_voice_tool,
     finalize_creator_voice_tool,
 )
-from orchestrator.tools.persona import write_persona_tool
 from orchestrator.tools.qc import qc_check_tool
 from orchestrator.tools.scripts import write_script_tool
 from orchestrator.tools.video import VideoEffectError, generate_clip_tool
@@ -600,26 +598,6 @@ def _campaign_input(
     )
 
 
-@traced("node.persona", run_type="chain", step=0)
-async def node_persona(state: dict[str, Any], config: RunnableConfig) -> dict[str, Any]:
-    """Step 0 — gera a persona batch-level antes dos conceitos."""
-    tool_ctx = tool_context_from_config(config)
-    run_cfg = state.get("config", {})
-    runtime_cfg = config["configurable"].get("run", {})
-    offer = run_cfg.get("offer", "demo offer")
-    brief = run_cfg.get("persona_brief", runtime_cfg.get("persona_brief"))
-    add_trace_metadata(step=0, stage="persona", offer=offer)
-    persona = await execute_stage_tool(
-        config,
-        tool_ctx,
-        catalog_stage="persona",
-        tool_name="write_persona",
-        tool_fn=write_persona_tool,
-        offer=offer,
-        brief=brief,
-    )
-    return {"persona": persona}
-
 @traced("node.roster", run_type="chain", step=3)
 async def node_roster(state: dict[str, Any], config: RunnableConfig) -> dict[str, Any]:
     """Step 3 — constrói o roster de creators reutilizáveis (uma vez por run)."""
@@ -921,23 +899,28 @@ async def node_scripts(state: dict[str, Any], config: RunnableConfig) -> dict[st
     concepts = state.get("concepts") or []
     completed = 0
     progress_lock = asyncio.Lock()
+    script_concurrency = max(
+        1, int((pipeline.get("batch") or {}).get("max_concurrency", 8))
+    )
+    script_semaphore = asyncio.Semaphore(script_concurrency)
     add_trace_metadata(step=2, stage="scripts", batch_size=len(concepts), platform=platform)
 
     async def _write(concept: dict[str, Any]) -> dict[str, Any]:
-        result = await execute_stage_tool(
-            config,
-            tool_ctx,
-            catalog_stage="scripts",
-            tool_name="write_script",
-            tool_fn=write_script_tool,
-            concept=concept, creator_ref="creator", platform=platform,
-            campaign=campaign.model_dump(mode="json"),
-            revision_feedback=(state.get("revision_request") or {}).get("feedback"),
-            return_contract=True,
-            target_duration_seconds=narration_target,
-            min_spoken_words=narration_min_words,
-            max_spoken_words=narration_max_words,
-        )
+        async with script_semaphore:
+            result = await execute_stage_tool(
+                config,
+                tool_ctx,
+                catalog_stage="scripts",
+                tool_name="write_script",
+                tool_fn=write_script_tool,
+                concept=concept, creator_ref="creator", platform=platform,
+                campaign=campaign.model_dump(mode="json"),
+                revision_feedback=(state.get("revision_request") or {}).get("feedback"),
+                return_contract=True,
+                target_duration_seconds=narration_target,
+                min_spoken_words=narration_min_words,
+                max_spoken_words=narration_max_words,
+            )
         if not isinstance(result, ScriptResult):
             if isinstance(result, str):
                 result = script_result_from_text(
@@ -1236,32 +1219,6 @@ def _video_prompt(item: Item, run_prompt: str | None, *, stage: str) -> str:
     return "\n\n".join(parts)
 
 
-def _settle_takes(run: AgentRunResult) -> tuple[Artifact, float]:
-    """Resolve um run de vídeo em ``(clip_final, custo_de_todas_as_takes)`` — D33.
-
-    O agent pode gerar várias takes e só a última vira clip do item; as descartadas
-    **já foram pagas**, então o custo soma todas. As descartadas ficam registradas no
-    meta do clip final (proveniência auditável) em vez de irem para ``item.clips``:
-    o IntegrityQC valida cada clip do item, e uma take rejeitada reprovaria o item
-    inteiro além de furar ``qc.required_clip_count``.
-    """
-    clip: Artifact = run.result
-    cost = round(sum(a.result.meta["cost_usd"] for a in run.successful), 6)
-    if not run.superseded:
-        return clip, cost
-    meta = dict(clip.meta)
-    meta["agent_takes"] = len(run.successful)
-    meta["superseded_takes"] = [
-        {
-            "uri": a.result.uri,
-            "cost_usd": a.result.meta.get("cost_usd"),
-            "revision": a.call.arguments.get("revision"),
-        }
-        for a in run.superseded
-    ]
-    return clip.model_copy(update={"meta": meta}), cost
-
-
 def _assembly_prompt(item: Item, run_prompt: str | None, *, platform: str) -> str:
     """Prompt para o vídeo final, usando Seedance como gerador de montagem."""
     parts: list[str] = []
@@ -1330,13 +1287,12 @@ def make_gen_node(tier: str):
             attempt=item.attempts,
         )
         try:
-            run = await execute_stage_tool(
+            clip = await execute_stage_tool(
                 config,
                 tool_ctx,
                 catalog_stage="video",
                 tool_name="generate_clip",
                 tool_fn=generate_clip_tool,
-                with_attempts=True,
                 item_id=item.id, tier=tier, seconds=seconds, attempt=item.attempts,
                 system_prompt=_video_prompt(
                     item, run_cfg.get("video_prompt"), stage="talking-head"
@@ -1346,7 +1302,7 @@ def make_gen_node(tier: str):
             )
         except VideoEffectError as exc:
             return _video_failure_update(item, exc, stage="talking_head")
-        clip, takes_cost = _settle_takes(run)
+        takes_cost = float(clip.meta.get("cost_usd", 0.0))
         # Surfaça se o clip veio do provider real ou de fallback mock,
         # + o modelo e a URI de saída — responde "está gerando o vídeo mesmo?".
         add_trace_metadata(
@@ -1355,7 +1311,7 @@ def make_gen_node(tier: str):
             video_model=clip.meta.get("model"),
             video_uri=clip.uri,
             fallback_reason=clip.meta.get("fallback_reason"),
-            agent_takes=run.executed,
+            video_takes=1,
         )
         cost_usd = round(item.cost_usd + takes_cost, 4)
         run_id = config["configurable"].get("thread_id", "run")
@@ -1395,13 +1351,12 @@ async def node_product_demo(state: Any, config: RunnableConfig) -> dict[str, Any
         tier=product_demo_tier,
     )
     try:
-        run = await execute_stage_tool(
+        demo = await execute_stage_tool(
             config,
             tool_ctx,
             catalog_stage="video",
             tool_name="generate_clip",
             tool_fn=generate_clip_tool,
-            with_attempts=True,
             item_id=f"{item.id}:demo",
             tier=product_demo_tier,
             seconds=seconds,
@@ -1412,14 +1367,14 @@ async def node_product_demo(state: Any, config: RunnableConfig) -> dict[str, Any
         )
     except VideoEffectError as exc:
         return _video_failure_update(item, exc, stage="product_demo")
-    demo, takes_cost = _settle_takes(run)
+    takes_cost = float(demo.meta.get("cost_usd", 0.0))
     add_trace_metadata(
         step=5, stage="product_demo_done", item_id=item.id,
         video_provider=demo.meta.get("provider"),
         video_model=demo.meta.get("model"),
         video_uri=demo.uri,
         fallback_reason=demo.meta.get("fallback_reason"),
-        agent_takes=run.executed,
+        video_takes=1,
     )
     cost_usd = round(item.cost_usd + takes_cost, 4)
     run_id = config["configurable"].get("thread_id", "run")
