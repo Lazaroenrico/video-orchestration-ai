@@ -61,6 +61,7 @@ class ReplicateVideoAdapter:
         prediction_client: Any | None = None,
         clip: Optional[dict[str, Any]] = None,
         assembly: Optional[dict[str, Any]] = None,
+        latentsync: Optional[dict[str, Any]] = None,
         max_retries: int = 3,
         backoff_base: float = 1.0,
         throttle: Optional[AsyncThrottle] = None,
@@ -82,6 +83,11 @@ class ReplicateVideoAdapter:
         self.clip_draft = bool(clip.get("draft", False))
         self.clip_timeout_seconds = max(float(clip.get("timeout_ms", 900_000)) / 1000, 0.001)
         self.poll_interval_seconds = max(float(clip.get("poll_interval_seconds", 1.0)), 0.0)
+        latentsync = latentsync or {}
+        self.latentsync_enabled = bool(latentsync.get("enabled", True))
+        self.latentsync_model = str(latentsync.get("model", "bytedance/latentsync"))
+        self.latentsync_resolution = str(latentsync.get("resolution", "720p"))
+        self.latentsync_max_retries = int(latentsync.get("max_retries", 3))
         assembly = assembly or {}
         self.assembly_model = str(assembly.get("model", _PRUNA_P_VIDEO_MODEL))
         self.assembly_duration = int(assembly.get("duration_seconds", 8))
@@ -116,8 +122,9 @@ class ReplicateVideoAdapter:
         attempt: int,
         system_prompt: Optional[str] = None,
         reference_image_uri: Optional[str] = None,
+        audio_uri: Optional[str] = None,
     ) -> Artifact:
-        """Gera um clip silencioso ou delega modelos ainda não plugados ao mock."""
+        """Gera um clip silencioso e aplica LatentSync quando o áudio é fornecido."""
         spec = self.tiers[tier]  # KeyError em tier desconhecido (contratual)
         model = spec["model"]
         if model not in _SUPPORTED_MODELS:
@@ -133,6 +140,7 @@ class ReplicateVideoAdapter:
                 attempt,
                 system_prompt=system_prompt,
                 reference_image_uri=reference_image_uri,
+                audio_uri=audio_uri,
             )
             meta = dict(artifact.meta)
             meta["provider"] = "mock"
@@ -175,19 +183,37 @@ class ReplicateVideoAdapter:
         )
         uri = self._coerce_output(output)
 
+        meta = {
+            "tier": tier,
+            "model": model,
+            "seconds": seconds,
+            "cost_usd": cost_usd,
+            "attempt": attempt,
+            "provider": "replicate",
+            "generate_audio": False,
+            "has_reference_image": bool(reference_image_uri),
+        }
+
+        if audio_uri and self.latentsync_enabled:
+            latentsync_inp = {
+                "video": uri,
+                "audio": audio_uri,
+                "resolution": self.latentsync_resolution,
+            }
+            latentsync_output = await with_idempotent_retry(
+                lambda: self._throttled_run(self.latentsync_model, input=latentsync_inp),
+                max_retries=self.latentsync_max_retries,
+                backoff_base=self.backoff_base,
+                label="replicate.latentsync",
+            )
+            uri = self._coerce_output(latentsync_output)
+            meta["latentsync_applied"] = True
+            meta["latentsync_model"] = self.latentsync_model
+
         return Artifact(
             kind="clip",
             uri=uri,
-            meta={
-                "tier": tier,
-                "model": model,
-                "seconds": seconds,
-                "cost_usd": cost_usd,
-                "attempt": attempt,
-                "provider": "replicate",
-                "generate_audio": False,
-                "has_reference_image": bool(reference_image_uri),
-            },
+            meta=meta,
         )
 
     def clip_model(self, tier: str) -> str:

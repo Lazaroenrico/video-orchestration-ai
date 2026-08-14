@@ -11,31 +11,39 @@ qc:
 
 video:
   allow_mock_fallback: false # live: falha do provider é explícita; nunca gera mock
-  product_demo_tier: pruna
+  product_demo_tier: ltx
 
 # Roteamento + custo por tier (Step 4 / "The Cost at Scale" do Context.md).
-# Talking-head, regenerações de QC e product demo usam P-Video no Replicate.
 tiers:
-  - name: pruna
-    model: prunaai/p-video
+  - name: ltx
+    model: lightricks/ltx-2.3-fast
     cost_per_second: 0.01
-    max_concurrency: 1      # o throttle global também serializa voz e vídeo no Replicate
+    max_concurrency: 2      # o throttle global também serializa voz e vídeo no Replicate
 
 clip:
   duration_seconds: 8
-  resolution: 1080p
+  resolution: "720p"
   aspect_ratio: "9:16"
   fps: 24
-  draft: true              # validação E2E de menor custo: 1080p draft = US$ 0,01/s
+  draft: true              # validação E2E de menor custo
   camera_motion: static
   generate_audio: false
   timeout_ms: 900000
 
+latentsync:
+  enabled: true
+  model: "bytedance/latentsync"
+  resolution: "720p"
+  max_retries: 3
+  required: true
+  cost_per_second: 0.003
+
+
 assembly:
   final_duration_seconds: 16
-  narration_target_seconds: 14
+  narration_target_seconds: 16
   narration_min_words: 28
-  narration_max_words: 35
+  narration_max_words: null
   audio_speedup_max: 1.10
   resolution: "1080x1920"
   fps: 24

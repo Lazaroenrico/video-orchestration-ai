@@ -34,9 +34,9 @@ clip:
 
 assembly:
   final_duration_seconds: 16
-  narration_target_seconds: 14
+  narration_target_seconds: 16
   narration_min_words: 28
-  narration_max_words: 35
+  narration_max_words: null
   resolution: "1080x1920"
   fps: 24
 

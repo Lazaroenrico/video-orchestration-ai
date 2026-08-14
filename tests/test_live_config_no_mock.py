@@ -28,23 +28,24 @@ def test_live_config_routes_all_runtime_roles_to_non_mock_adapters():
     ] == ["video"]
 
 
-def test_live_config_uses_pruna_p_video_for_all_clips():
+def test_live_config_uses_ltx_fast_for_all_clips():
     pipeline = load_pipeline("config")
 
     assert pipeline["video"]["allow_mock_fallback"] is False
-    assert pipeline["video"]["product_demo_tier"] == "pruna"
+    assert pipeline["video"]["product_demo_tier"] == "ltx"
     assert [
         (tier["name"], tier["model"], tier["cost_per_second"])
         for tier in pipeline["tiers"]
     ] == [
-        ("pruna", "prunaai/p-video", 0.01),
+        ("ltx", "lightricks/ltx-2.3-fast", 0.01),
     ]
     assert pipeline["clip"]["fps"] == 24
     assert pipeline["clip"]["draft"] is True
     assert pipeline["assembly"] == {
         "final_duration_seconds": 16,
-        "narration_target_seconds": 14,
-        "narration_max_words": 35,
+        "narration_target_seconds": 16,
+        "narration_min_words": 28,
+        "narration_max_words": None,
         "audio_speedup_max": 1.10,
         "resolution": "1080x1920",
         "fps": 24,

@@ -426,6 +426,7 @@ class MockAdapter:
         self, item_id: str, tier: str, seconds: int, attempt: int,
         system_prompt: Optional[str] = None,
         reference_image_uri: Optional[str] = None,
+        audio_uri: Optional[str] = None,
     ) -> Artifact:
         spec = self.tiers[tier]  # KeyError em tier desconhecido (contratual)
         async with self._semaphores[tier]:
@@ -447,6 +448,9 @@ class MockAdapter:
                 ).hexdigest()
             if reference_image_uri:
                 meta["has_reference_image"] = True
+            if audio_uri:
+                meta["latentsync_applied"] = True
+                meta["latentsync_model"] = "mock_latentsync"
             return Artifact(
                 kind="clip",
                 uri=_mp4_data_uri("clip", item_id, attempt, sfx),
