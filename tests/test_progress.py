@@ -1,4 +1,96 @@
-from orchestrator.progress import ProgressEventTranslator, build_activity, build_progress
+from orchestrator.progress import (
+    LangChainEventProjector,
+    ProgressEventTranslator,
+    build_activity,
+    build_progress,
+)
+
+
+def test_langchain_projector_deduplicates_lifecycle_and_reads_message_usage():
+    from langchain_core.messages import AIMessage
+
+    projector = LangChainEventProjector()
+    start = {
+        "event": "on_chat_model_start",
+        "run_id": "model-1",
+        "metadata": {"stage": "scripts"},
+        "tags": ["nested"],
+    }
+    assert projector.translate(start) == {"type": "llm_start", "stage": "scripts"}
+    assert projector.translate(dict(start)) is None
+
+    end = {
+        "event": "on_chat_model_end",
+        "run_id": "model-1",
+        "metadata": {"stage": "scripts"},
+        "tags": ["nested"],
+        "data": {"output": AIMessage(
+            content="safe text",
+            usage_metadata={"input_tokens": 4, "output_tokens": 2, "total_tokens": 6},
+        )},
+    }
+    assert projector.translate(end) == {
+        "type": "llm_end",
+        "stage": "scripts",
+        "usage": {"input_tokens": 4, "output_tokens": 2, "total_tokens": 6},
+    }
+    assert projector.translate(dict(end)) is None
+
+
+def test_langchain_projector_allows_only_plain_text_and_never_leaks_structured_chunks():
+    from langchain_core.messages import AIMessageChunk
+
+    projector = LangChainEventProjector()
+    base = {
+        "event": "on_chat_model_stream",
+        "run_id": "model-2",
+        "metadata": {"stage": "concepts"},
+    }
+    assert projector.translate({**base, "data": {"chunk": "hello"}}) == {
+        "type": "llm_token", "stage": "concepts", "token": "hello"
+    }
+    assert projector.translate({
+        **base,
+        "data": {"chunk": AIMessageChunk(content=[{"type": "text", "text": "secret"}])},
+    }) is None
+    assert projector.translate({
+        **base,
+        "data": {"chunk": AIMessageChunk(content="visible", tool_calls=[{
+            "name": "x", "args": {}, "id": "call-1", "type": "tool_call"
+        }])},
+    }) is None
+    assert projector.translate({
+        **base,
+        "data": {"chunk": {"content": "structured", "tool_calls": [{"name": "x"}]}},
+    }) is None
+
+
+def test_langchain_projector_preserves_usage_for_distinct_model_attempts():
+    from langchain_core.messages import AIMessageChunk
+
+    projector = LangChainEventProjector()
+    outputs = []
+    for run_id, tokens in (("attempt-1", (1, 2)), ("attempt-2", (3, 4))):
+        outputs.append(projector.translate({
+            "event": "on_chat_model_end",
+            "run_id": run_id,
+            "metadata": {"stage": "scripts"},
+            "data": {"output": AIMessageChunk(
+                content="", usage_metadata={
+                    "input_tokens": tokens[0],
+                    "output_tokens": tokens[1],
+                    "total_tokens": sum(tokens),
+                }
+            )},
+        }))
+    assert outputs == [
+        {"type": "llm_end", "stage": "scripts", "usage": {
+            "input_tokens": 1, "output_tokens": 2, "total_tokens": 3,
+        }},
+        {"type": "llm_end", "stage": "scripts", "usage": {
+            "input_tokens": 3, "output_tokens": 4, "total_tokens": 7,
+        }},
+    ]
 
 
 def test_langgraph_progress_event_keeps_item_identity_until_node_completion():

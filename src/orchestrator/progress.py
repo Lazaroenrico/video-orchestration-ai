@@ -85,6 +85,118 @@ _TERMINAL_NODE: dict[str, str] = {
 _STAGE_LABELS = {stage["id"]: stage["label"] for stage in STAGES}
 
 
+class LangChainEventProjector:
+    """Project only safe LangChain model lifecycle events into the SSE contract.
+
+    Message bodies, reasoning, tool arguments, structured chunks and artifacts are
+    intentionally ignored. Nested LangGraph/LangChain callbacks are deduplicated
+    by run, stage and tags; usage is read only from the terminal event metadata.
+    """
+
+    _START = frozenset({"on_chat_model_start", "on_llm_start"})
+    _STREAM = frozenset({"on_chat_model_stream", "on_llm_stream"})
+    _END = frozenset({"on_chat_model_end", "on_llm_end"})
+
+    def __init__(self) -> None:
+        self._seen: set[tuple[str, str, str, tuple[str, ...]]] = set()
+
+    @staticmethod
+    def _usage(output: Any) -> dict[str, Any] | None:
+        """Extract only numeric usage from LangChain message/result objects."""
+        if isinstance(output, dict):
+            direct = output.get("usage_metadata")
+            if isinstance(direct, dict):
+                return direct
+            for value in output.values():
+                usage = LangChainEventProjector._usage(value)
+                if usage is not None:
+                    return usage
+        direct = getattr(output, "usage_metadata", None)
+        if isinstance(direct, dict):
+            return direct
+        generations = getattr(output, "generations", None)
+        if isinstance(generations, Iterable):
+            for generation_group in generations:
+                group = generation_group if isinstance(generation_group, Iterable) else (generation_group,)
+                for generation in group:
+                    usage = LangChainEventProjector._usage(
+                        getattr(generation, "message", generation)
+                    )
+                    if usage is not None:
+                        return usage
+        return None
+
+    @staticmethod
+    def _plain_text(chunk: Any) -> str | None:
+        if isinstance(chunk, str):
+            return chunk or None
+        if isinstance(chunk, dict):
+            if set(chunk) != {"content"} or not isinstance(chunk["content"], str):
+                return None
+            return chunk["content"] or None
+        content = getattr(chunk, "content", None)
+        if not isinstance(content, str) or not content:
+            return None
+        if any(
+            getattr(chunk, name, None)
+            for name in ("tool_calls", "invalid_tool_calls", "tool_call_chunks")
+        ):
+            return None
+        additional = getattr(chunk, "additional_kwargs", None)
+        if isinstance(additional, dict) and any(
+            key in additional for key in ("tool_calls", "reasoning", "structured_response")
+        ):
+            return None
+        return content
+
+    @staticmethod
+    def _context(event: dict[str, Any]) -> tuple[str, str, tuple[str, ...]]:
+        metadata = event.get("metadata") if isinstance(event.get("metadata"), dict) else {}
+        tags = event.get("tags") if isinstance(event.get("tags"), list) else []
+        tags_tuple = tuple(sorted(str(tag) for tag in tags if isinstance(tag, str)))
+        stage = str(metadata.get("stage") or metadata.get("langgraph_node") or "llm")
+        run_id = str(event.get("run_id") or "")
+        return run_id, stage, tags_tuple
+
+    def translate(self, event: dict[str, Any]) -> dict[str, Any] | None:
+        event_type = str(event.get("event") or "")
+        if event_type not in self._START | self._STREAM | self._END:
+            return None
+        run_id, stage, tags = self._context(event)
+        key = (run_id, stage, event_type, tags)
+        if event_type in self._START | self._END and key in self._seen:
+            return None
+        if event_type in self._START | self._END:
+            self._seen.add(key)
+        if event_type in self._START:
+            return {"type": "llm_start", "stage": stage}
+        if event_type in self._END:
+            data = event.get("data") if isinstance(event.get("data"), dict) else {}
+            output = data.get("output") if isinstance(data, dict) else None
+            usage = self._usage(output)
+            payload: dict[str, Any] = {"type": "llm_end", "stage": stage}
+            if isinstance(usage, dict):
+                payload["usage"] = {
+                    key: value
+                    for key, value in usage.items()
+                    if key in {"input_tokens", "output_tokens", "total_tokens", "total_cost"}
+                    and isinstance(value, (int, float))
+                }
+            return payload
+        # Only plain text chunks are public. AIMessageChunk metadata/content blocks
+        # are deliberately excluded to avoid leaking structured output or tool args.
+        data = event.get("data") if isinstance(event.get("data"), dict) else {}
+        chunk = data.get("chunk") if isinstance(data, dict) else None
+        text = self._plain_text(chunk)
+        if text is None:
+            return None
+        return {"type": "llm_token", "stage": stage, "token": text}
+
+
+# Public alias used by the durable and local stream adapters.
+LanguageEventProjector = LangChainEventProjector
+
+
 def _is_terminal_node(stage_id: str, node: str) -> bool:
     if stage_id == "talking_head":
         return node in {"ltx", "kling", "seedance"}
@@ -125,8 +237,12 @@ class ProgressEventTranslator:
 
     def __init__(self) -> None:
         self._items: dict[str, tuple[str, int]] = {}
+        self._llm = LangChainEventProjector()
 
     def translate(self, event: dict[str, Any]) -> dict[str, Any] | None:
+        llm_event = self._llm.translate(event)
+        if llm_event is not None:
+            return llm_event
         event_type = str(event.get("event") or "")
         if event_type == "on_custom_event":
             if event.get("name") != "creative_progress":
