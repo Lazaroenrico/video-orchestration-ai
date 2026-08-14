@@ -117,7 +117,7 @@ async def test_ffmpeg_assembly_concatenates_two_clips_and_muxes_aac_voiceover(
     assert blue > red
 
 
-async def test_ffmpeg_assembly_rejects_voiceover_that_needs_more_than_ten_percent_speedup(
+async def test_ffmpeg_assembly_dynamically_expands_duration_for_longer_voiceover(
     tmp_path,
 ):
     first = tmp_path / "first.mp4"
@@ -143,8 +143,38 @@ async def test_ffmpeg_assembly_rejects_voiceover_that_needs_more_than_ten_percen
         audio_speedup_max=1.10,
     )
 
-    with pytest.raises(RuntimeError, match="voiceover is too long"):
-        await adapter.assemble(item, platform="tiktok")
+    rendered = await adapter.assemble(item, platform="tiktok")
+    assert rendered.data
+    assert rendered.meta["duration_seconds"] >= 2.0
+
+
+async def test_ffmpeg_assembly_applies_scene_acoustic_filtering(tmp_path):
+    first = tmp_path / "first.mp4"
+    second = tmp_path / "second.mp4"
+    voice = tmp_path / "voice.mp3"
+    _video(first, "red")
+    _video(second, "blue")
+    _voice(voice, 1.5)
+
+    item = Item(
+        id="item-bathroom",
+        concept={"hook": "routine in bathroom", "angle": "azulejo tile"},
+        clips=[
+            Artifact(kind="clip", uri=str(first)),
+            Artifact(kind="clip", uri=str(second)),
+        ],
+        voiceover=Artifact(kind="voiceover", uri=str(voice)),
+    )
+    adapter = FfmpegAssemblyAdapter(
+        final_duration_seconds=2,
+        clip_duration_seconds=1,
+        width=90,
+        height=160,
+    )
+
+    rendered = await adapter.assemble(item, platform="tiktok")
+    assert rendered.data
+    assert rendered.meta["acoustic_scene"] == "bathroom"
 
 
 def test_ffmpeg_assembly_validates_duration_and_speed_configuration():

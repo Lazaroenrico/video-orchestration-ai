@@ -188,7 +188,6 @@ class FfmpegAssemblyAdapter:
         platform: str,
         system_prompt: Optional[str] = None,
     ) -> RenderedMedia:
-        del system_prompt
         if len(item.clips) < 2:
             raise RuntimeError("FFmpeg assembly requires two approved clips")
         if item.voiceover is None:
@@ -207,27 +206,28 @@ class FfmpegAssemblyAdapter:
                 self._materialize(item.voiceover.uri, voice),
             )
             voice_duration = await self._duration(voice)
-            speed = max(1.0, voice_duration / self.final_duration_seconds)
-            if speed > self.audio_speedup_max + 0.0001:
-                raise RuntimeError(
-                    "voiceover is too long for the final duration without cutting words"
-                )
+            effective_final_duration = max(self.final_duration_seconds, voice_duration)
+            per_clip_duration = effective_final_duration / 2.0
+            speed = 1.0
 
-            clip_duration = f"{self.clip_duration_seconds:g}"
-            final_duration = f"{self.final_duration_seconds:g}"
+            scene_name, acoustic_echo = _detect_acoustic_scene(item, system_prompt)
+
+            clip_duration_str = f"{per_clip_duration:g}"
+            final_duration_str = f"{effective_final_duration:g}"
             video_filter = (
                 "setpts=PTS-STARTPTS,"
                 f"scale={self.width}:{self.height}:force_original_aspect_ratio=decrease,"
                 f"pad={self.width}:{self.height}:(ow-iw)/2:(oh-ih)/2:black,"
                 f"fps={self.fps},format=yuv420p,"
-                f"tpad=stop_mode=clone:stop_duration={clip_duration},"
-                f"trim=duration={clip_duration},setpts=PTS-STARTPTS"
+                f"tpad=stop_mode=clone:stop_duration={clip_duration_str},"
+                f"trim=duration={clip_duration_str},setpts=PTS-STARTPTS"
             )
             audio_filter = (
-                f"atempo={speed:.6f},"
+                "atempo=1.0,"
+                f"{acoustic_echo},"
                 "loudnorm=I=-16:LRA=11:TP=-1.5,"
                 "aresample=48000:out_chlayout=mono,"
-                f"apad,atrim=duration={final_duration}"
+                f"apad,atrim=duration={final_duration_str}"
             )
             filter_complex = (
                 f"[0:v]{video_filter}[v0];"
@@ -254,7 +254,7 @@ class FfmpegAssemblyAdapter:
                 "-map",
                 "[a]",
                 "-t",
-                final_duration,
+                final_duration_str,
                 "-c:v",
                 "libx264",
                 "-preset",
@@ -280,10 +280,29 @@ class FfmpegAssemblyAdapter:
                     "platform": platform,
                     "source_clips": 2,
                     "voiceover_speed": round(speed, 6),
+                    "acoustic_scene": scene_name,
                     "cost_usd": 0.0,
                     **validated,
                 },
             )
+
+
+def _detect_acoustic_scene(item: Item, system_prompt: Optional[str] = None) -> tuple[str, str]:
+    """Retorna a cena identificada e a cadeia de filtro de acústica ambiental no FFmpeg."""
+    text = " ".join([
+        str(item.concept.get("hook") or ""),
+        str(item.concept.get("angle") or ""),
+        str(item.concept.get("format") or ""),
+        str(system_prompt or ""),
+    ]).casefold()
+
+    if any(k in text for k in ("bathroom", "banheiro", "azulejo", "tile")):
+        return "bathroom", "aecho=0.8:0.88:32:0.4"
+    if any(k in text for k in ("bedroom", "quarto", "closet", "bed")):
+        return "bedroom", "aecho=0.8:0.25:10:0.1"
+    if any(k in text for k in ("outdoor", "rua", "street", "park", "praça")):
+        return "outdoor", "highpass=f=80,lowpass=f=12000"
+    return "default", "aecho=0.8:0.35:15:0.15"
 
 
 def build_ffmpeg_assembly_adapter(
