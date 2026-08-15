@@ -46,6 +46,7 @@ def _build_replicate(pipeline: dict[str, Any]) -> ReplicateVideoAdapter:
         tiers=pipeline["tiers"],
         clip=pipeline.get("clip", {}),
         assembly=pipeline.get("assembly", {}),
+        latentsync=pipeline.get("latentsync", {}),
         throttle=get_replicate_throttle(),
         allow_mock_fallback=bool(
             pipeline.get("video", {}).get("allow_mock_fallback", True)
@@ -112,6 +113,12 @@ class CompositeAdapter:
             "get_video_prediction",
             "cancel_video_prediction",
             "clip_artifact_from_prediction",
+            "submit_latentsync_prediction",
+            "latentsync_artifact_from_prediction",
+            "latentsync_enabled",
+            "latentsync_model",
+            "latentsync_resolution",
+            "latentsync_max_retries",
         }
     )
 

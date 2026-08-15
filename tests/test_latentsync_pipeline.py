@@ -2,8 +2,8 @@
 from __future__ import annotations
 
 from typing import Any
-import pytest
 
+import pytest
 from replicate.exceptions import ReplicateError
 
 from orchestrator.adapters.mock import MockAdapter
@@ -126,3 +126,61 @@ async def test_latentsync_mock_adapter_metadata():
         audio_uri="https://cdn.r2.com/audio.wav",
     )
     assert artifact.meta.get("latentsync_applied") is True
+
+
+async def test_generate_clip_with_prediction_client_chains_latentsync():
+    from types import SimpleNamespace
+
+    created: list[dict[str, Any]] = []
+
+    async def async_create(*, model, input, **params):
+        created.append({"model": model, "input": input, "params": params})
+        if model == "lightricks/ltx-2.3-fast":
+            return SimpleNamespace(id="pred-ltx-10", status="succeeded", output="https://cdn.replicate.com/ltx10.mp4", error=None)
+        if model == "bytedance/latentsync":
+            return SimpleNamespace(id="pred-ls-10", status="succeeded", output="https://cdn.replicate.com/ls10.mp4", error=None)
+        raise ValueError(f"unknown model {model}")
+
+    async def async_get(prediction_id):
+        if prediction_id == "pred-ltx-10":
+            return SimpleNamespace(id="pred-ltx-10", status="succeeded", output="https://cdn.replicate.com/ltx10.mp4", error=None)
+        if prediction_id == "pred-ls-10":
+            return SimpleNamespace(id="pred-ls-10", status="succeeded", output="https://cdn.replicate.com/ls10.mp4", error=None)
+        raise ValueError(f"unknown prediction {prediction_id}")
+
+    predictions = SimpleNamespace(
+        async_create=async_create,
+        async_get=async_get,
+        async_cancel=lambda _id: None,
+    )
+
+    adapter = ReplicateVideoAdapter(
+        tiers=TIERS,
+        prediction_client=SimpleNamespace(
+            models=SimpleNamespace(predictions=predictions),
+            predictions=predictions,
+        ),
+        clip={"resolution": "720p", "aspect_ratio": "9:16", "fps": 24},
+        latentsync=LATENTSYNC_CONFIG,
+        allow_mock_fallback=False,
+    )
+
+    artifact = await adapter.generate_clip(
+        item_id="item-talking-head",
+        tier="ltx",
+        seconds=8,
+        attempt=1,
+        system_prompt="Creator talks enthusiastically about the product.",
+        reference_image_uri="data:image/png;base64,creator_img",
+        audio_uri="https://cdn.r2.com/elevenlabs_narration.wav",
+    )
+
+    assert artifact.uri == "https://cdn.replicate.com/ls10.mp4"
+    assert artifact.meta["latentsync_applied"] is True
+    assert artifact.meta["latentsync_model"] == "bytedance/latentsync"
+    assert artifact.meta["prediction_id"] == "pred-ls-10"
+    assert len(created) == 2
+    assert created[0]["model"] == "lightricks/ltx-2.3-fast"
+    assert created[1]["model"] == "bytedance/latentsync"
+    assert created[1]["input"]["video"] == "https://cdn.replicate.com/ltx10.mp4"
+    assert created[1]["input"]["audio"] == "https://cdn.r2.com/elevenlabs_narration.wav"

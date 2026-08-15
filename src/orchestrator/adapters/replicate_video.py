@@ -167,13 +167,28 @@ class ReplicateVideoAdapter:
                 while prediction.status not in _TERMINAL_PREDICTION_STATUSES:
                     await asyncio.sleep(self.poll_interval_seconds)
                     prediction = await self.get_video_prediction(prediction.id)
-            return self.clip_artifact_from_prediction(
+            artifact = self.clip_artifact_from_prediction(
                 prediction,
                 tier=tier,
                 seconds=seconds,
                 attempt=attempt,
                 reference_image_uri=reference_image_uri,
             )
+            if audio_uri and self.latentsync_enabled:
+                latentsync_pred = await self.submit_latentsync_prediction(
+                    video_uri=artifact.uri,
+                    audio_uri=audio_uri,
+                    resolution=self.latentsync_resolution,
+                )
+                async with asyncio.timeout(self.clip_timeout_seconds):
+                    while latentsync_pred.status not in _TERMINAL_PREDICTION_STATUSES:
+                        await asyncio.sleep(self.poll_interval_seconds)
+                        latentsync_pred = await self.get_video_prediction(latentsync_pred.id)
+                return self.latentsync_artifact_from_prediction(
+                    latentsync_pred,
+                    base_artifact=artifact,
+                )
+            return artifact
 
         output = await with_transport_retry(
             lambda: self._throttled_run(model, input=inp),
@@ -350,6 +365,60 @@ class ReplicateVideoAdapter:
                 "generate_audio": False,
                 "has_reference_image": bool(reference_image_uri),
             },
+        )
+
+    async def submit_latentsync_prediction(
+        self,
+        *,
+        video_uri: str,
+        audio_uri: str,
+        resolution: Optional[str] = None,
+        webhook_url: Optional[str] = None,
+    ) -> VideoPrediction:
+        """Create LatentSync prediction once, retrying only failures proven to happen before sending."""
+        inp: dict[str, Any] = {
+            "video": video_uri,
+            "audio": audio_uri,
+            "resolution": resolution or self.latentsync_resolution,
+        }
+        params: dict[str, Any] = {"wait": False}
+        if webhook_url:
+            params.update(
+                webhook=webhook_url,
+                webhook_events_filter=["start", "completed"],
+            )
+        prediction = await with_transport_retry(
+            lambda: self._throttled_prediction_call(
+                lambda: self._prediction_client.models.predictions.async_create(
+                    model=self.latentsync_model,
+                    input=inp,
+                    **params,
+                )
+            ),
+            max_retries=self.max_retries,
+            backoff_base=self.backoff_base,
+            label="replicate.latentsync.create",
+        )
+        return self._snapshot(prediction)
+
+    def latentsync_artifact_from_prediction(
+        self,
+        prediction: VideoPrediction,
+        *,
+        base_artifact: Artifact,
+    ) -> Artifact:
+        if prediction.status != "succeeded":
+            detail = prediction.error or prediction.status
+            raise RuntimeError(f"Replicate LatentSync prediction did not succeed: {detail}")
+        uri = self._coerce_output(prediction.output)
+        meta = dict(base_artifact.meta)
+        meta["latentsync_applied"] = True
+        meta["latentsync_model"] = self.latentsync_model
+        meta["prediction_id"] = prediction.id
+        return Artifact(
+            kind="clip",
+            uri=uri,
+            meta=meta,
         )
 
     @staticmethod
