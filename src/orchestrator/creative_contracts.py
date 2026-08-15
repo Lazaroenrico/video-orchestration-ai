@@ -130,6 +130,10 @@ def materialize_concepts(
         raise ValueError(
             f"expected {campaign.batch_size} concepts, received {len(submissions)}"
         )
+    if campaign.performance is None and any(
+        submission.evidence_basis == "performance" for submission in submissions
+    ):
+        raise ValueError("performance evidence requires campaign performance data")
     return [
         ConceptProposal(
             **submission.model_dump(),
