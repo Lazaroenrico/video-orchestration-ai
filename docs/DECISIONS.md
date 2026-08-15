@@ -822,3 +822,13 @@ As partes aplicáveis de D16–D18, D29, D31, D32 e D34 ficam substituídas por 
 D33 já foi substituída por D38. D7, D8, Judge, `judge.yaml`, cassettes, banco,
 REST/SSE e adapters de mídia permanecem preservados. Detalhes e matriz completa:
 [`ADR-D46`](ADR-D46-langchain-native-language-runtime.md).
+
+### D47 — Contratos de prompt e fronteira trusted/untrusted dos agents
+
+D47 complementa D46: o runtime separa a mensagem server-owned
+`SERVER_EXECUTION_CONSTRAINTS` da mensagem `UNTRUSTED_STAGE_DATA`, usando apenas uma
+allowlist por stage para contagens, limites e IDs conhecidos. Os outputs continuam
+`creative-v2` com dois creators canônicos e hook inicial obrigatório apenas no caminho
+agentic; performance exige snapshot. Os prompts v3 dos três perfis são byte a byte
+equivalentes e não instruem chamadas de domínio nem retry. Detalhes:
+[`ADR-D47`](ADR-D47-langchain-agent-prompt-contracts.md).
