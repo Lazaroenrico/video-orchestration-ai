@@ -830,18 +830,27 @@ REST/SSE e adapters de mídia permanecem preservados. Detalhes e matriz completa
 - **Contexto:** a chamada `build_creator_tool` invocava diretamente o adapter sem passar
   por reserva de quota ou ledger de efeitos. Em ambientes duráveis com adapter pago
   (OpenAI Image / GPT Image 2 via Vercel AI Gateway), falhas parciais, timeouts ou retries
-  arriscavam dupla cobrança e ausência de rastreabilidade de quota.
+  arriscavam dupla cobrança e ausência de rastreabilidade de quota. Além disso, gravar o
+  resultado antes da persistência canônica no R2/disco expunha o ledger a URLs efêmeras
+  (expiração em 1h) e base64 volumoso em `external_effects.result`.
 - **Decisão e proteção:** chamadas pagas de criação de creator são envelopadas em
   `execute_paid_effect` com o bucket `openai_image_units`, consumindo 1 unidade por
   imagem gerada. A chave de efeito canônica é
   `creator-image:{run_id}:{creator_id}:{prompt_hash}`, onde `creator_id = f"creator-{index}"`
   e `prompt_hash` deriva do `system_prompt` e do preset do `voice_profile`.
+- **Persistência canônica protegida:** a persistência dos bytes de imagem e metadados
+  (`media_store.persist_creator_media`) é executada dentro da operação protegida por
+  `execute_paid_effect` em `build_creator_tool`. O resultado gravado no ledger
+  (`mark_succeeded`) e reutilizado em replays já contém a URI canônica (`r2://...` ou
+  `/media/...`), sem URLs efêmeras nem base64 no banco. Falhas de upload ou persistência
+  ocorrem antes de `mark_succeeded`, impedindo estado `succeeded` corrompido.
 - **Idempotência e falhas:** replay de efeito com status `succeeded` retorna o resultado
-  existente sem chamar a API externa. Falha pré-envio comprovada (`ConnectTimeout`, etc.)
-  marca o efeito como `failed` e libera a quota (`release_quota=True`). Timeouts pós-envio
-  ou erros inesperados marcam o efeito como `uncertain`.
+  canônico existente sem chamar a API externa. Falha pré-envio comprovada (`ConnectTimeout`, etc.)
+  marca o efeito como `failed` e libera a quota (`release_quota=True`). Timeouts pós-envio,
+  erros inesperados ou falhas de persistência marcam o efeito como `uncertain`.
 - **Compatibilidade e ambiente:** `MockAdapter` continua executando diretamente sem ledger
   nem quota. O ambiente de desenvolvimento (`DEFAULT_DEV_QUOTAS` e `./scripts/dev-local image-quota`)
   ganha suporte nativo ao bucket `openai_image_units`. Execuções duráveis exigem opt-in
   explícito via `ORCH_ENABLE_PAID_ADAPTERS=true` e `PostgresEffectLedger`.
+
 

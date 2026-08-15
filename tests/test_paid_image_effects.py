@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 from types import SimpleNamespace
 from typing import Any
@@ -10,6 +11,7 @@ import pytest
 from orchestrator.adapters.base import VoiceProfile
 from orchestrator.adapters.mock import MockAdapter
 from orchestrator.registry import CompositeAdapter
+from orchestrator.storage.base import StoredObject
 from orchestrator.tools.base import ToolContext
 from orchestrator.tools.creators import build_creator_tool
 
@@ -53,6 +55,12 @@ class FakeLedger:
         effect.result = result
 
 
+_PNG_BYTES = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+)
+_PNG_DATA_URI = "data:image/png;base64," + base64.b64encode(_PNG_BYTES).decode()
+
+
 class PaidImageCreatorAdapter:
     def __init__(self, *, fail_error: Exception | None = None) -> None:
         self.image = SimpleNamespace(model="openai/gpt-image-2")
@@ -71,7 +79,7 @@ class PaidImageCreatorAdapter:
         return {
             "id": f"creator-{index}",
             "angles": ["front", "3/4", "profile", "smile", "neutral"],
-            "upscaled_base": "https://cdn.openai.com/face-0.png",
+            "upscaled_base": _PNG_DATA_URI,
             "voice_id": "voice-123",
             "voice_profile": (
                 {"preset": voice_profile.preset, "prompt": voice_profile.prompt}
@@ -94,7 +102,7 @@ def _context(adapter: Any, ledger: Any, *, durable: bool = True) -> ToolContext:
     )
 
 
-async def test_paid_image_effect_keys_quotas_and_completed_replay(monkeypatch) -> None:
+async def test_paid_image_effect_keys_quotas_and_completed_replay(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("ORCH_ENABLE_PAID_ADAPTERS", "true")
     adapter = PaidImageCreatorAdapter()
     ledger = FakeLedger()
@@ -108,12 +116,14 @@ async def test_paid_image_effect_keys_quotas_and_completed_replay(monkeypatch) -
         index=0,
         system_prompt=prompt,
         voice_profile=voice,
+        media_root=tmp_path,
     )
     replay = await build_creator_tool(
         ctx,
         index=0,
         system_prompt=prompt,
         voice_profile=voice,
+        media_root=tmp_path,
     )
 
     assert replay == first
@@ -135,6 +145,13 @@ async def test_paid_image_effect_keys_quotas_and_completed_replay(monkeypatch) -
     assert req["prompt_hash"] == prompt_hash
     assert req["gender"] == "female"
     assert req["model"] == "openai/gpt-image-2"
+
+    # Canonical persistence in ledger result (ADR-D30 / D45 / D47)
+    saved_result = ledger.effects[expected_key].result
+    assert saved_result is not None
+    assert saved_result["upscaled_base"] == "/media/run-1/creator-0/image.png"
+    assert saved_result["image_source_uri"] == _PNG_DATA_URI
+    assert first["upscaled_base"] == "/media/run-1/creator-0/image.png"
 
 
 async def test_durable_paid_image_effect_requires_opt_in_and_ledger(monkeypatch) -> None:
@@ -288,3 +305,111 @@ async def test_composite_adapter_with_paid_creator_is_protected(monkeypatch) -> 
     assert len(ledger.reservations) == 1
     assert ledger.reservations[0]["provider"] == "openai_image_units"
     assert ledger.reservations[0]["request"]["creator_id"] == "creator-1"
+
+
+class FakeR2Storage:
+    def __init__(self, *, fail_error: Exception | None = None, prefix: str = "r2://my-bucket") -> None:
+        self.backend = "r2"
+        self.fail_error = fail_error
+        self.prefix = prefix
+        self.puts: list[StoredObject] = []
+
+    async def put_from_url(self, uri: str, *, key_base: str, client: Any = None) -> StoredObject | None:
+        if self.fail_error is not None:
+            raise self.fail_error
+        from orchestrator.storage.base import fetch_media
+        fetched = await fetch_media(uri, client=client)
+        if fetched is None:
+            return None
+        key = f"{key_base}.{fetched.ext}"
+        obj = StoredObject(
+            backend=self.backend,
+            key=key,
+            uri=f"{self.prefix}/{key}",
+            content_type=fetched.content_type,
+            size_bytes=len(fetched.data),
+            sha256="e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        )
+        self.puts.append(obj)
+        return obj
+
+
+async def test_paid_image_effect_persists_canonical_r2_pointer_and_records_db(monkeypatch, tmp_path) -> None:
+    from orchestrator.storage.db import ArtifactDB
+
+    monkeypatch.setenv("ORCH_ENABLE_PAID_ADAPTERS", "true")
+    adapter = PaidImageCreatorAdapter()
+    ledger = FakeLedger()
+    ctx = _context(adapter, ledger)
+    storage = FakeR2Storage()
+    db = ArtifactDB(tmp_path / "artifacts.sqlite")
+    db.setup()
+
+    prompt = "Prompt para teste R2"
+    prompt_hash = hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:16]
+    effect_key = f"creator-image:run-1:creator-0:{prompt_hash}"
+
+    result = await build_creator_tool(
+        ctx,
+        index=0,
+        system_prompt=prompt,
+        storage=storage,
+        db=db,
+    )
+
+    expected_uri = "r2://my-bucket/run-1/creator-0/image.png"
+    assert result["upscaled_base"] == expected_uri
+    assert result["image_source_uri"] == _PNG_DATA_URI
+
+    # Ledger saved result contains canonical r2 pointer
+    saved_result = ledger.effects[effect_key].result
+    assert saved_result["upscaled_base"] == expected_uri
+    assert saved_result["image_source_uri"] == _PNG_DATA_URI
+
+    # ArtifactDB has recorded the image artifact
+    records = await db.by_run("run-1")
+    assert len(records) == 1
+    assert records[0].kind == "image"
+    assert records[0].creator_id == "creator-0"
+    assert records[0].storage_key == "run-1/creator-0/image.png"
+    assert records[0].storage_backend == "r2"
+
+    # Replay returns canonical pointer from ledger without calling adapter
+    replay = await build_creator_tool(
+        ctx,
+        index=0,
+        system_prompt=prompt,
+        storage=storage,
+        db=db,
+    )
+    assert replay == result
+    assert adapter.build_calls == 1
+
+
+async def test_paid_image_effect_persistence_failure_occurs_before_mark_succeeded(monkeypatch) -> None:
+    monkeypatch.setenv("ORCH_ENABLE_PAID_ADAPTERS", "true")
+    adapter = PaidImageCreatorAdapter()
+    ledger = FakeLedger()
+    ctx = _context(adapter, ledger)
+    storage = FakeR2Storage(fail_error=RuntimeError("R2 upload timeout"))
+
+    prompt = "Prompt com falha de persistência"
+    prompt_hash = hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:16]
+    effect_key = f"creator-image:run-1:creator-0:{prompt_hash}"
+
+    with pytest.raises(RuntimeError, match="R2 upload timeout"):
+        await build_creator_tool(
+            ctx,
+            index=0,
+            system_prompt=prompt,
+            storage=storage,
+        )
+
+    # Adapter was called, but effect was NOT marked succeeded
+    assert adapter.build_calls == 1
+    assert effect_key in ledger.effects
+    effect = ledger.effects[effect_key]
+    assert effect.status != "succeeded"
+    assert effect.status == "uncertain"
+    assert effect.result is None
+

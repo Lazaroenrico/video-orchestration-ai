@@ -2,13 +2,16 @@
 from __future__ import annotations
 
 import hashlib
+from pathlib import Path
 from typing import Any, Optional
 
+from orchestrator import media_store
 from orchestrator.adapters.base import VoiceProfile
 from orchestrator.adapters.elevenlabs_voice_design import (
     DEFAULT_PREVIEW_TEXT,
     voice_description_hash,
 )
+from orchestrator.config import default_media_path
 from orchestrator.tools.base import (
     ToolContext,
     direct_elevenlabs_voice_enabled,
@@ -32,6 +35,9 @@ async def build_creator_tool(
     index: int,
     system_prompt: Optional[str] = None,
     voice_profile: Optional[VoiceProfile] = None,
+    media_root: Optional[str | Path] = None,
+    storage: Optional[Any] = None,
+    db: Optional[Any] = None,
 ) -> dict[str, Any]:
     add_trace_metadata(
         tool_name="build_creator",
@@ -40,14 +46,29 @@ async def build_creator_tool(
         run_id=ctx.run_id,
     )
 
-    async def build() -> dict[str, Any]:
+    effective_media_root = (
+        media_root
+        if (media_root is not None or storage is not None)
+        else default_media_path()
+    )
+
+    async def _build() -> dict[str, Any]:
         creator = await ctx.adapter.build_creator(
-            index=index, system_prompt=system_prompt, voice_profile=voice_profile,
+            index=index,
+            system_prompt=system_prompt,
+            voice_profile=voice_profile,
         )
-        return require_dict(creator, tool_name="build_creator_tool")
+        creator_dict = require_dict(creator, tool_name="build_creator_tool")
+        return await media_store.persist_creator_media(
+            creator_dict,
+            run_id=ctx.run_id,
+            media_root=effective_media_root,
+            storage=storage,
+            db=db,
+        )
 
     if not is_paid_creator_adapter(ctx):
-        return await build()
+        return await _build()
 
     creator_id = f"creator-{index}"
     gender_token = (
@@ -78,7 +99,7 @@ async def build_creator_tool(
             "gender": voice_profile.preset if voice_profile else None,
             "model": model,
         },
-        operation=build,
+        operation=_build,
     )
 
 
