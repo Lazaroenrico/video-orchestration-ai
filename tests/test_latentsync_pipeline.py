@@ -184,3 +184,69 @@ async def test_generate_clip_with_prediction_client_chains_latentsync():
     assert created[1]["model"] == "bytedance/latentsync"
     assert created[1]["input"]["video"] == "https://cdn.replicate.com/ltx10.mp4"
     assert created[1]["input"]["audio"] == "https://cdn.r2.com/elevenlabs_narration.wav"
+    assert artifact.meta["base_clip_uri"] == "https://cdn.replicate.com/ltx10.mp4"
+
+
+async def test_generate_clip_raises_when_latentsync_required_and_audio_missing():
+    async def fake_runner(ref: str, input: dict[str, Any]):
+        return "https://cdn.replicate.com/ltx_raw.mp4"
+
+    adapter = ReplicateVideoAdapter(
+        tiers=TIERS,
+        runner=fake_runner,
+        clip={"resolution": "720p", "aspect_ratio": "9:16", "fps": 24},
+        latentsync=LATENTSYNC_CONFIG,
+        allow_mock_fallback=False,
+    )
+
+    with pytest.raises(RuntimeError, match="LatentSync is required.*audio_uri"):
+        await adapter.generate_clip(
+            item_id="item-talking-head",
+            tier="ltx",
+            seconds=8,
+            attempt=1,
+            system_prompt="Creator talks enthusiastically about the product.",
+            reference_image_uri="data:image/png;base64,creator_img",
+            audio_uri=None,
+        )
+
+
+async def test_generate_clip_raises_when_latentsync_required_and_latentsync_disabled():
+    async def fake_runner(ref: str, input: dict[str, Any]):
+        return "https://cdn.replicate.com/ltx_raw.mp4"
+
+    disabled_config = dict(LATENTSYNC_CONFIG, enabled=False, required=True)
+    adapter = ReplicateVideoAdapter(
+        tiers=TIERS,
+        runner=fake_runner,
+        clip={"resolution": "720p", "aspect_ratio": "9:16", "fps": 24},
+        latentsync=disabled_config,
+        allow_mock_fallback=False,
+    )
+
+    with pytest.raises(RuntimeError, match="LatentSync is required.*disabled"):
+        await adapter.generate_clip(
+            item_id="item-talking-head",
+            tier="ltx",
+            seconds=8,
+            attempt=1,
+            system_prompt="Creator talks enthusiastically about the product.",
+            reference_image_uri="data:image/png;base64,creator_img",
+            audio_uri="https://cdn.r2.com/elevenlabs_narration.wav",
+        )
+
+
+async def test_mock_adapter_raises_when_latentsync_required_and_audio_missing():
+    adapter = MockAdapter(tiers=TIERS, latentsync={"required": True, "enabled": True})
+    with pytest.raises(RuntimeError, match="LatentSync is required.*audio_uri"):
+        await adapter.generate_clip(
+            item_id="item-mock-1",
+            tier="ltx",
+            seconds=8,
+            attempt=1,
+            system_prompt="Creator talks enthusiastically.",
+            reference_image_uri="data:image/png;base64,creator_img",
+            audio_uri=None,
+            stage="talking_head",
+        )
+

@@ -306,18 +306,41 @@ async def persist_item_media(
     new_clips: list[dict[str, Any]] = []
     for n, clip in enumerate(clips):
         clip = dict(clip)
+        meta = dict(clip.get("meta") or {})
         uri = clip.get("uri")
         if isinstance(uri, str):
             stored = await backend.put_from_url(uri, key_base=f"{key_prefix}/clip-{n}", client=client)
             if stored:
-                meta = dict(clip.get("meta") or {})
                 meta["source_uri"] = uri
                 meta.update(_pointer(stored))
-                clip = {**clip, "uri": stored.uri, "meta": meta}
+                clip["uri"] = stored.uri
                 await _record(
                     db, stored, run_id=run_id, kind=clip.get("kind") or "clip",
                     source_uri=uri, item_id=item_id,
                 )
+
+        base_uri = meta.get("base_clip_uri")
+        if isinstance(base_uri, str):
+            stored_base = await backend.put_from_url(
+                base_uri,
+                key_base=f"{key_prefix}/base-clip-{n}",
+                client=client,
+            )
+            if stored_base:
+                meta["base_clip_source_uri"] = base_uri
+                meta["base_clip_uri"] = stored_base.uri
+                meta["base_clip_storage_key"] = stored_base.key
+                meta["base_clip_storage_backend"] = stored_base.backend
+                await _record(
+                    db,
+                    stored_base,
+                    run_id=run_id,
+                    kind="base_clip",
+                    source_uri=base_uri,
+                    item_id=item_id,
+                )
+
+        clip["meta"] = meta
         new_clips.append(clip)
     data["clips"] = new_clips
 

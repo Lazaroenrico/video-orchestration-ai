@@ -7,7 +7,7 @@ import pytest
 
 from orchestrator.adapters.replicate_video import ReplicateVideoAdapter
 from orchestrator.tools.base import ToolContext
-from orchestrator.tools.video import generate_clip_tool
+from orchestrator.tools.video import VideoEffectError, generate_clip_tool
 
 
 class FakeVideoLedger:
@@ -578,6 +578,7 @@ async def test_durable_latentsync_executes_both_stages_with_distinct_effect_keys
     assert artifact.meta["latentsync_applied"] is True
     assert artifact.meta["latentsync_model"] == "bytedance/latentsync"
     assert artifact.meta["prediction_id"] == "pred-ls-1"
+    assert artifact.meta["base_clip_uri"] == "https://cdn.replicate.com/ltx.mp4"
     assert len(ledger.reservations) == 2
     assert ledger.reservations[0]["effect_key"].startswith("video:run-ls-1:item-1:talking_head:1:")
     assert ledger.reservations[1]["effect_key"].startswith("latentsync:run-ls-1:item-1:talking_head:1:")
@@ -1116,3 +1117,98 @@ async def test_durable_latentsync_provider_failure_raises_video_effect_error_wit
     assert exc_info.value.code == "prediction_failed"
     assert exc_info.value.uncertain is False
     assert exc_info.value.effect_key.startswith("latentsync:run-ls-fail:item-1:talking_head:1:")
+
+
+async def test_durable_latentsync_required_raises_video_effect_error_if_audio_missing(monkeypatch):
+    monkeypatch.setenv("ORCH_ENABLE_PAID_ADAPTERS", "true")
+
+    adapter = ReplicateVideoAdapter(
+        tiers=[{"name": "ltx", "model": "lightricks/ltx-2.3-fast", "cost_per_second": 0.01}],
+        prediction_client=SimpleNamespace(
+            models=SimpleNamespace(predictions=SimpleNamespace(async_create=lambda **_: None)),
+            predictions=SimpleNamespace(async_create=lambda **_: None, async_get=lambda _: None, async_cancel=lambda _: None),
+        ),
+        clip={"resolution": "720p"},
+        latentsync={"enabled": True, "required": True},
+        allow_mock_fallback=False,
+    )
+
+    class DummyLedger:
+        async def get(self, effect_key):
+            return None
+        async def reserve(self, **kwargs):
+            return SimpleNamespace(status="reserved")
+        async def mark_failed(self, *args, **kwargs):
+            pass
+
+    ctx = ToolContext(
+        adapter=adapter,
+        pipeline={"clip": {"timeout_ms": 100}},
+        run={"organization_slug": "acme"},
+        run_id="run-ls-req",
+        effect_ledger=DummyLedger(),
+        durable=True,
+    )
+
+    with pytest.raises(VideoEffectError) as exc_info:
+        await generate_clip_tool(
+            ctx,
+            item_id="item-1",
+            tier="ltx",
+            seconds=8,
+            attempt=1,
+            reference_image_uri="https://cdn.r2.com/face.png",
+            audio_uri=None,
+            stage="talking_head",
+        )
+
+    assert exc_info.value.error_type == "LatentSyncRequiredError"
+    assert exc_info.value.code == "latentsync_audio_missing"
+
+
+async def test_durable_latentsync_required_raises_video_effect_error_if_latentsync_disabled(monkeypatch):
+    monkeypatch.setenv("ORCH_ENABLE_PAID_ADAPTERS", "true")
+
+    adapter = ReplicateVideoAdapter(
+        tiers=[{"name": "ltx", "model": "lightricks/ltx-2.3-fast", "cost_per_second": 0.01}],
+        prediction_client=SimpleNamespace(
+            models=SimpleNamespace(predictions=SimpleNamespace(async_create=lambda **_: None)),
+            predictions=SimpleNamespace(async_create=lambda **_: None, async_get=lambda _: None, async_cancel=lambda _: None),
+        ),
+        clip={"resolution": "720p"},
+        latentsync={"enabled": False, "required": True},
+        allow_mock_fallback=False,
+    )
+
+    class DummyLedger:
+        async def get(self, effect_key):
+            return None
+        async def reserve(self, **kwargs):
+            return SimpleNamespace(status="reserved")
+        async def mark_failed(self, *args, **kwargs):
+            pass
+
+    ctx = ToolContext(
+        adapter=adapter,
+        pipeline={"clip": {"timeout_ms": 100}},
+        run={"organization_slug": "acme"},
+        run_id="run-ls-req-dis",
+        effect_ledger=DummyLedger(),
+        durable=True,
+    )
+
+    with pytest.raises(VideoEffectError) as exc_info:
+        await generate_clip_tool(
+            ctx,
+            item_id="item-1",
+            tier="ltx",
+            seconds=8,
+            attempt=1,
+            reference_image_uri="https://cdn.r2.com/face.png",
+            audio_uri="https://cdn.r2.com/audio.wav",
+            stage="talking_head",
+        )
+
+    assert exc_info.value.error_type == "LatentSyncRequiredError"
+    assert exc_info.value.code == "latentsync_disabled"
+

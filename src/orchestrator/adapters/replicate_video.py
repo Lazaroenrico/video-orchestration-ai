@@ -85,6 +85,7 @@ class ReplicateVideoAdapter:
         self.poll_interval_seconds = max(float(clip.get("poll_interval_seconds", 1.0)), 0.0)
         latentsync = latentsync or {}
         self.latentsync_enabled = bool(latentsync.get("enabled", True))
+        self.latentsync_required = bool(latentsync.get("required", False))
         self.latentsync_model = str(latentsync.get("model", "bytedance/latentsync"))
         self.latentsync_resolution = str(latentsync.get("resolution", "720p"))
         self.latentsync_max_retries = int(latentsync.get("max_retries", 3))
@@ -125,6 +126,12 @@ class ReplicateVideoAdapter:
         audio_uri: Optional[str] = None,
     ) -> Artifact:
         """Gera um clip silencioso e aplica LatentSync quando o áudio é fornecido."""
+        if self.latentsync_required:
+            if not self.latentsync_enabled:
+                raise RuntimeError("LatentSync is required but latentsync is disabled")
+            if not audio_uri:
+                raise RuntimeError("LatentSync is required for talking head but audio_uri is missing")
+
         spec = self.tiers[tier]  # KeyError em tier desconhecido (contratual)
         model = spec["model"]
         if model not in _SUPPORTED_MODELS:
@@ -221,9 +228,11 @@ class ReplicateVideoAdapter:
                 backoff_base=self.backoff_base,
                 label="replicate.latentsync",
             )
+            base_clip_uri = uri
             uri = self._coerce_output(latentsync_output)
             meta["latentsync_applied"] = True
             meta["latentsync_model"] = self.latentsync_model
+            meta["base_clip_uri"] = base_clip_uri
 
         return Artifact(
             kind="clip",
@@ -415,6 +424,7 @@ class ReplicateVideoAdapter:
         meta["latentsync_applied"] = True
         meta["latentsync_model"] = self.latentsync_model
         meta["prediction_id"] = prediction.id
+        meta["base_clip_uri"] = base_artifact.uri
         return Artifact(
             kind="clip",
             uri=uri,

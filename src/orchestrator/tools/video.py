@@ -366,6 +366,7 @@ def _build_latentsync_artifact(
     meta["latentsync_applied"] = True
     meta["latentsync_model"] = getattr(adapter, "latentsync_model", "bytedance/latentsync")
     meta["prediction_id"] = prediction.id
+    meta["base_clip_uri"] = base_artifact.uri
     return Artifact(
         kind="clip",
         uri=uri,
@@ -406,6 +407,24 @@ async def _durable_replicate_clip(
     }
     base_request_hash = _sha256(json.dumps(base_request, sort_keys=True, separators=(",", ":")))
     base_effect_key = f"video:{ctx.run_id}:{item_id}:{stage}:{attempt}:{base_request_hash}"
+
+    if getattr(ctx.adapter, "latentsync_required", False) and stage != "product_demo":
+        if not audio_uri:
+            raise VideoEffectError(
+                "latentsync_audio_missing",
+                retryable=False,
+                uncertain=False,
+                error_type="LatentSyncRequiredError",
+                effect_key=base_effect_key,
+            )
+        if not getattr(ctx.adapter, "latentsync_enabled", False):
+            raise VideoEffectError(
+                "latentsync_disabled",
+                retryable=False,
+                uncertain=False,
+                error_type="LatentSyncRequiredError",
+                effect_key=base_effect_key,
+            )
 
     base_artifact = await _durable_prediction_lifecycle(
         ctx,
@@ -463,6 +482,10 @@ async def _durable_replicate_clip(
                 base_artifact=base_artifact,
             ),
         )
+        if "base_clip_uri" not in final_artifact.meta:
+            final_meta = dict(final_artifact.meta)
+            final_meta["base_clip_uri"] = base_artifact.uri
+            final_artifact = final_artifact.model_copy(update={"meta": final_meta})
         return final_artifact
 
     return base_artifact

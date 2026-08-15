@@ -57,7 +57,9 @@ def _build_replicate(pipeline: dict[str, Any]) -> ReplicateVideoAdapter:
 # nome -> fábrica de adapter
 _ADAPTERS: dict[str, Callable[[dict[str, Any]], Any]] = {
     "mock": lambda pipeline: MockAdapter(
-        tiers=pipeline["tiers"], latency=float(pipeline.get("latency", 0.0))
+        tiers=pipeline["tiers"],
+        latency=float(pipeline.get("latency", 0.0)),
+        latentsync=pipeline.get("latentsync"),
     ),
     "replicate": _build_replicate,
     "creator_real": build_real_creator_adapter,
@@ -116,6 +118,7 @@ class CompositeAdapter:
             "submit_latentsync_prediction",
             "latentsync_artifact_from_prediction",
             "latentsync_enabled",
+            "latentsync_required",
             "latentsync_model",
             "latentsync_resolution",
             "latentsync_max_retries",

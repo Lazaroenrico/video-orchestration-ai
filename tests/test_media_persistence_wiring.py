@@ -152,3 +152,31 @@ async def test_creator_assets_default_to_the_keep_retention_class(tmp_path, db):
     row = (await db.by_run("run-1"))[0]
     assert row.retention_class == "keep"
     assert row.expires_at is None
+
+
+async def test_persist_item_media_persists_base_clip_uri_and_records_db(tmp_path, db):
+    clip = Artifact(
+        kind="clip",
+        uri=_MP4_DATA_URI,
+        meta={
+            "latentsync_applied": True,
+            "base_clip_uri": _MP4_DATA_URI,
+        },
+    )
+    item = Item(id="item-0", concept={}, clips=[clip])
+
+    persisted = await media_store.persist_item_media(item, run_id="run-1", videos_root=tmp_path, db=db)
+
+    assert persisted.clips[0].uri == "/videos/run-1/items/item-0/clip-0.mp4"
+    assert persisted.clips[0].meta["base_clip_uri"] == "/videos/run-1/items/item-0/base-clip-0.mp4"
+    assert persisted.clips[0].meta["base_clip_source_uri"] == _MP4_DATA_URI
+    assert (tmp_path / "run-1/items/item-0/base-clip-0.mp4").is_file()
+
+    rows = await db.by_run("run-1")
+    assert len(rows) == 2
+    kinds = {r.kind for r in rows}
+    assert kinds == {"clip", "base_clip"}
+    base_row = next(r for r in rows if r.kind == "base_clip")
+    assert base_row.storage_key == "run-1/items/item-0/base-clip-0.mp4"
+    assert base_row.source_uri == _MP4_DATA_URI
+
