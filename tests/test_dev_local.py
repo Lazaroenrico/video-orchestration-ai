@@ -237,6 +237,51 @@ def test_dev_local_quotas_configures_all_voice_buckets_inside_api(tmp_path) -> N
     assert "elevenlabs-secret" not in combined_output
 
 
+def test_dev_local_image_quota_configures_bucket_inside_api(tmp_path) -> None:
+    env_file = tmp_path / "dev.env"
+    _write_live_env(env_file)
+    log_file = tmp_path / "compose.log"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    docker = fake_bin / "docker"
+    docker.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = "compose" ] && [ "$2" = "version" ]; then exit 0; fi\n'
+        'printf "%s\\n" "$*" >> "$ORCH_TEST_LOG"\n',
+        encoding="utf-8",
+    )
+    docker.chmod(0o755)
+    env = {
+        **os.environ,
+        "PATH": f"{fake_bin}:/usr/bin:/bin",
+        "ORCH_DEV_ENV_FILE": str(env_file),
+        "ORCH_DEV_CONFIG_DIR": "config",
+        "ORCH_TEST_LOG": str(log_file),
+    }
+
+    result = subprocess.run(
+        [
+            str(DEV_LOCAL_PATH),
+            "image-quota",
+            "--units",
+            "50",
+        ],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    invocations = log_file.read_text(encoding="utf-8").splitlines()
+    assert any(
+        "exec -T api orchestrator db set-provider-quota "
+        "--provider openai_image_units --limit-units 50" in invocation
+        for invocation in invocations
+    )
+
+
 def test_dev_local_quotas_rejects_incomplete_arguments_before_compose(tmp_path) -> None:
     env_file = tmp_path / "dev.env"
     env_file.write_text("", encoding="utf-8")

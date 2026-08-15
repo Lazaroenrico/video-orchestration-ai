@@ -25,6 +25,7 @@ novas entregas usam uma página própria em `docs/progress/changes/`.
 
 ## Últimas 10 entregas
 
+- [Proteção da geração de imagem paga com effects](progress/changes/2026-08-15-proteger-geracao-imagem-paga-effects.md) — idempotência, quota `openai_image_units`, kill switch obrigatório e classificação de falhas de transporte no `PostgresEffectLedger`.
 - [Runtime de linguagem nativo LangChain](progress/changes/2026-08-14-langchain-native-runtime.md) — composição central de dependências, models/agents nativos, mock determinístico e vídeo sem `agent_takes` novo.
 - [Integração LatentSync 2-Estágios no Talking Head](progress/changes/2026-08-07-latentsync-talking-head.md) — LTX gera vídeo base em 720p e LatentSync aplica lip-sync com a voz ElevenLabs (3 retries, sem fallback silencioso).
 - [Prediction Replicate durável e falha parcial por item](progress/changes/2026-08-04-replicate-prediction-duravel.md) — criação/polling/webhook reconciliam timeout ambíguo sem POST duplicado nem encerrar os demais itens.
@@ -34,7 +35,6 @@ novas entregas usam uma página própria em `docs/progress/changes/`.
 - [Reorganização do histórico de progresso](progress/changes/2026-08-03-reorganizacao-historico-progresso.md) — painel curto, legado mensal íntegro e contrato documental testado.
 - [Integração completa ElevenLabs Voice Design](progress/archive/2026-08.md#correção--integração-completa-elevenlabs-voice-design-2026-08-03) — design, seleção e finalização de voz entraram no fluxo V2 durável.
 - [Vídeo final com locução e montagem FFmpeg](progress/archive/2026-07.md#correção--vídeo-final-com-locução-elevenlabs-e-montagem-ffmpeg-2026-07-29) — finais passaram a concatenar clips e incluir áudio validado.
-- [QC aceita ponteiros canônicos R2/S3](progress/archive/2026-07.md#correção--qc-aceita-ponteiros-canônicos-de-vídeo-r2s3-2026-07-29) — mídia persistida deixou de falhar no gate de integridade.
 
 ## Índice do histórico
 

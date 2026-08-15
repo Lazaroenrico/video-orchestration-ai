@@ -1,6 +1,7 @@
 """Creator-building tools."""
 from __future__ import annotations
 
+import hashlib
 from typing import Any, Optional
 
 from orchestrator.adapters.base import VoiceProfile
@@ -12,6 +13,7 @@ from orchestrator.tools.base import (
     ToolContext,
     direct_elevenlabs_voice_enabled,
     execute_paid_effect,
+    is_paid_creator_adapter,
     require_dict,
 )
 from orchestrator.tracing import add_trace_metadata, traced
@@ -37,10 +39,47 @@ async def build_creator_tool(
         stage="roster",
         run_id=ctx.run_id,
     )
-    creator = await ctx.adapter.build_creator(
-        index=index, system_prompt=system_prompt, voice_profile=voice_profile,
+
+    async def build() -> dict[str, Any]:
+        creator = await ctx.adapter.build_creator(
+            index=index, system_prompt=system_prompt, voice_profile=voice_profile,
+        )
+        return require_dict(creator, tool_name="build_creator_tool")
+
+    if not is_paid_creator_adapter(ctx):
+        return await build()
+
+    creator_id = f"creator-{index}"
+    gender_token = (
+        voice_profile.preset.encode("utf-8")
+        if voice_profile and voice_profile.preset
+        else b""
     )
-    return require_dict(creator, tool_name="build_creator_tool")
+    prompt_bytes = (system_prompt or "").encode("utf-8")
+    prompt_hash = hashlib.sha256(prompt_bytes + gender_token).hexdigest()[:16]
+
+    image_adapter = getattr(ctx.adapter, "image", None)
+    model = str(
+        getattr(image_adapter, "model", None)
+        or ctx.pipeline.get("creator", {}).get("image_model")
+        or ctx.pipeline.get("image", {}).get("model")
+        or "gpt-image-2"
+    )
+
+    return await execute_paid_effect(
+        ctx,
+        effect_key=f"creator-image:{ctx.run_id}:{creator_id}:{prompt_hash}",
+        provider="openai_image_units",
+        units=1,
+        request={
+            "creator_id": creator_id,
+            "index": index,
+            "prompt_hash": prompt_hash,
+            "gender": voice_profile.preset if voice_profile else None,
+            "model": model,
+        },
+        operation=build,
+    )
 
 
 @traced(
@@ -63,9 +102,9 @@ async def derive_creator_voice_spec_tool(
         stage="voice_spec",
         run_id=ctx.run_id,
     )
-    from orchestrator.creative_contracts import CreatorVoiceSpec
-
     import re
+
+    from orchestrator.creative_contracts import CreatorVoiceSpec
 
     voice_prof = profile.get("voice_profile") or {}
     preset = voice_prof.get("preset") if isinstance(voice_prof, dict) else getattr(voice_prof, "preset", None)

@@ -9,6 +9,9 @@ CLI_OFFLINE_ENV = {
     "DATABASE_URL": "",
     "MIGRATION_DATABASE_URL": "",
     "ORCHESTRATOR_RUNTIME_PASSWORD": "",
+    "ORCH_ORGANIZATION_SLUG": "test-org",
+    "ORCH_ORGANIZATION_NAME": "Test Org",
+    "ORCH_USER_SUBJECT": "user-123",
 }
 
 
@@ -269,6 +272,44 @@ def test_cli_sets_tenant_scoped_replicate_video_quota(monkeypatch):
 
     assert result.exit_code == 0, result.output
     assert calls == [("replicate_video_seconds", 120)]
+
+
+def test_default_dev_quotas_includes_openai_image_units():
+    from orchestrator.cli import DEFAULT_DEV_QUOTAS
+
+    assert DEFAULT_DEV_QUOTAS.get("openai_image_units") == 50
+
+
+def test_cli_sets_tenant_scoped_openai_image_quota(monkeypatch):
+    calls = []
+
+    class FakeDatabase:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def resolve_tenant(self, _identity):
+            return "tenant-context"
+
+    class FakeLedger:
+        def __init__(self, _database, _tenant):
+            pass
+
+        async def set_quota(self, provider, *, limit_units):
+            calls.append((provider, limit_units))
+
+    monkeypatch.setattr("orchestrator.cli.Database.from_env", lambda: FakeDatabase())
+    monkeypatch.setattr("orchestrator.cli.PostgresEffectLedger", FakeLedger)
+    result = CliRunner().invoke(
+        cli,
+        ["db", "set-provider-quota", "--provider", "openai_image_units", "--limit-units", "50"],
+        env=CLI_OFFLINE_ENV,
+    )
+
+    assert result.exit_code == 0, result.output
+    assert calls == [("openai_image_units", 50)]
 
 
 def test_cli_preserves_operational_ops_and_storage_commands():
