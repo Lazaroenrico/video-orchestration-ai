@@ -1,0 +1,249 @@
+"""Integration tests for runtime contract persistence and resume validation."""
+from __future__ import annotations
+
+import copy
+from pathlib import Path
+import pytest
+
+from orchestrator import runner
+from orchestrator.config import load_agent_catalog, load_pipeline, load_providers
+from orchestrator.graph.builder import build_graph
+from orchestrator.graph.checkpoint import open_checkpointer
+from orchestrator.runtime_contract import (
+    LegacyPaidResumeBlockedError,
+    RuntimeContractMismatchError,
+    build_runtime_contract,
+)
+
+
+_MOCK_PROVIDERS = {
+    "adapters": {
+        "llm": "mock",
+        "creator": "mock",
+        "video": "mock",
+        "qc": "mock",
+        "assembly": "mock",
+        "upscale": "mock",
+    },
+    "storage": {"backend": "local"},
+}
+
+_PAID_PROVIDERS = {
+    "adapters": {
+        "llm": "vercel_gateway_llm",
+        "creator": "creator_vercel_elevenlabs_design",
+        "video": "replicate",
+        "qc": "integrity_qc",
+        "assembly": "ffmpeg_assembly",
+        "upscale": "passthrough_upscale",
+    },
+    "storage": {"backend": "r2"},
+}
+
+
+async def test_new_run_persists_runtime_contract_in_checkpoint(tmp_path, pipeline_cfg):
+    db_path = tmp_path / "runs.sqlite"
+    run_id, output = await runner.run_pipeline(
+        pipeline_cfg,
+        _MOCK_PROVIDERS,
+        db_path=db_path,
+        run_id="run-rc-new",
+        batch=2,
+    )
+
+    async with open_checkpointer(db_path) as cp:
+        app = build_graph(pipeline_cfg, checkpointer=cp)
+        snap = await app.aget_state({"configurable": {"thread_id": run_id}})
+
+    assert snap is not None
+    assert "runtime_contract" in snap.values
+    persisted_contract = snap.values["runtime_contract"]
+    assert persisted_contract["graph_version"] == "v2"
+    assert persisted_contract["schema_version"] == "creative-v2"
+    assert "fingerprint" in persisted_contract
+    assert "config_hash" in persisted_contract
+    assert persisted_contract["provider_aliases"]["video"] == "mock"
+
+
+async def test_resume_matching_fingerprint_succeeds(tmp_path, pipeline_cfg):
+    db_path = tmp_path / "runs.sqlite"
+    run_id, output = await runner.run_pipeline(
+        pipeline_cfg,
+        _MOCK_PROVIDERS,
+        db_path=db_path,
+        run_id="run-rc-matching",
+        batch=2,
+    )
+
+    # Resume with exact same configuration
+    resumed_id, resumed_out = await runner.resume_pipeline(
+        pipeline_cfg,
+        _MOCK_PROVIDERS,
+        db_path=db_path,
+        run_id=run_id,
+    )
+    assert resumed_id == run_id
+    assert len(resumed_out["results"]) == 2
+
+
+async def test_resume_mismatched_fingerprint_blocks_before_execution(tmp_path, pipeline_cfg):
+    db_path = tmp_path / "runs.sqlite"
+    run_id, output = await runner.run_pipeline(
+        pipeline_cfg,
+        _MOCK_PROVIDERS,
+        db_path=db_path,
+        run_id="run-rc-mismatch",
+        batch=2,
+    )
+
+    # Modify pipeline (e.g. tiers or batch or voice)
+    modified_pipeline = copy.deepcopy(pipeline_cfg)
+    modified_pipeline["tiers"] = [
+        {"name": "ltx_modified", "model": "other-model", "cost_per_second": 0.05}
+    ]
+
+    with pytest.raises(RuntimeContractMismatchError, match="fingerprint mismatch"):
+        await runner.resume_pipeline(
+            modified_pipeline,
+            _MOCK_PROVIDERS,
+            db_path=db_path,
+            run_id=run_id,
+        )
+
+
+async def test_resume_legacy_run_without_contract_in_mock_succeeds(tmp_path, pipeline_cfg):
+    # Simulate a legacy run initialized without runtime_contract in its checkpoint
+    db_path = tmp_path / "legacy.sqlite"
+    run_id = "run-legacy-mock"
+
+    cfg = runner._build_config(
+        pipeline_cfg,
+        _MOCK_PROVIDERS,
+        run_id=run_id,
+        platform="tiktok",
+    )
+    init = {
+        "run_id": run_id,
+        "config": {"offer": "test", "batch_size": 2},
+    }
+    async with open_checkpointer(db_path) as cp:
+        app = build_graph(pipeline_cfg, checkpointer=cp)
+        await app.ainvoke(init, cfg)
+
+        snap = await app.aget_state({"configurable": {"thread_id": run_id}})
+        assert "runtime_contract" not in snap.values
+
+    # Resume with mock providers should succeed (legacy compatibility)
+    resumed_id, resumed_out = await runner.resume_pipeline(
+        pipeline_cfg,
+        _MOCK_PROVIDERS,
+        db_path=db_path,
+        run_id=run_id,
+    )
+    assert resumed_id == run_id
+
+
+async def test_resume_legacy_run_without_contract_in_paid_fails(tmp_path, pipeline_cfg):
+    # Simulate a legacy run without runtime_contract in its checkpoint
+    db_path = tmp_path / "legacy_paid.sqlite"
+    run_id = "run-legacy-paid"
+
+    cfg = runner._build_config(
+        pipeline_cfg,
+        _MOCK_PROVIDERS,
+        run_id=run_id,
+        platform="tiktok",
+    )
+    init = {
+        "run_id": run_id,
+        "config": {"offer": "test", "batch_size": 2},
+    }
+    async with open_checkpointer(db_path) as cp:
+        app = build_graph(pipeline_cfg, checkpointer=cp)
+        await app.ainvoke(init, cfg)
+
+    # Resume with paid providers must raise LegacyPaidResumeBlockedError
+    with pytest.raises(LegacyPaidResumeBlockedError, match="Paid run without runtime contract"):
+        await runner.resume_pipeline(
+            pipeline_cfg,
+            _PAID_PROVIDERS,
+            db_path=db_path,
+            run_id=run_id,
+        )
+
+
+async def test_review_gate_interrupt_preserves_contract_and_validates_on_resume(
+    tmp_path,
+    pipeline_cfg,
+):
+    db_path = tmp_path / "gate.sqlite"
+    run_id = "run-gate-rc"
+
+    # Start run with review_plan enabled
+    run_id, out = await runner.run_pipeline(
+        pipeline_cfg,
+        _MOCK_PROVIDERS,
+        db_path=db_path,
+        run_id=run_id,
+        batch=2,
+        run_options={"review_plan": True},
+    )
+
+    # Check interrupt is pending
+    interrupt = await runner.get_interrupt(
+        pipeline_cfg,
+        db_path=db_path,
+        run_id=run_id,
+    )
+    assert interrupt is not None
+    assert interrupt["type"] == "review_creative_plan"
+
+    # Verify runtime_contract is in checkpoint
+    async with open_checkpointer(db_path) as cp:
+        app = build_graph(pipeline_cfg, checkpointer=cp)
+        snap = await app.aget_state({"configurable": {"thread_id": run_id}})
+        assert "runtime_contract" in snap.values
+
+    # Resume with mismatched config should fail before any node execution
+    modified_pipeline = copy.deepcopy(pipeline_cfg)
+    modified_pipeline["batch"]["max_concurrency"] = 99
+    with pytest.raises(RuntimeContractMismatchError):
+        await runner.resume_pipeline(
+            modified_pipeline,
+            _MOCK_PROVIDERS,
+            db_path=db_path,
+            run_id=run_id,
+            resume_value={
+                "action": "approve",
+                "creators": [
+                    {
+                        "id": c["id"],
+                        "selected_voice_candidate_id": c["voice_candidates"][0]["candidate_id"],
+                    }
+                    for c in interrupt["creators"]
+                ],
+            },
+            run_options={"review_plan": True},
+        )
+
+    # Resume with matching contract succeeds
+    resumed_id, resumed_out = await runner.resume_pipeline(
+        pipeline_cfg,
+        _MOCK_PROVIDERS,
+        db_path=db_path,
+        run_id=run_id,
+        resume_value={
+            "action": "approve",
+            "creators": [
+                {
+                    "id": c["id"],
+                    "selected_voice_candidate_id": c["voice_candidates"][0]["candidate_id"],
+                }
+                for c in interrupt["creators"]
+            ],
+        },
+        run_options={"review_plan": True},
+    )
+    assert resumed_id == run_id
+    assert resumed_out["review_approved"] is True
+    assert len(resumed_out["results"]) == 2

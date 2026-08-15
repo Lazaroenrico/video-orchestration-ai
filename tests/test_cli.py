@@ -9,6 +9,9 @@ CLI_OFFLINE_ENV = {
     "DATABASE_URL": "",
     "MIGRATION_DATABASE_URL": "",
     "ORCHESTRATOR_RUNTIME_PASSWORD": "",
+    "ORCH_ORGANIZATION_SLUG": "acme",
+    "ORCH_ORGANIZATION_NAME": "Acme",
+    "ORCH_USER_SUBJECT": "oidc|test",
 }
 
 
