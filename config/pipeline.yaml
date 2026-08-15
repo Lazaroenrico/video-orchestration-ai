@@ -61,7 +61,7 @@ agent:
   max_steps_by_stage:
     scripts: 3
   max_tool_calls_by_stage:
-    scripts: 2              # permite corrigir uma submissão que exceda 14s/35 palavras
+    scripts: 2              # budget extra apenas para recuperação estrutural do ToolStrategy
 
 voice:
   mode: designed

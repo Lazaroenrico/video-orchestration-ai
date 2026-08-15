@@ -6,7 +6,7 @@ stages:
     target_model: null
     target_agent: concept-agent
     system_prompt_path: prompts/agents/concepts.md
-    prompt_version: concepts-v2
+    prompt_version: concepts-v3
     schema_version: creative-v2
     agent_enabled: true
   scripts:
@@ -15,7 +15,7 @@ stages:
     target_model: null
     target_agent: script-agent
     system_prompt_path: prompts/agents/scripts.md
-    prompt_version: scripts-v2
+    prompt_version: scripts-v3
     schema_version: creative-v2
     agent_enabled: true
   creator_profiles:
@@ -24,7 +24,7 @@ stages:
     target_model: null
     target_agent: creator-agent
     system_prompt_path: prompts/agents/creators.md
-    prompt_version: creators-v2
+    prompt_version: creators-v3
     schema_version: creative-v2
     agent_enabled: true
   roster:

@@ -21,7 +21,7 @@ def test_live_profile_has_only_three_creative_agents_with_distinct_prompts() -> 
 def test_public_agent_catalog_exposes_prompt_identity_but_not_prompt_location_or_body() -> None:
     data = load_agent_catalog("config").as_dict()["stages"]["concepts"]
 
-    assert data["prompt_version"] == "concepts-v2"
+    assert data["prompt_version"] == "concepts-v3"
     assert len(data["prompt_hash"]) == 64
     assert data["schema_version"] == "creative-v2"
     assert "system_prompt" not in data
