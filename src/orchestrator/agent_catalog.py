@@ -1,4 +1,3 @@
-"""Declarative stage/tool catalog for future agent execution."""
 from __future__ import annotations
 
 import hashlib

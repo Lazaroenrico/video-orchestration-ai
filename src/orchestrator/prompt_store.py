@@ -1,24 +1,3 @@
-"""Persistência de prompts do dashboard (templates + último usado por tipo).
-
-Antes, os templates de prompt viviam só no ``localStorage`` do browser. O primeiro
-backend no servidor foi um arquivo JSON (``.orchestrator/prompts.json`` por padrão,
-override via ``ORCH_PROMPTS``), ainda preservado para mock/offline:
-
-    {
-      "templates": {
-        "1": {"id": "1", "_idx": 1, "kind": "creator", "title": "...",
-               "desc": "...", "text": "..."}
-      },
-      "last_used": {"creator": "...", "video": "..."}
-    }
-
-Com ``DATABASE_URL``, ``open_repository`` seleciona o repositório PostgreSQL
-tenant-scoped da ADR-D36. Sem ela, ``_idx`` incremental global no JSON define
-"mais recente" de forma determinística
-(timestamps de FS não são confiáveis em CI/containers). ``last_used`` guarda o
-último prompt enviado num run por tipo — a UI usa como valor inicial das
-textareas quando não há rascunho local. Os dois backends mantêm o mesmo contrato.
-"""
 from __future__ import annotations
 
 import json
