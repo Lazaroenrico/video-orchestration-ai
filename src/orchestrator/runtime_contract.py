@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 from dataclasses import dataclass, field
 from typing import Any
@@ -11,6 +12,7 @@ from orchestrator.agent_catalog import AgentCatalog, default_agent_catalog
 
 GRAPH_VERSION = "v2"
 SCHEMA_VERSION = "creative-v2"
+DEFAULT_MODEL = "anthropic/claude-opus-4.8"
 
 _SECRET_KEY_SUBSTRINGS = (
     "api_key",
@@ -35,6 +37,48 @@ class RuntimeContractMismatchError(RuntimeContractError):
 
 class LegacyPaidResumeBlockedError(RuntimeContractError):
     """Raised when attempting to resume a paid run without a runtime contract fingerprint."""
+
+
+def _resolve_effective_llm_model(
+    provider: str,
+    pipeline: dict[str, Any],
+    target_model: str | None = None,
+) -> str:
+    if target_model:
+        return str(target_model)
+    if provider == "mock":
+        default = "mock"
+    elif provider == "anthropic":
+        default = "claude-opus-4-8"
+    else:
+        default = DEFAULT_MODEL
+
+    gateway_model = (
+        os.environ.get("AI_GATEWAY_LLM_MODEL")
+        if provider in {"vercel_gateway_llm", "anthropic_sdk_gateway", "default"}
+        else None
+    )
+    return str(
+        gateway_model
+        or pipeline.get("llm_model")
+        or pipeline.get("model")
+        or default
+    )
+
+
+def _resolve_effective_creator_image_model(
+    creator_adapter: str,
+    pipeline: dict[str, Any],
+) -> str:
+    if creator_adapter == "mock":
+        return "mock"
+    image_config = pipeline.get("image")
+    model_from_config = image_config.get("model") if isinstance(image_config, dict) else None
+    return str(
+        model_from_config
+        or os.environ.get("AI_GATEWAY_OPENAI_MODEL")
+        or "openai/gpt-image-2"
+    )
 
 
 def _sanitize_config(obj: Any) -> Any:
@@ -134,10 +178,18 @@ def build_runtime_contract(
             if v is not None:
                 provider_aliases[str(k)] = str(v)
 
+    llm_provider = str(provider_aliases.get("llm", "mock"))
+    creator_adapter = str(provider_aliases.get("creator", "mock"))
+
     model_ids: dict[str, str] = {}
+    model_ids["llm"] = _resolve_effective_llm_model(llm_provider, pipe)
+    model_ids["creator_image"] = _resolve_effective_creator_image_model(creator_adapter, pipe)
+
     for spec in catalog.stages:
-        if spec.target_model:
-            model_ids[spec.stage] = str(spec.target_model)
+        model_ids[spec.stage] = _resolve_effective_llm_model(
+            llm_provider, pipe, spec.target_model
+        )
+
     if isinstance(pipe.get("voice"), dict):
         if pipe["voice"].get("design_model"):
             model_ids.setdefault("voice_design", str(pipe["voice"]["design_model"]))

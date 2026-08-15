@@ -223,3 +223,83 @@ def test_validate_runtime_contract_missing_persisted_contract():
 
     with pytest.raises(LegacyPaidResumeBlockedError, match="Paid run without runtime contract"):
         validate_runtime_contract(contract, {}, is_paid=True)
+
+
+def test_effective_llm_model_resolution_and_env_overrides(monkeypatch):
+    mock_pipe = _base_pipeline()
+    mock_prov = _base_providers()
+    mock_contract = build_runtime_contract(mock_pipe, mock_prov)
+    assert mock_contract.model_ids["llm"] == "mock"
+    assert mock_contract.model_ids["concepts"] == "mock"
+    assert mock_contract.model_ids["scripts"] == "mock"
+    assert mock_contract.model_ids["creator_profiles"] == "mock"
+
+    vercel_prov = copy.deepcopy(mock_prov)
+    vercel_prov["adapters"]["llm"] = "vercel_gateway_llm"
+    vercel_contract = build_runtime_contract(mock_pipe, vercel_prov)
+    assert vercel_contract.model_ids["llm"] == "anthropic/claude-opus-4.8"
+    assert vercel_contract.model_ids["concepts"] == "anthropic/claude-opus-4.8"
+    assert vercel_contract.fingerprint != mock_contract.fingerprint
+
+    # Overriding AI_GATEWAY_LLM_MODEL changes effective model and fingerprint
+    monkeypatch.setenv("AI_GATEWAY_LLM_MODEL", "openai/gpt-4o")
+    gateway_override_contract = build_runtime_contract(mock_pipe, vercel_prov)
+    assert gateway_override_contract.model_ids["llm"] == "openai/gpt-4o"
+    assert gateway_override_contract.model_ids["concepts"] == "openai/gpt-4o"
+    assert gateway_override_contract.fingerprint != vercel_contract.fingerprint
+    monkeypatch.delenv("AI_GATEWAY_LLM_MODEL", raising=False)
+
+    # Overriding via pipeline config llm_model
+    custom_pipe = copy.deepcopy(mock_pipe)
+    custom_pipe["llm_model"] = "anthropic/claude-3-5-sonnet"
+    custom_contract = build_runtime_contract(custom_pipe, vercel_prov)
+    assert custom_contract.model_ids["llm"] == "anthropic/claude-3-5-sonnet"
+    assert custom_contract.model_ids["concepts"] == "anthropic/claude-3-5-sonnet"
+    assert custom_contract.fingerprint != vercel_contract.fingerprint
+
+    # Stage target_model overrides stage-level model_id
+    catalog_with_target = build_agent_catalog(
+        {
+            "stages": {
+                "concepts": {
+                    "executor": "agent",
+                    "tools": ["generate_concepts"],
+                    "agent_enabled": True,
+                    "target_model": "custom/stage-model",
+                }
+            }
+        },
+        base_dir="config-mock",
+    )
+    target_contract = build_runtime_contract(mock_pipe, vercel_prov, agent_catalog=catalog_with_target)
+    assert target_contract.model_ids["concepts"] == "custom/stage-model"
+    assert target_contract.model_ids["scripts"] == "anthropic/claude-opus-4.8"
+    assert target_contract.fingerprint != vercel_contract.fingerprint
+
+
+def test_creator_image_model_resolution_and_overrides(monkeypatch):
+    mock_pipe = _base_pipeline()
+    mock_prov = _base_providers()
+    mock_contract = build_runtime_contract(mock_pipe, mock_prov)
+    assert mock_contract.model_ids["creator_image"] == "mock"
+
+    live_prov = copy.deepcopy(mock_prov)
+    live_prov["adapters"]["creator"] = "creator_vercel_elevenlabs_design"
+    live_contract = build_runtime_contract(mock_pipe, live_prov)
+    assert live_contract.model_ids["creator_image"] == "openai/gpt-image-2"
+    assert live_contract.fingerprint != mock_contract.fingerprint
+
+    # Overriding AI_GATEWAY_OPENAI_MODEL
+    monkeypatch.setenv("AI_GATEWAY_OPENAI_MODEL", "openai/dall-e-3")
+    override_contract = build_runtime_contract(mock_pipe, live_prov)
+    assert override_contract.model_ids["creator_image"] == "openai/dall-e-3"
+    assert override_contract.fingerprint != live_contract.fingerprint
+    monkeypatch.delenv("AI_GATEWAY_OPENAI_MODEL", raising=False)
+
+    # Overriding via pipeline image.model
+    custom_image_pipe = copy.deepcopy(mock_pipe)
+    custom_image_pipe["image"] = {"model": "flux-pro"}
+    custom_contract = build_runtime_contract(custom_image_pipe, live_prov)
+    assert custom_contract.model_ids["creator_image"] == "flux-pro"
+    assert custom_contract.fingerprint != live_contract.fingerprint
+

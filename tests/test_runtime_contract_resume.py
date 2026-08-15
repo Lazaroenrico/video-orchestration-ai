@@ -247,3 +247,89 @@ async def test_review_gate_interrupt_preserves_contract_and_validates_on_resume(
     assert resumed_id == run_id
     assert resumed_out["review_approved"] is True
     assert len(resumed_out["results"]) == 2
+
+
+async def test_resume_blocks_when_effective_llm_model_changes(tmp_path, pipeline_cfg, monkeypatch):
+    db_path = tmp_path / "runs.sqlite"
+    run_id = "run-llm-change"
+
+    # Start run with mock LLM model
+    run_id, output = await runner.run_pipeline(
+        pipeline_cfg,
+        _MOCK_PROVIDERS,
+        db_path=db_path,
+        run_id=run_id,
+        batch=2,
+    )
+
+    # Change LLM model via pipeline configuration
+    modified_pipeline = copy.deepcopy(pipeline_cfg)
+    modified_pipeline["llm_model"] = "anthropic/claude-3-5-sonnet"
+
+    with pytest.raises(RuntimeContractMismatchError, match="fingerprint mismatch"):
+        await runner.resume_pipeline(
+            modified_pipeline,
+            _MOCK_PROVIDERS,
+            db_path=db_path,
+            run_id=run_id,
+        )
+
+
+async def test_resume_blocks_when_creator_image_model_changes(tmp_path, pipeline_cfg, monkeypatch):
+    monkeypatch.setenv("AI_GATEWAY_API_KEY", "test-key")
+    monkeypatch.setenv("ELEVENLABS_API_KEY", "test-key")
+
+    async def fake_generate_face(self, index, system_prompt=None, voice_profile=None):
+        return {
+            "primary": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+            "angles": ["front"],
+        }
+
+    async def fake_design_voice_candidates(self, spec, preview_text=None):
+        from orchestrator.adapters.mock import MockAdapter
+        return await MockAdapter(tiers=pipeline_cfg.get("tiers", [])).design_voice_candidates(spec, preview_text=preview_text)
+
+    monkeypatch.setattr(
+        "orchestrator.adapters.openai_image.OpenAIImageAdapter.generate_face",
+        fake_generate_face,
+    )
+    monkeypatch.setattr(
+        "orchestrator.adapters.creator_real.RealCreatorAdapter.design_voice_candidates",
+        fake_design_voice_candidates,
+    )
+
+    db_path = tmp_path / "runs.sqlite"
+    run_id = "run-image-model-change"
+
+    live_providers = {
+        "adapters": {
+            "llm": "mock",
+            "creator": "creator_vercel_elevenlabs_design",
+            "video": "mock",
+            "qc": "mock",
+            "assembly": "mock",
+            "upscale": "mock",
+        },
+        "storage": {"backend": "local"},
+    }
+
+    # Start run with default creator image model (openai/gpt-image-2)
+    run_id, output = await runner.run_pipeline(
+        pipeline_cfg,
+        live_providers,
+        db_path=db_path,
+        run_id=run_id,
+        batch=2,
+        run_options={"review_plan": True},
+    )
+
+    # Change creator image model via environment variable
+    monkeypatch.setenv("AI_GATEWAY_OPENAI_MODEL", "openai/dall-e-3")
+    with pytest.raises(RuntimeContractMismatchError, match="fingerprint mismatch"):
+        await runner.resume_pipeline(
+            pipeline_cfg,
+            live_providers,
+            db_path=db_path,
+            run_id=run_id,
+        )
+
