@@ -44,7 +44,6 @@ from orchestrator.config import (
     default_prompt_store_path,
     default_videos_path,
     load_agent_catalog,
-    load_judge,
     load_pipeline,
     load_providers,
 )
@@ -313,7 +312,6 @@ async def readyz() -> JSONResponse:
         effective_config_dir = _effective_config_dir(None)
         pipeline = load_pipeline(effective_config_dir)
         providers = load_providers(effective_config_dir)
-        load_judge(effective_config_dir)
         adapters = providers.get("adapters") if isinstance(providers, dict) else {}
         creator_adapter = adapters.get("creator") if isinstance(adapters, dict) else None
         if (

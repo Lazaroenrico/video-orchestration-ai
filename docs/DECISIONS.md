@@ -822,3 +822,21 @@ As partes aplicáveis de D16–D18, D29, D31, D32 e D34 ficam substituídas por 
 D33 já foi substituída por D38. D7, D8, Judge, `judge.yaml`, cassettes, banco,
 REST/SSE e adapters de mídia permanecem preservados. Detalhes e matriz completa:
 [`ADR-D46`](ADR-D46-langchain-native-language-runtime.md).
+
+## 2026-08-15
+
+### D47 — Isolamento do GatewayJudge no módulo `orchestrator.evaluation`
+
+- **Contexto:** `GatewayJudge` é uma ferramenta de avaliação determinística (LLM-as-judge)
+  via cassette / live gateway e não um provider/adapter de produção da pipeline em runtime.
+  Sua permanência dentro de `orchestrator.adapters` e a declaração de `JudgePort` / `judge: gateway`
+  em `providers.yaml` geravam acoplamento conceitual indevido com o runtime de produção.
+- **Decisão:** Mover todo o ownership de `GatewayJudge`, `Cassette`, `CassetteMiss`,
+  `JudgeVerdict`, evaluators e helpers para o novo módulo `src/orchestrator/evaluation/`
+  (`orchestrator.evaluation.judge`). Remover `JudgePort` de `src/orchestrator/adapters/base.py`,
+  remover `JudgeVerdict` de `src/orchestrator/graph/state.py`, remover a chave `judge: gateway`
+  de `config*/providers.yaml` e remover a validação de `load_judge` de `readyz` no servidor web.
+- **Consequência:** A suíte de testes de avaliação (`test_judge_eval.py` e `test_scope_eval.py`)
+  continua determinística offline via cassettes (`tests/cassettes/`) e com modo live opt-in
+  (`--live`), sem risco de regravação acidental de cassettes. Adapters de produção e o runtime
+  de API/servidor não mantêm dependências ou validações de judge.

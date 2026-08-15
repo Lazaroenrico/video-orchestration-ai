@@ -179,7 +179,6 @@ async def test_app_lifespan_opens_shared_auth_database_only_in_access_mode(
 
 def _stub_config(monkeypatch, *, storage_backend=None) -> None:
     monkeypatch.setattr(web_server, "load_pipeline", lambda path=None: {})
-    monkeypatch.setattr(web_server, "load_judge", lambda path=None: {})
     providers = {"storage": {"backend": storage_backend}} if storage_backend else {}
     monkeypatch.setattr(web_server, "load_providers", lambda path=None: providers)
 
@@ -206,7 +205,6 @@ async def test_readyz_requires_elevenlabs_key_only_for_direct_voice_design(
     monkeypatch,
 ) -> None:
     monkeypatch.setattr(web_server, "load_pipeline", lambda path=None: {})
-    monkeypatch.setattr(web_server, "load_judge", lambda path=None: {})
     monkeypatch.setattr(
         web_server,
         "load_providers",
@@ -244,7 +242,6 @@ async def test_readyz_requires_replicate_webhook_env_only_for_durable_paid_live_
     monkeypatch,
 ) -> None:
     monkeypatch.setattr(web_server, "load_pipeline", lambda path=None: {})
-    monkeypatch.setattr(web_server, "load_judge", lambda path=None: {})
     monkeypatch.setattr(
         web_server,
         "load_providers",

@@ -162,3 +162,17 @@ async def test_composite_prefers_creator_level_reconcile(pipeline_cfg):
         {"adapters": {"creator": "creator_level_reconcile_native"}}, pipeline_cfg
     )
     assert await composite.reconcile_voice() == {"voice_ref": "creator-level"}
+
+
+def test_judge_port_and_role_not_in_production_adapters():
+    import orchestrator.adapters.base as base_mod
+    assert not hasattr(base_mod, "JudgePort")
+    assert "judge" not in ROLES
+
+
+def test_providers_yaml_does_not_contain_judge_adapter():
+    from orchestrator.config import load_providers
+    for config_name in ("config", "config-mock", "config-staging"):
+        providers = load_providers(config_name)
+        adapters = providers.get("adapters", {})
+        assert "judge" not in adapters, f"judge found in {config_name}/providers.yaml"
