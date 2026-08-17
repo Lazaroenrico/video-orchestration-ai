@@ -2,19 +2,16 @@
 from __future__ import annotations
 
 import copy
-from pathlib import Path
+
 import pytest
 
 from orchestrator import runner
-from orchestrator.config import load_agent_catalog, load_pipeline, load_providers
 from orchestrator.graph.builder import build_graph
 from orchestrator.graph.checkpoint import open_checkpointer
 from orchestrator.runtime_contract import (
     LegacyPaidResumeBlockedError,
     RuntimeContractMismatchError,
-    build_runtime_contract,
 )
-
 
 _MOCK_PROVIDERS = {
     "adapters": {
@@ -332,4 +329,55 @@ async def test_resume_blocks_when_creator_image_model_changes(tmp_path, pipeline
             db_path=db_path,
             run_id=run_id,
         )
+
+
+async def test_config_mock_with_judge_gateway_not_treated_as_paid_on_legacy_resume(
+    tmp_path, pipeline_cfg
+):
+    db_path = tmp_path / "mock_judge.sqlite"
+    run_id = "run-legacy-mock-judge"
+
+    mock_providers_with_judge = {
+        "adapters": {
+            "llm": "mock",
+            "creator": "mock",
+            "video": "mock",
+            "qc": "mock",
+            "assembly": "mock",
+            "upscale": "mock",
+            "judge": "gateway",
+        },
+        "storage": {"backend": "local"},
+    }
+
+    # Simulate legacy checkpoint without runtime_contract
+    async with open_checkpointer(db_path) as cp:
+        app = build_graph(pipeline_cfg, checkpointer=cp)
+        cfg = runner._build_config(
+            pipeline_cfg,
+            mock_providers_with_judge,
+            run_id=run_id,
+            platform="reels",
+            agent_catalog=None,
+            artifact_repository=None,
+        )
+        init = {
+            "run_id": run_id,
+            "config": {"offer": "test", "batch_size": 2},
+            "campaign": {"offer": "test", "audience": "General audience"},
+        }
+        await app.ainvoke(init, cfg)
+        snap = await app.aget_state({"configurable": {"thread_id": run_id}})
+        assert "runtime_contract" not in snap.values
+
+    # Resume should succeed without LegacyPaidResumeBlockedError because judge is not an execution adapter
+    resumed_id, resumed_out = await runner.resume_pipeline(
+        pipeline_cfg,
+        mock_providers_with_judge,
+        db_path=db_path,
+        run_id=run_id,
+    )
+    assert resumed_id == run_id
+    assert len(resumed_out["results"]) == 6
+
 

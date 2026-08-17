@@ -2,17 +2,16 @@
 from __future__ import annotations
 
 import copy
-import hashlib
 import json
+
 import pytest
 
-from orchestrator.agent_catalog import build_agent_catalog, default_agent_catalog
+from orchestrator.agent_catalog import AgentCatalog, StageExecutionSpec, build_agent_catalog
 from orchestrator.runtime_contract import (
     GRAPH_VERSION,
     SCHEMA_VERSION,
     LegacyPaidResumeBlockedError,
     RuntimeContract,
-    RuntimeContractError,
     RuntimeContractMismatchError,
     build_runtime_contract,
     validate_runtime_contract,
@@ -302,4 +301,90 @@ def test_creator_image_model_resolution_and_overrides(monkeypatch):
     custom_contract = build_runtime_contract(custom_image_pipe, live_prov)
     assert custom_contract.model_ids["creator_image"] == "flux-pro"
     assert custom_contract.fingerprint != live_contract.fingerprint
+
+
+def test_agent_catalog_properties_in_contract_fingerprint():
+    base_pipe = _base_pipeline()
+    base_prov = _base_providers()
+
+    catalog_base = build_agent_catalog(
+        {
+            "stages": {
+                "concepts": {
+                    "executor": "agent",
+                    "tools": ["generate_concepts"],
+                    "agent_enabled": True,
+                    "prompt_version": "concepts-v1",
+                    "schema_version": "creative-v2",
+                }
+            }
+        },
+        base_dir="config-mock",
+    )
+    base_contract = build_runtime_contract(base_pipe, base_prov, agent_catalog=catalog_base)
+    assert base_contract.stage_executors["concepts"] == "agent"
+    assert base_contract.stage_tools["concepts"] == ["generate_concepts"]
+    assert base_contract.stage_schema_versions["concepts"] == "creative-v2"
+    assert base_contract.stage_agent_enabled["concepts"] is True
+
+    # Serialization and deserialization roundtrip
+    restored = RuntimeContract.from_dict(base_contract.as_dict())
+    assert restored == base_contract
+
+    # Change executor (agent -> tool)
+    catalog_tool = build_agent_catalog(
+        {
+            "stages": {
+                "concepts": {
+                    "executor": "tool",
+                    "tools": ["generate_concepts"],
+                    "agent_enabled": False,
+                    "prompt_version": "concepts-v1",
+                    "schema_version": "creative-v2",
+                }
+            }
+        },
+        base_dir="config-mock",
+    )
+    contract_tool = build_runtime_contract(base_pipe, base_prov, agent_catalog=catalog_tool)
+    assert contract_tool.fingerprint != base_contract.fingerprint
+    assert contract_tool.stage_executors["concepts"] == "tool"
+    assert contract_tool.stage_agent_enabled["concepts"] is False
+
+    # Change tools
+    catalog_tools = AgentCatalog(
+        stages=(
+            StageExecutionSpec(
+                stage="concepts",
+                executor="agent",
+                tools=("generate_concepts", "another_tool"),
+                agent_enabled=True,
+                schema_version="creative-v2",
+            ),
+        )
+    )
+    contract_tools = build_runtime_contract(base_pipe, base_prov, agent_catalog=catalog_tools)
+    assert contract_tools.fingerprint != base_contract.fingerprint
+    assert "another_tool" in contract_tools.stage_tools["concepts"]
+
+    # Change schema_version
+    catalog_schema = build_agent_catalog(
+        {
+            "stages": {
+                "concepts": {
+                    "executor": "agent",
+                    "tools": ["generate_concepts"],
+                    "agent_enabled": True,
+                    "prompt_version": "concepts-v1",
+                    "schema_version": "creative-v3",
+                }
+            }
+        },
+        base_dir="config-mock",
+    )
+    contract_schema = build_runtime_contract(base_pipe, base_prov, agent_catalog=catalog_schema)
+    assert contract_schema.fingerprint != base_contract.fingerprint
+    assert contract_schema.stage_schema_versions["concepts"] == "creative-v3"
+
+
 

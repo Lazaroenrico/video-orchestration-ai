@@ -73,6 +73,7 @@ from orchestrator.replicate_webhook import (
     decode_effect_ref,
     parse_and_verify_replicate_event,
 )
+from orchestrator.runtime_contract import build_runtime_contract
 from orchestrator.storage.factory import build_media_storage, resolve_storage_backend
 from orchestrator.storage.r2 import R2MediaStorage
 from orchestrator.storage.resolve import resolve_signed_uris
@@ -1016,6 +1017,10 @@ async def _execute_run(
         pipeline = load_pipeline(config_dir)
         providers = load_providers(config_dir)
         agent_catalog = load_agent_catalog(config_dir)
+        contract = build_runtime_contract(
+            pipeline, providers, agent_catalog=agent_catalog
+        )
+        run_state["runtime_contract"] = contract.as_dict()
         dependencies = RunDependencies.build(
             pipeline, providers, agent_catalog=agent_catalog
         )
@@ -1050,6 +1055,7 @@ async def _execute_run(
         cfg.update(run_trace_config(run_id, offer=offer, platform=platform, batch=batch))
         init: Any = {
             "run_id": run_id,
+            "runtime_contract": contract.as_dict(),
             "config": {"offer": offer, "batch_size": batch},
             "campaign": campaign.model_dump(mode="json"),
         }

@@ -185,7 +185,7 @@ async def resume_pipeline(
     is_paid = any(
         str(adapter).strip().lower() != "mock"
         for role, adapter in configured.items()
-        if role in ROLES or role in {"llm", "creator", "video", "qc", "assembly", "upscale", "judge"}
+        if role in ROLES or role == "llm"
     )
 
     async with open_checkpointer(db_path) as cp:

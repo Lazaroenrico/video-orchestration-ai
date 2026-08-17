@@ -74,10 +74,11 @@ def _resolve_effective_creator_image_model(
         return "mock"
     image_config = pipeline.get("image")
     model_from_config = image_config.get("model") if isinstance(image_config, dict) else None
+    default_model = "gpt-image-2" if creator_adapter == "creator_real" else "openai/gpt-image-2"
     return str(
-        model_from_config
-        or os.environ.get("AI_GATEWAY_OPENAI_MODEL")
-        or "openai/gpt-image-2"
+        os.environ.get("AI_GATEWAY_OPENAI_MODEL")
+        or model_from_config
+        or default_model
     )
 
 
@@ -118,6 +119,12 @@ def _compute_fingerprint(data: dict[str, Any]) -> str:
         "prompt_versions": dict(sorted((data.get("prompt_versions") or {}).items())),
         "provider_aliases": dict(sorted((data.get("provider_aliases") or {}).items())),
         "schema_version": data.get("schema_version", SCHEMA_VERSION),
+        "stage_agent_enabled": dict(sorted((data.get("stage_agent_enabled") or {}).items())),
+        "stage_executors": dict(sorted((data.get("stage_executors") or {}).items())),
+        "stage_schema_versions": dict(sorted((data.get("stage_schema_versions") or {}).items())),
+        "stage_tools": {
+            k: list(v) for k, v in sorted((data.get("stage_tools") or {}).items())
+        },
     }
     canonical_json = json.dumps(canonical, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
@@ -133,6 +140,10 @@ class RuntimeContract:
     model_ids: dict[str, str] = field(default_factory=dict)
     prompt_versions: dict[str, str] = field(default_factory=dict)
     prompt_hashes: dict[str, str] = field(default_factory=dict)
+    stage_executors: dict[str, str] = field(default_factory=dict)
+    stage_tools: dict[str, list[str]] = field(default_factory=dict)
+    stage_schema_versions: dict[str, str] = field(default_factory=dict)
+    stage_agent_enabled: dict[str, bool] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -143,6 +154,10 @@ class RuntimeContract:
             "model_ids": dict(self.model_ids),
             "prompt_versions": dict(self.prompt_versions),
             "prompt_hashes": dict(self.prompt_hashes),
+            "stage_executors": dict(self.stage_executors),
+            "stage_tools": {k: list(v) for k, v in self.stage_tools.items()},
+            "stage_schema_versions": dict(self.stage_schema_versions),
+            "stage_agent_enabled": dict(self.stage_agent_enabled),
             "fingerprint": self.fingerprint,
         }
 
@@ -156,6 +171,10 @@ class RuntimeContract:
             model_ids=dict(data.get("model_ids") or {}),
             prompt_versions=dict(data.get("prompt_versions") or {}),
             prompt_hashes=dict(data.get("prompt_hashes") or {}),
+            stage_executors=dict(data.get("stage_executors") or {}),
+            stage_tools={k: list(v) for k, v in (data.get("stage_tools") or {}).items()},
+            stage_schema_versions=dict(data.get("stage_schema_versions") or {}),
+            stage_agent_enabled=dict(data.get("stage_agent_enabled") or {}),
             fingerprint=str(data.get("fingerprint", "")),
         )
 
@@ -167,7 +186,12 @@ def build_runtime_contract(
 ) -> RuntimeContract:
     pipe = pipeline or {}
     prov = providers or {}
-    catalog = agent_catalog or default_agent_catalog()
+    catalog = (
+        agent_catalog
+        if isinstance(agent_catalog, AgentCatalog)
+        or (agent_catalog is not None and hasattr(agent_catalog, "stages"))
+        else default_agent_catalog()
+    )
 
     config_hash = _compute_config_hash(pipe, prov)
 
@@ -211,6 +235,13 @@ def build_runtime_contract(
     if isinstance(pipe.get("voice"), dict) and pipe["voice"].get("prompt_version"):
         prompt_versions.setdefault("voice", str(pipe["voice"]["prompt_version"]))
 
+    stage_executors = {spec.stage: spec.executor for spec in catalog.stages}
+    stage_tools = {spec.stage: list(spec.tools) for spec in catalog.stages}
+    stage_schema_versions = {
+        spec.stage: spec.schema_version for spec in catalog.stages if spec.schema_version
+    }
+    stage_agent_enabled = {spec.stage: spec.agent_enabled for spec in catalog.stages}
+
     data = {
         "graph_version": GRAPH_VERSION,
         "schema_version": SCHEMA_VERSION,
@@ -219,6 +250,10 @@ def build_runtime_contract(
         "model_ids": model_ids,
         "prompt_versions": prompt_versions,
         "prompt_hashes": prompt_hashes,
+        "stage_executors": stage_executors,
+        "stage_tools": stage_tools,
+        "stage_schema_versions": stage_schema_versions,
+        "stage_agent_enabled": stage_agent_enabled,
     }
     fingerprint = _compute_fingerprint(data)
 
@@ -230,6 +265,10 @@ def build_runtime_contract(
         model_ids=model_ids,
         prompt_versions=prompt_versions,
         prompt_hashes=prompt_hashes,
+        stage_executors=stage_executors,
+        stage_tools=stage_tools,
+        stage_schema_versions=stage_schema_versions,
+        stage_agent_enabled=stage_agent_enabled,
         fingerprint=fingerprint,
     )
 

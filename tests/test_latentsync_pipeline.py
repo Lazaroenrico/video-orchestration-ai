@@ -2,8 +2,8 @@
 from __future__ import annotations
 
 from typing import Any
-import pytest
 
+import pytest
 from replicate.exceptions import ReplicateError
 
 from orchestrator.adapters.mock import MockAdapter

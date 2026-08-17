@@ -7,14 +7,13 @@ import argparse
 import datetime as dt
 import json
 import os
-from pathlib import Path
 import re
 import sys
+from pathlib import Path
 from typing import Any, Optional
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
-
 
 API_BASE = "https://api.elevenlabs.io"
 DEFAULT_MODEL_ID = "eleven_multilingual_v2"
