@@ -122,6 +122,7 @@ class CompositeAdapter:
             "latentsync_model",
             "latentsync_resolution",
             "latentsync_max_retries",
+            "latentsync_cost_per_second",
         }
     )
 

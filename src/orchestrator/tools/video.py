@@ -7,8 +7,8 @@ import hashlib
 import json
 import mimetypes
 import os
-from pathlib import Path
 import time
+from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
 
 import httpx
@@ -375,6 +375,12 @@ def _build_latentsync_artifact(
     meta["latentsync_model"] = getattr(adapter, "latentsync_model", "bytedance/latentsync")
     meta["prediction_id"] = prediction.id
     meta["base_clip_uri"] = base_artifact.uri
+    seconds = int(base_artifact.meta.get("seconds") or 0)
+    base_cost = float(base_artifact.meta.get("cost_usd") or 0.0)
+    ls_cost_per_sec = float(getattr(adapter, "latentsync_cost_per_second", 0.003))
+    ls_cost = round(ls_cost_per_sec * seconds, 4)
+    meta["latentsync_cost_usd"] = ls_cost
+    meta["cost_usd"] = round(base_cost + ls_cost, 4)
     return Artifact(
         kind="clip",
         uri=uri,
@@ -386,6 +392,52 @@ async def _resolve_base_video_url_for_provider(
     base_artifact: Artifact,
     ctx: ToolContext,
 ) -> str:
+    uri = base_artifact.uri if isinstance(base_artifact.uri, str) else ""
+
+    if ctx.storage_resolver is not None:
+        if callable(ctx.storage_resolver):
+            res = ctx.storage_resolver(uri)
+            if asyncio.iscoroutine(res):
+                res = await res
+            if res:
+                return str(res)
+        elif hasattr(ctx.storage_resolver, "resolve_url"):
+            res = ctx.storage_resolver.resolve_url(uri)
+            if asyncio.iscoroutine(res):
+                res = await res
+            if res:
+                return str(res)
+        elif hasattr(ctx.storage_resolver, "resolve"):
+            res = ctx.storage_resolver.resolve(uri)
+            if asyncio.iscoroutine(res):
+                res = await res
+            if res:
+                return str(res)
+        elif hasattr(ctx.storage_resolver, "get_signed_url"):
+            from orchestrator.storage.resolve import object_pointer_from_uri
+
+            pointer = object_pointer_from_uri(uri)
+            if pointer:
+                _, key = pointer
+                return await ctx.storage_resolver.get_signed_url(key)
+
+    if (
+        ctx.videos_root is not None
+        and uri.startswith("/videos/")
+    ):
+        vpath = Path(ctx.videos_root) / uri[len("/videos/"):]
+        if vpath.is_file():
+            mime = mimetypes.guess_type(vpath.name)[0] or "video/mp4"
+            payload = base64.b64encode(vpath.read_bytes()).decode("ascii")
+            return f"data:{mime};base64,{payload}"
+
+    if uri.startswith("data:") or (
+        (uri.startswith("http://") or uri.startswith("https://"))
+        and not uri.startswith("r2://")
+        and not uri.startswith("s3://")
+    ):
+        return uri
+
     source_uri = base_artifact.meta.get("source_uri") if base_artifact.meta else None
     if isinstance(source_uri, str) and (
         source_uri.startswith("http://")
@@ -394,45 +446,7 @@ async def _resolve_base_video_url_for_provider(
     ):
         return source_uri
 
-    if ctx.storage_resolver is not None:
-        if callable(ctx.storage_resolver):
-            res = ctx.storage_resolver(base_artifact.uri)
-            if asyncio.iscoroutine(res):
-                res = await res
-            if res:
-                return str(res)
-        elif hasattr(ctx.storage_resolver, "resolve_url"):
-            res = ctx.storage_resolver.resolve_url(base_artifact.uri)
-            if asyncio.iscoroutine(res):
-                res = await res
-            if res:
-                return str(res)
-        elif hasattr(ctx.storage_resolver, "resolve"):
-            res = ctx.storage_resolver.resolve(base_artifact.uri)
-            if asyncio.iscoroutine(res):
-                res = await res
-            if res:
-                return str(res)
-        elif hasattr(ctx.storage_resolver, "get_signed_url"):
-            from orchestrator.storage.resolve import object_pointer_from_uri
-
-            pointer = object_pointer_from_uri(base_artifact.uri)
-            if pointer:
-                _, key = pointer
-                return await ctx.storage_resolver.get_signed_url(key)
-
-    if (
-        ctx.videos_root is not None
-        and isinstance(base_artifact.uri, str)
-        and base_artifact.uri.startswith("/videos/")
-    ):
-        vpath = Path(ctx.videos_root) / base_artifact.uri[len("/videos/"):]
-        if vpath.is_file():
-            mime = mimetypes.guess_type(vpath.name)[0] or "video/mp4"
-            payload = base64.b64encode(vpath.read_bytes()).decode("ascii")
-            return f"data:{mime};base64,{payload}"
-
-    return base_artifact.uri
+    return uri
 
 
 async def _durable_replicate_clip(
@@ -659,5 +673,6 @@ async def generate_clip_tool(
             system_prompt=prompt,
             reference_image_uri=reference_image_uri,
             audio_uri=audio_uri,
+            stage=stage,
         )
     return require_artifact(clip, tool_name="generate_clip_tool")

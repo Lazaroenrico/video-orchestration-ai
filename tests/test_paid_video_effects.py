@@ -1343,3 +1343,121 @@ async def test_durable_latentsync_persists_base_video_to_storage_before_completi
     assert ls_effect.result["artifact"]["meta"]["base_clip_uri"] == "/videos/run-storage-test/items/item-1/base-clip-1.mp4"
 
 
+async def test_durable_latentsync_replay_resolves_signed_url_instead_of_expired_source_uri(monkeypatch):
+    monkeypatch.setenv("ORCH_ENABLE_PAID_ADAPTERS", "true")
+    monkeypatch.setenv("ORCH_PUBLIC_API_BASE_URL", "https://orchestrator.example")
+    monkeypatch.setenv("ORCH_WEBHOOK_CORRELATION_SECRET", "correlation-secret")
+    monkeypatch.setenv("ORCH_ORGANIZATION_SLUG", "acme")
+
+    latentsync_submitted_video_url = None
+
+    async def async_create(**kwargs):
+        nonlocal latentsync_submitted_video_url
+        input_data = kwargs.get("input") or {}
+        latentsync_submitted_video_url = input_data.get("video")
+        return SimpleNamespace(id="pred-ls-fresh", status="succeeded", output="https://cdn.replicate.com/ls_out.mp4")
+
+    async def async_get(pred_id):
+        return SimpleNamespace(id=pred_id, status="succeeded", output="https://cdn.replicate.com/ls_out.mp4")
+
+    class FakeClient:
+        def __init__(self):
+            self.predictions = self
+            self.models = SimpleNamespace(predictions=self)
+            self.async_create = async_create
+            self.async_get = async_get
+
+    adapter = ReplicateVideoAdapter(
+        tiers=[{"name": "ltx", "model": "lightricks/ltx-2.3-fast", "cost_per_second": 0.01}],
+        prediction_client=FakeClient(),
+        clip={"resolution": "720p"},
+        latentsync={"enabled": True, "required": True, "model": "bytedance/latentsync"},
+        allow_mock_fallback=False,
+    )
+
+    class ReplayLedger:
+        def __init__(self):
+            self.effects = {
+                "video:run-replay:item-1:talking_head:1:c63c377317ed22291929a666d65a9f784f4885ad24d139fdb63b509244c2b50f": SimpleNamespace(
+                    status="succeeded",
+                    result={
+                        "artifact": {
+                            "kind": "base_clip",
+                            "uri": "r2://my-bucket/run-replay/items/item-1/base-clip-1.mp4",
+                            "meta": {
+                                "source_uri": "https://replicate.delivery/expired_1h_ago.mp4",
+                                "storage_key": "run-replay/items/item-1/base-clip-1.mp4",
+                                "storage_backend": "r2",
+                            },
+                        }
+                    },
+                )
+            }
+
+        async def reserve(self, effect_key, **kwargs):
+            if effect_key in self.effects:
+                return self.effects[effect_key]
+            eff = SimpleNamespace(
+                effect_key=effect_key,
+                status="reserved",
+                result=None,
+                created=True,
+                provider_operation_id=None,
+                provider_status=None,
+            )
+            self.effects[effect_key] = eff
+            return eff
+
+        async def bind_provider_operation(self, effect_key, *, provider_operation_id, provider_status):
+            eff = self.effects[effect_key]
+            eff.provider_operation_id = provider_operation_id
+            eff.provider_status = provider_status
+            return eff
+
+        async def update_provider_status(self, effect_key, *, provider_status, error_type=None):
+            eff = self.effects[effect_key]
+            eff.provider_status = provider_status
+            return eff
+
+        async def mark_succeeded(self, effect_key, *, result):
+            eff = self.effects[effect_key]
+            eff.status = "succeeded"
+            eff.result = result
+            return eff
+
+        async def mark_failed(self, effect_key, *, error, release_quota, error_type=None):
+            eff = self.effects[effect_key]
+            eff.status = "failed"
+            return eff
+
+    class FakeStorageResolver:
+        async def get_signed_url(self, key: str) -> str:
+            return f"https://r2.signed.com/{key}?signature=valid_signature_now"
+
+    ctx = ToolContext(
+        adapter=adapter,
+        pipeline={"clip": {"timeout_ms": 1000}},
+        run={"organization_slug": "acme"},
+        run_id="run-replay",
+        effect_ledger=ReplayLedger(),
+        durable=True,
+        storage_resolver=FakeStorageResolver(),
+    )
+
+    artifact = await generate_clip_tool(
+        ctx,
+        item_id="item-1",
+        tier="ltx",
+        seconds=5,
+        attempt=1,
+        reference_image_uri="https://cdn.r2.com/face.png",
+        audio_uri="https://cdn.r2.com/audio.wav",
+        stage="talking_head",
+    )
+
+    # LatentSync MUST have received the fresh signed URL, NOT the expired replicate.delivery URL
+    assert latentsync_submitted_video_url == "https://r2.signed.com/run-replay/items/item-1/base-clip-1.mp4?signature=valid_signature_now"
+    assert artifact.meta["base_clip_uri"] == "r2://my-bucket/run-replay/items/item-1/base-clip-1.mp4"
+
+
+

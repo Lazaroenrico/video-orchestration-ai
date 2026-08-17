@@ -74,7 +74,8 @@ class ReplicateVideoAdapter:
         self._assembly_runner: Runner = runner or replicate.async_run
         self._prediction_client = prediction_client or replicate.default_client
         self._throttle = throttle
-        self._mock = MockAdapter(tiers=tiers)
+        latentsync = latentsync or {}
+        self._mock = MockAdapter(tiers=tiers, latentsync=latentsync)
         clip = clip or {}
         self.resolution = str(clip.get("resolution", "1080p"))
         self.aspect_ratio = str(clip.get("aspect_ratio", "9:16"))
@@ -83,12 +84,12 @@ class ReplicateVideoAdapter:
         self.clip_draft = bool(clip.get("draft", False))
         self.clip_timeout_seconds = max(float(clip.get("timeout_ms", 900_000)) / 1000, 0.001)
         self.poll_interval_seconds = max(float(clip.get("poll_interval_seconds", 1.0)), 0.0)
-        latentsync = latentsync or {}
         self.latentsync_enabled = bool(latentsync.get("enabled", True))
         self.latentsync_required = bool(latentsync.get("required", False))
         self.latentsync_model = str(latentsync.get("model", "bytedance/latentsync"))
         self.latentsync_resolution = str(latentsync.get("resolution", "720p"))
         self.latentsync_max_retries = int(latentsync.get("max_retries", 3))
+        self.latentsync_cost_per_second = float(latentsync.get("cost_per_second", 0.003))
         assembly = assembly or {}
         self.assembly_model = str(assembly.get("model", _PRUNA_P_VIDEO_MODEL))
         self.assembly_duration = int(assembly.get("duration_seconds", 8))
@@ -124,9 +125,11 @@ class ReplicateVideoAdapter:
         system_prompt: Optional[str] = None,
         reference_image_uri: Optional[str] = None,
         audio_uri: Optional[str] = None,
+        stage: Optional[str] = None,
+        **kwargs: Any,
     ) -> Artifact:
         """Gera um clip silencioso e aplica LatentSync quando o áudio é fornecido."""
-        if self.latentsync_required:
+        if self.latentsync_required and stage != "product_demo":
             if not self.latentsync_enabled:
                 raise RuntimeError("LatentSync is required but latentsync is disabled")
             if not audio_uri:
@@ -148,6 +151,7 @@ class ReplicateVideoAdapter:
                 system_prompt=system_prompt,
                 reference_image_uri=reference_image_uri,
                 audio_uri=audio_uri,
+                stage=stage,
             )
             meta = dict(artifact.meta)
             meta["provider"] = "mock"
@@ -233,6 +237,9 @@ class ReplicateVideoAdapter:
             meta["latentsync_applied"] = True
             meta["latentsync_model"] = self.latentsync_model
             meta["base_clip_uri"] = base_clip_uri
+            ls_cost = round(self.latentsync_cost_per_second * seconds, 4)
+            meta["latentsync_cost_usd"] = ls_cost
+            meta["cost_usd"] = round(cost_usd + ls_cost, 4)
 
         return Artifact(
             kind="clip",
@@ -425,6 +432,11 @@ class ReplicateVideoAdapter:
         meta["latentsync_model"] = self.latentsync_model
         meta["prediction_id"] = prediction.id
         meta["base_clip_uri"] = base_artifact.uri
+        seconds = int(base_artifact.meta.get("seconds") or 0)
+        base_cost = float(base_artifact.meta.get("cost_usd") or 0.0)
+        ls_cost = round(self.latentsync_cost_per_second * seconds, 4)
+        meta["latentsync_cost_usd"] = ls_cost
+        meta["cost_usd"] = round(base_cost + ls_cost, 4)
         return Artifact(
             kind="clip",
             uri=uri,
