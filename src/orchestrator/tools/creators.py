@@ -80,7 +80,11 @@ async def build_creator_tool(
                 raise RuntimeError(
                     f"failed to persist creator image to canonical storage for creator {creator_id}"
                 )
-        return persisted
+        sanitized = dict(persisted)
+        source_uri = str(sanitized.get("image_source_uri") or "")
+        if is_downloadable(source_uri) or source_uri.startswith("data:"):
+            sanitized.pop("image_source_uri", None)
+        return sanitized
 
     if not is_paid_creator_adapter(ctx):
         return await _build()
@@ -100,10 +104,11 @@ async def build_creator_tool(
         or ctx.pipeline.get("image", {}).get("model")
         or "gpt-image-2"
     )
+    model_slug = model.replace("/", "_").replace(":", "_").replace(".", "_")
 
     return await execute_paid_effect(
         ctx,
-        effect_key=f"creator-image:{ctx.run_id}:{creator_id}:{prompt_hash}",
+        effect_key=f"creator-image:{ctx.run_id}:{creator_id}:{model_slug}:{prompt_hash}",
         provider="openai_image_units",
         units=1,
         request={

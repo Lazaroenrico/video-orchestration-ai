@@ -135,7 +135,8 @@ async def test_paid_image_effect_keys_quotas_and_completed_replay(monkeypatch, t
     prompt_hash = hashlib.sha256(
         prompt.encode("utf-8") + "female".encode("utf-8")
     ).hexdigest()[:16]
-    expected_key = f"creator-image:run-1:creator-0:{prompt_hash}"
+    model_slug = "openai_gpt-image-2"
+    expected_key = f"creator-image:run-1:creator-0:{model_slug}:{prompt_hash}"
     assert ledger.reservations[0]["effect_key"] == expected_key
     assert ledger.reservations[1]["effect_key"] == expected_key
 
@@ -150,8 +151,9 @@ async def test_paid_image_effect_keys_quotas_and_completed_replay(monkeypatch, t
     saved_result = ledger.effects[expected_key].result
     assert saved_result is not None
     assert saved_result["upscaled_base"] == "/media/run-1/creator-0/image.png"
-    assert saved_result["image_source_uri"] == _PNG_DATA_URI
+    assert "image_source_uri" not in saved_result
     assert first["upscaled_base"] == "/media/run-1/creator-0/image.png"
+    assert "image_source_uri" not in first
 
 
 async def test_durable_paid_image_effect_requires_opt_in_and_ledger(monkeypatch) -> None:
@@ -195,7 +197,8 @@ async def test_paid_image_effect_failure_classification(
 
     prompt = "Fail prompt"
     prompt_hash = hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:16]
-    effect_key = f"creator-image:run-1:creator-0:{prompt_hash}"
+    model_slug = "openai_gpt-image-2"
+    effect_key = f"creator-image:run-1:creator-0:{model_slug}:{prompt_hash}"
 
     with pytest.raises(type(error)):
         await build_creator_tool(
@@ -249,7 +252,8 @@ async def test_succeeded_paid_image_effect_requires_non_empty_replay_result(
     ledger = FakeLedger()
     prompt = "Prompt"
     prompt_hash = hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:16]
-    key = f"creator-image:run-1:creator-0:{prompt_hash}"
+    model_slug = "openai_gpt-image-2"
+    key = f"creator-image:run-1:creator-0:{model_slug}:{prompt_hash}"
     ledger.effects[key] = SimpleNamespace(status="succeeded", result=result)
 
     with pytest.raises(RuntimeError, match="has no replay result"):
@@ -266,7 +270,8 @@ async def test_duplicate_reserved_paid_image_effect_becomes_uncertain(monkeypatc
     ledger = FakeLedger()
     prompt = "Prompt"
     prompt_hash = hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:16]
-    key = f"creator-image:run-1:creator-0:{prompt_hash}"
+    model_slug = "openai_gpt-image-2"
+    key = f"creator-image:run-1:creator-0:{model_slug}:{prompt_hash}"
     ledger.effects[key] = SimpleNamespace(status="reserved", result=None)
 
     with pytest.raises(RuntimeError, match="is ambiguous"):
@@ -277,6 +282,27 @@ async def test_duplicate_reserved_paid_image_effect_becomes_uncertain(monkeypatc
         )
 
     assert ledger.effects[key].status == "uncertain"
+
+
+async def test_replay_failed_paid_image_effect_becomes_uncertain(monkeypatch) -> None:
+    monkeypatch.setenv("ORCH_ENABLE_PAID_ADAPTERS", "true")
+    adapter = PaidImageCreatorAdapter()
+    ledger = FakeLedger()
+    prompt = "Prompt com falha prévia"
+    prompt_hash = hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:16]
+    model_slug = "openai_gpt-image-2"
+    key = f"creator-image:run-1:creator-0:{model_slug}:{prompt_hash}"
+    ledger.effects[key] = SimpleNamespace(status="failed", result=None)
+
+    with pytest.raises(RuntimeError, match="is ambiguous"):
+        await build_creator_tool(
+            _context(adapter, ledger),
+            index=0,
+            system_prompt=prompt,
+        )
+
+    assert ledger.effects[key].status == "uncertain"
+    assert adapter.build_calls == 0
 
 
 async def test_composite_adapter_with_paid_creator_is_protected(monkeypatch) -> None:
@@ -305,6 +331,8 @@ async def test_composite_adapter_with_paid_creator_is_protected(monkeypatch) -> 
     assert len(ledger.reservations) == 1
     assert ledger.reservations[0]["provider"] == "openai_image_units"
     assert ledger.reservations[0]["request"]["creator_id"] == "creator-1"
+    model_slug = "openai_gpt-image-2"
+    assert model_slug in ledger.reservations[0]["effect_key"]
 
 
 class FakeR2Storage:
@@ -347,7 +375,8 @@ async def test_paid_image_effect_persists_canonical_r2_pointer_and_records_db(mo
 
     prompt = "Prompt para teste R2"
     prompt_hash = hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:16]
-    effect_key = f"creator-image:run-1:creator-0:{prompt_hash}"
+    model_slug = "openai_gpt-image-2"
+    effect_key = f"creator-image:run-1:creator-0:{model_slug}:{prompt_hash}"
 
     result = await build_creator_tool(
         ctx,
@@ -359,12 +388,12 @@ async def test_paid_image_effect_persists_canonical_r2_pointer_and_records_db(mo
 
     expected_uri = "r2://my-bucket/run-1/creator-0/image.png"
     assert result["upscaled_base"] == expected_uri
-    assert result["image_source_uri"] == _PNG_DATA_URI
+    assert "image_source_uri" not in result
 
     # Ledger saved result contains canonical r2 pointer
     saved_result = ledger.effects[effect_key].result
     assert saved_result["upscaled_base"] == expected_uri
-    assert saved_result["image_source_uri"] == _PNG_DATA_URI
+    assert "image_source_uri" not in saved_result
 
     # ArtifactDB has recorded the image artifact
     records = await db.by_run("run-1")
@@ -395,7 +424,8 @@ async def test_paid_image_effect_persistence_failure_occurs_before_mark_succeede
 
     prompt = "Prompt com falha de persistência"
     prompt_hash = hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:16]
-    effect_key = f"creator-image:run-1:creator-0:{prompt_hash}"
+    model_slug = "openai_gpt-image-2"
+    effect_key = f"creator-image:run-1:creator-0:{model_slug}:{prompt_hash}"
 
     with pytest.raises(RuntimeError, match="R2 upload timeout"):
         await build_creator_tool(
@@ -429,7 +459,8 @@ async def test_paid_image_effect_silent_storage_failure_raises_and_marks_uncerta
     storage = SilentFailureStorage()
     prompt = "Prompt com falha silenciosa de storage"
     prompt_hash = hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:16]
-    effect_key = f"creator-image:run-1:creator-0:{prompt_hash}"
+    model_slug = "openai_gpt-image-2"
+    effect_key = f"creator-image:run-1:creator-0:{model_slug}:{prompt_hash}"
 
     with pytest.raises(
         RuntimeError,
