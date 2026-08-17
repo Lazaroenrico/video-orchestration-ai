@@ -12,6 +12,7 @@ from orchestrator.adapters.elevenlabs_voice_design import (
     voice_description_hash,
 )
 from orchestrator.config import default_media_path
+from orchestrator.storage.base import is_downloadable
 from orchestrator.tools.base import (
     ToolContext,
     direct_elevenlabs_voice_enabled,
@@ -51,6 +52,7 @@ async def build_creator_tool(
         if (media_root is not None or storage is not None)
         else default_media_path()
     )
+    creator_id = f"creator-{index}"
 
     async def _build() -> dict[str, Any]:
         creator = await ctx.adapter.build_creator(
@@ -59,18 +61,30 @@ async def build_creator_tool(
             voice_profile=voice_profile,
         )
         creator_dict = require_dict(creator, tool_name="build_creator_tool")
-        return await media_store.persist_creator_media(
+        raw_image_uri = creator_dict.get("upscaled_base")
+        persisted = await media_store.persist_creator_media(
             creator_dict,
             run_id=ctx.run_id,
             media_root=effective_media_root,
             storage=storage,
             db=db,
         )
+        if (
+            is_paid_creator_adapter(ctx)
+            and isinstance(raw_image_uri, str)
+            and is_downloadable(raw_image_uri)
+        ):
+            if not persisted.get("image_source_uri") or is_downloadable(
+                str(persisted.get("upscaled_base") or "")
+            ):
+                raise RuntimeError(
+                    f"failed to persist creator image to canonical storage for creator {creator_id}"
+                )
+        return persisted
 
     if not is_paid_creator_adapter(ctx):
         return await _build()
 
-    creator_id = f"creator-{index}"
     gender_token = (
         voice_profile.preset.encode("utf-8")
         if voice_profile and voice_profile.preset

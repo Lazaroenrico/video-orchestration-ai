@@ -838,9 +838,12 @@ REST/SSE e adapters de mídia permanecem preservados. Detalhes e matriz completa
   imagem gerada. A chave de efeito canônica é
   `creator-image:{run_id}:{creator_id}:{prompt_hash}`, onde `creator_id = f"creator-{index}"`
   e `prompt_hash` deriva do `system_prompt` e do preset do `voice_profile`.
-- **Persistência canônica protegida:** a persistência dos bytes de imagem e metadados
+- **Persistência canônica protegida e validação estrita:** a persistência dos bytes de imagem e metadados
   (`media_store.persist_creator_media`) é executada dentro da operação protegida por
-  `execute_paid_effect` em `build_creator_tool`. O resultado gravado no ledger
+  `execute_paid_effect` em `build_creator_tool`. Uma validação estrita pós-persistência verifica se
+  `image_source_uri` foi populada e se `upscaled_base` não é mais uma URI baixável/efêmera. Caso o storage
+  falhe silenciosamente (`put_from_url` retornando `None`), `build_creator_tool` levanta `RuntimeError`,
+  impedindo que `execute_paid_effect` execute `mark_succeeded`. O resultado gravado no ledger
   (`mark_succeeded`) e reutilizado em replays já contém a URI canônica (`r2://...` ou
   `/media/...`), sem URLs efêmeras nem base64 no banco. Falhas de upload ou persistência
   ocorrem antes de `mark_succeeded`, impedindo estado `succeeded` corrompido.
@@ -852,5 +855,6 @@ REST/SSE e adapters de mídia permanecem preservados. Detalhes e matriz completa
   nem quota. O ambiente de desenvolvimento (`DEFAULT_DEV_QUOTAS` e `./scripts/dev-local image-quota`)
   ganha suporte nativo ao bucket `openai_image_units`. Execuções duráveis exigem opt-in
   explícito via `ORCH_ENABLE_PAID_ADAPTERS=true` e `PostgresEffectLedger`.
+
 
 

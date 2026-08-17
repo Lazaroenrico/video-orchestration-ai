@@ -413,3 +413,40 @@ async def test_paid_image_effect_persistence_failure_occurs_before_mark_succeede
     assert effect.status == "uncertain"
     assert effect.result is None
 
+
+async def test_paid_image_effect_silent_storage_failure_raises_and_marks_uncertain(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("ORCH_ENABLE_PAID_ADAPTERS", "true")
+    adapter = PaidImageCreatorAdapter()
+    ledger = FakeLedger()
+    ctx = _context(adapter, ledger)
+
+    class SilentFailureStorage:
+        async def put_from_url(self, uri: str, *, key_base: str, client: Any = None) -> StoredObject | None:
+            return None
+
+    storage = SilentFailureStorage()
+    prompt = "Prompt com falha silenciosa de storage"
+    prompt_hash = hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:16]
+    effect_key = f"creator-image:run-1:creator-0:{prompt_hash}"
+
+    with pytest.raises(
+        RuntimeError,
+        match="failed to persist creator image to canonical storage for creator creator-0",
+    ):
+        await build_creator_tool(
+            ctx,
+            index=0,
+            system_prompt=prompt,
+            storage=storage,
+        )
+
+    assert adapter.build_calls == 1
+    assert effect_key in ledger.effects
+    effect = ledger.effects[effect_key]
+    assert effect.status != "succeeded"
+    assert effect.status == "uncertain"
+    assert effect.result is None
+
+
