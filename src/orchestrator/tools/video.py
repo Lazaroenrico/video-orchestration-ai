@@ -2,9 +2,12 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import json
+import mimetypes
 import os
+from pathlib import Path
 import time
 from typing import Any, Awaitable, Callable, Optional
 
@@ -95,6 +98,7 @@ async def _durable_prediction_lifecycle(
     request: dict[str, Any],
     submit_fn: Callable[[str], Awaitable[Any]],
     artifact_fn: Callable[[Any], Artifact],
+    persist_fn: Callable[[Artifact], Awaitable[Artifact]] | None = None,
 ) -> Artifact:
     ledger = ctx.effect_ledger
     if ledger is None:
@@ -283,6 +287,8 @@ async def _durable_prediction_lifecycle(
                     error_type=type(exc).__name__,
                     effect_key=effect_key,
                 ) from exc
+            if persist_fn is not None:
+                artifact = await persist_fn(artifact)
             await ledger.mark_succeeded(
                 effect_key,
                 result={
@@ -335,6 +341,8 @@ async def _durable_prediction_lifecycle(
             error_type=type(exc).__name__,
             effect_key=effect_key,
         ) from exc
+    if persist_fn is not None:
+        artifact = await persist_fn(artifact)
     await ledger.mark_succeeded(
         effect_key,
         result={
@@ -372,6 +380,59 @@ def _build_latentsync_artifact(
         uri=uri,
         meta=meta,
     )
+
+
+async def _resolve_base_video_url_for_provider(
+    base_artifact: Artifact,
+    ctx: ToolContext,
+) -> str:
+    source_uri = base_artifact.meta.get("source_uri") if base_artifact.meta else None
+    if isinstance(source_uri, str) and (
+        source_uri.startswith("http://")
+        or source_uri.startswith("https://")
+        or source_uri.startswith("data:")
+    ):
+        return source_uri
+
+    if ctx.storage_resolver is not None:
+        if callable(ctx.storage_resolver):
+            res = ctx.storage_resolver(base_artifact.uri)
+            if asyncio.iscoroutine(res):
+                res = await res
+            if res:
+                return str(res)
+        elif hasattr(ctx.storage_resolver, "resolve_url"):
+            res = ctx.storage_resolver.resolve_url(base_artifact.uri)
+            if asyncio.iscoroutine(res):
+                res = await res
+            if res:
+                return str(res)
+        elif hasattr(ctx.storage_resolver, "resolve"):
+            res = ctx.storage_resolver.resolve(base_artifact.uri)
+            if asyncio.iscoroutine(res):
+                res = await res
+            if res:
+                return str(res)
+        elif hasattr(ctx.storage_resolver, "get_signed_url"):
+            from orchestrator.storage.resolve import object_pointer_from_uri
+
+            pointer = object_pointer_from_uri(base_artifact.uri)
+            if pointer:
+                _, key = pointer
+                return await ctx.storage_resolver.get_signed_url(key)
+
+    if (
+        ctx.videos_root is not None
+        and isinstance(base_artifact.uri, str)
+        and base_artifact.uri.startswith("/videos/")
+    ):
+        vpath = Path(ctx.videos_root) / base_artifact.uri[len("/videos/"):]
+        if vpath.is_file():
+            mime = mimetypes.guess_type(vpath.name)[0] or "video/mp4"
+            payload = base64.b64encode(vpath.read_bytes()).decode("ascii")
+            return f"data:{mime};base64,{payload}"
+
+    return base_artifact.uri
 
 
 async def _durable_replicate_clip(
@@ -426,6 +487,26 @@ async def _durable_replicate_clip(
                 effect_key=base_effect_key,
             )
 
+    has_latentsync = bool(audio_uri and getattr(ctx.adapter, "latentsync_enabled", False))
+    stage_1_basename = f"base-clip-{attempt}" if has_latentsync else f"clip-{attempt}"
+    stage_1_kind = "base_clip" if has_latentsync else "clip"
+
+    async def _persist_base(art: Artifact) -> Artifact:
+        if ctx.storage is None and ctx.videos_root is None:
+            return art
+        from orchestrator.media_store import persist_artifact_from_url
+
+        return await persist_artifact_from_url(
+            art,
+            run_id=ctx.run_id,
+            item_id=item_id,
+            basename=stage_1_basename,
+            kind=stage_1_kind,
+            videos_root=ctx.videos_root,
+            storage=ctx.storage,
+            db=ctx.artifact_db,
+        )
+
     base_artifact = await _durable_prediction_lifecycle(
         ctx,
         effect_key=base_effect_key,
@@ -448,9 +529,11 @@ async def _durable_replicate_clip(
             attempt=attempt,
             reference_image_uri=reference_image_uri,
         ),
+        persist_fn=_persist_base,
     )
 
-    if audio_uri and getattr(ctx.adapter, "latentsync_enabled", False):
+    if has_latentsync:
+        input_video_uri = await _resolve_base_video_url_for_provider(base_artifact, ctx)
         ls_model = str(getattr(ctx.adapter, "latentsync_model", "bytedance/latentsync"))
         ls_resolution = str(getattr(ctx.adapter, "latentsync_resolution", "720p"))
         ls_request = {
@@ -464,6 +547,26 @@ async def _durable_replicate_clip(
         ls_request_hash = _sha256(json.dumps(ls_request, sort_keys=True, separators=(",", ":")))
         ls_effect_key = f"latentsync:{ctx.run_id}:{item_id}:{stage}:{attempt}:{ls_request_hash}"
 
+        async def _persist_final(art: Artifact) -> Artifact:
+            if "base_clip_uri" not in art.meta:
+                meta = dict(art.meta)
+                meta["base_clip_uri"] = base_artifact.uri
+                art = art.model_copy(update={"meta": meta})
+            if ctx.storage is None and ctx.videos_root is None:
+                return art
+            from orchestrator.media_store import persist_artifact_from_url
+
+            return await persist_artifact_from_url(
+                art,
+                run_id=ctx.run_id,
+                item_id=item_id,
+                basename=f"clip-{attempt}",
+                kind="clip",
+                videos_root=ctx.videos_root,
+                storage=ctx.storage,
+                db=ctx.artifact_db,
+            )
+
         final_artifact = await _durable_prediction_lifecycle(
             ctx,
             effect_key=ls_effect_key,
@@ -471,7 +574,7 @@ async def _durable_replicate_clip(
             units=seconds,
             request=ls_request,
             submit_fn=lambda webhook_url: ctx.adapter.submit_latentsync_prediction(
-                video_uri=base_artifact.uri,
+                video_uri=input_video_uri,
                 audio_uri=audio_uri,
                 resolution=ls_resolution,
                 webhook_url=webhook_url,
@@ -481,6 +584,7 @@ async def _durable_replicate_clip(
                 pred,
                 base_artifact=base_artifact,
             ),
+            persist_fn=_persist_final,
         )
         if "base_clip_uri" not in final_artifact.meta:
             final_meta = dict(final_artifact.meta)

@@ -24,6 +24,10 @@ class ToolContext:
     language_runtime: Any | None = None
     effect_ledger: Any | None = None
     durable: bool = False
+    storage: Any | None = None
+    artifact_db: Any | None = None
+    storage_resolver: Any | None = None
+    videos_root: str | os.PathLike[str] | None = None
 
 
 def tool_context_from_config(config: RunnableConfig) -> ToolContext:
@@ -37,6 +41,10 @@ def tool_context_from_config(config: RunnableConfig) -> ToolContext:
         run_id=configurable.get("thread_id", "run"),
         effect_ledger=configurable.get("effect_ledger"),
         durable=bool(configurable.get("durable", False)),
+        storage=configurable.get("videos_storage") or configurable.get("storage"),
+        artifact_db=configurable.get("artifact_db"),
+        storage_resolver=configurable.get("storage_resolver"),
+        videos_root=configurable.get("videos_root"),
     )
 
 

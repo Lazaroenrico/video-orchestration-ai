@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 from types import SimpleNamespace
 
 import httpx
@@ -1211,4 +1212,134 @@ async def test_durable_latentsync_required_raises_video_effect_error_if_latentsy
 
     assert exc_info.value.error_type == "LatentSyncRequiredError"
     assert exc_info.value.code == "latentsync_disabled"
+
+
+async def test_durable_latentsync_persists_base_video_to_storage_before_completing_effect(monkeypatch, tmp_path):
+    monkeypatch.setenv("ORCH_ENABLE_PAID_ADAPTERS", "true")
+    monkeypatch.setenv("ORCH_PUBLIC_API_BASE_URL", "https://orchestrator.example")
+    monkeypatch.setenv("ORCH_WEBHOOK_CORRELATION_SECRET", "correlation-secret")
+    monkeypatch.setenv("ORCH_ORGANIZATION_SLUG", "acme")
+
+    mp4_b64 = "data:video/mp4;base64," + base64.b64encode(b"\x00mp4video").decode()
+
+    class FakeReplicateClient:
+        def __init__(self):
+            self.predictions = self
+            self.models = SimpleNamespace(predictions=self)
+
+        async def async_create(self, **kwargs):
+            return SimpleNamespace(id="pred-123", status="succeeded", output=mp4_b64)
+
+        async def async_get(self, pred_id):
+            return SimpleNamespace(id=pred_id, status="succeeded", output=mp4_b64)
+
+    adapter = ReplicateVideoAdapter(
+        tiers=[{"name": "ltx", "model": "lightricks/ltx-2.3-fast", "cost_per_second": 0.01}],
+        prediction_client=FakeReplicateClient(),
+        clip={"resolution": "720p"},
+        latentsync={"enabled": True, "required": True, "model": "bytedance/latentsync"},
+        allow_mock_fallback=False,
+    )
+
+    from orchestrator.storage.db import ArtifactDB
+    db = ArtifactDB(tmp_path / "artifacts.sqlite")
+    db.setup()
+
+    class MultiEffectLedger:
+        def __init__(self):
+            self.effects: dict[str, SimpleNamespace] = {}
+            self.reservations: list[dict] = []
+
+        async def reserve(self, effect_key, **kwargs):
+            self.reservations.append({"effect_key": effect_key, **kwargs})
+            effect = SimpleNamespace(
+                effect_key=effect_key,
+                status="reserved",
+                result=None,
+                created=True,
+                provider_operation_id=None,
+                provider_status=None,
+            )
+            self.effects[effect_key] = effect
+            return effect
+
+        async def bind_provider_operation(self, effect_key, *, provider_operation_id, provider_status):
+            effect = self.effects[effect_key]
+            effect.provider_operation_id = provider_operation_id
+            effect.provider_status = provider_status
+            return effect
+
+        async def update_provider_status(self, effect_key, *, provider_status, error_type=None):
+            effect = self.effects[effect_key]
+            effect.provider_status = provider_status
+            if error_type:
+                effect.error_type = error_type
+            return effect
+
+        async def mark_succeeded(self, effect_key, *, result):
+            effect = self.effects[effect_key]
+            effect.status = "succeeded"
+            effect.result = result
+            return effect
+
+        async def mark_failed(self, effect_key, *, error, release_quota, error_type=None):
+            effect = self.effects[effect_key]
+            effect.status = "failed"
+            effect.error = error
+            effect.error_type = error_type
+            effect.release_quota = release_quota
+            return effect
+
+    ledger = MultiEffectLedger()
+
+    ctx = ToolContext(
+        adapter=adapter,
+        pipeline={"clip": {"timeout_ms": 1000}},
+        run={"organization_slug": "acme"},
+        run_id="run-storage-test",
+        effect_ledger=ledger,
+        durable=True,
+        videos_root=tmp_path,
+        artifact_db=db,
+    )
+
+    artifact = await generate_clip_tool(
+        ctx,
+        item_id="item-1",
+        tier="ltx",
+        seconds=5,
+        attempt=1,
+        reference_image_uri="https://cdn.r2.com/face.png",
+        audio_uri="https://cdn.r2.com/audio.wav",
+        stage="talking_head",
+    )
+
+    # 1. Returned artifact must have canonical storage URI and canonical base_clip_uri
+    assert artifact.uri == "/videos/run-storage-test/items/item-1/clip-1.mp4"
+    assert artifact.meta["base_clip_uri"] == "/videos/run-storage-test/items/item-1/base-clip-1.mp4"
+
+    # 2. Files must exist on disk
+    assert (tmp_path / "run-storage-test/items/item-1/base-clip-1.mp4").is_file()
+    assert (tmp_path / "run-storage-test/items/item-1/clip-1.mp4").is_file()
+
+    # 3. ArtifactDB must have both records
+    rows = await db.by_run("run-storage-test")
+    assert len(rows) == 2
+    kinds = {r.kind: r for r in rows}
+    assert "base_clip" in kinds
+    assert "clip" in kinds
+    assert kinds["base_clip"].storage_key == "run-storage-test/items/item-1/base-clip-1.mp4"
+    assert kinds["clip"].storage_key == "run-storage-test/items/item-1/clip-1.mp4"
+
+    # 4. Effect ledger entries must store the CANONICAL artifacts, not raw remote URLs
+    video_effect = next(e for k, e in ledger.effects.items() if k.startswith("video:run-storage-test"))
+    assert video_effect.status == "succeeded"
+    assert video_effect.result["artifact"]["uri"] == "/videos/run-storage-test/items/item-1/base-clip-1.mp4"
+    assert video_effect.result["artifact"]["meta"]["source_uri"] == mp4_b64
+
+    ls_effect = next(e for k, e in ledger.effects.items() if k.startswith("latentsync:run-storage-test"))
+    assert ls_effect.status == "succeeded"
+    assert ls_effect.result["artifact"]["uri"] == "/videos/run-storage-test/items/item-1/clip-1.mp4"
+    assert ls_effect.result["artifact"]["meta"]["base_clip_uri"] == "/videos/run-storage-test/items/item-1/base-clip-1.mp4"
+
 

@@ -180,3 +180,40 @@ async def test_persist_item_media_persists_base_clip_uri_and_records_db(tmp_path
     assert base_row.storage_key == "run-1/items/item-0/base-clip-0.mp4"
     assert base_row.source_uri == _MP4_DATA_URI
 
+
+async def test_persist_artifact_from_url_downloads_and_records_db(tmp_path, db):
+    art = Artifact(kind="clip", uri=_MP4_DATA_URI, meta={"prompt_hash": "abc"})
+    persisted = await media_store.persist_artifact_from_url(
+        art,
+        run_id="run-1",
+        item_id="item-0",
+        basename="base-clip-0",
+        kind="base_clip",
+        videos_root=tmp_path,
+        db=db,
+    )
+    assert persisted.uri == "/videos/run-1/items/item-0/base-clip-0.mp4"
+    assert persisted.meta["source_uri"] == _MP4_DATA_URI
+    assert persisted.meta["storage_key"] == "run-1/items/item-0/base-clip-0.mp4"
+    assert persisted.meta["storage_backend"] == "local"
+    assert (tmp_path / "run-1/items/item-0/base-clip-0.mp4").is_file()
+
+    rows = await db.by_run("run-1")
+    assert len(rows) == 1
+    assert rows[0].kind == "base_clip"
+    assert rows[0].storage_key == "run-1/items/item-0/base-clip-0.mp4"
+
+
+async def test_persist_artifact_from_url_noop_on_non_downloadable(tmp_path, db):
+    art = Artifact(kind="clip", uri="mock://video/123", meta={})
+    persisted = await media_store.persist_artifact_from_url(
+        art,
+        run_id="run-1",
+        item_id="item-0",
+        basename="base-clip-0",
+        videos_root=tmp_path,
+        db=db,
+    )
+    assert persisted.uri == "mock://video/123"
+    assert await db.by_run("run-1") == []
+
