@@ -116,6 +116,5 @@ def test_language_runtime_providers_classification() -> None:
     assert anthropic_gw_rt.provider == "anthropic_sdk_gateway"
 
     # Unknown
-    unknown_rt = LanguageRuntime.from_provider("unknown_provider", {})
     with pytest.raises(KeyError):
-        unknown_rt._build_model("model-name")
+        LanguageRuntime.from_provider("unknown_provider", {})
