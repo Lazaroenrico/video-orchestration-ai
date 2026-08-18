@@ -875,3 +875,42 @@ REST/SSE e adapters de mídia permanecem preservados. Detalhes e matriz completa
   nem quota. O ambiente de desenvolvimento (`DEFAULT_DEV_QUOTAS` e `./scripts/dev-local image-quota`)
   ganha suporte nativo ao bucket `openai_image_units`. Execuções duráveis exigem opt-in
   explícito via `ORCH_ENABLE_PAID_ADAPTERS=true` e `PostgresEffectLedger`.
+
+## 2026-08-17
+
+### D49 — Caracterização de paridade do SDK ElevenLabs e decisão arquitetural
+
+- **Contexto:** A issue `#7` avaliou a viabilidade de migrar as operações de voz
+  (Voice Design, create/finalize, TTS, list voices e reconciliação) para o SDK oficial
+  `AsyncElevenLabs` em vez da implementação REST atual baseada em `httpx.AsyncClient`.
+- **Matriz de paridade executável:**
+  1. *Voice Design (`/v1/text-to-voice/design`):* REST permite parsing direto de `previews`,
+     validação estrita de áudio base64 e hashing determinístico de descrição com modelo
+     `eleven_ttv_v3`. SDK oferece método equivalente, mas tipagem não agrega ganhos
+     ao contrato já encapsulado em `CreatorVoiceSpec` / `VoiceDesignBatch`.
+  2. *Create/Finalize Voice (`/v1/text-to-voice`):* REST usa nome determinístico
+     `ugc-{org}-{creator}-{hash}` e descrição estática `FINALIZED_VOICE_DESCRIPTION`.
+     SDK envia exatamente o mesmo payload JSON.
+  3. *TTS / Voiceover (`/v1/text-to-speech/{voice_id}`):* REST consome o corpo binário direto
+     (`response.content`), codifica em data URI e calcula custo estimado por caracteres
+     com `cost_source=estimate`. SDK retorna stream assíncrono que exige acumulação em buffer.
+  4. *List Voices & Reconciliação (`/v1/voices`):* REST filtra por nome exato e exige
+     correspondência única para resolver ambiguidades pós-envio.
+  5. *Retry e Timeouts:* REST utiliza `with_transport_retry`, restringindo retries em POST
+     a erros pré-envio (`ConnectTimeout`, `ConnectError`, `PoolTimeout`) e 429 (throttle),
+     falhando imediatamente em 5xx ou pós-envio para proteger o `PostgresEffectLedger`
+     contra dupla cobrança. O SDK oficial não oferece esse particionamento fino de
+     transporte por padrão.
+  6. *Test doubles e isolamento offline:* REST usa `httpx.MockTransport` de forma transparente
+     sem bibliotecas externas e sem chamadas de rede live.
+- **Decisão HITL:** **Manter o adapter REST atual (`httpx.AsyncClient`)** e **não migrar para o SDK**.
+  - *Justificativa:* O REST atual oferece controle cirúrgico sobre retries e idempotência
+    de efeitos pagos, zero dependências externas adicionais no `pyproject.toml`, total
+    testabilidade offline e paridade completa comprovada pela suíte `test_elevenlabs_sdk_parity.py`.
+- **Consequência para a Issue #12:** Como a decisão HITL é manter REST, a issue `#12`
+  (`[P2][AFK] Migrar operações aprovadas para AsyncElevenLabs`) torna-se **não aplicável**
+  e deve ser encerrada sem alteração de código, conforme previsto em seu contrato de execução.
+- **Rollback:** Se uma futura versão do SDK trouxer recursos exclusivos indispensáveis, o
+  isolamento de `VoicePort` / `ElevenLabsVoiceDesignAdapter` permite a substituição do
+  transporte sem impactos no grafo LangGraph ou no ledger.
+
