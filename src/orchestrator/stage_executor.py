@@ -4,7 +4,7 @@ from __future__ import annotations
 from typing import Any, Awaitable, Callable
 
 from langchain_core.runnables import RunnableConfig
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from orchestrator.agent_catalog import (
     AgentCatalog,
@@ -13,7 +13,6 @@ from orchestrator.agent_catalog import (
     default_agent_catalog,
     is_agent_stage_allowed,
 )
-from orchestrator.language_runtime import agent_output_model
 from orchestrator.tools.base import ToolContext
 from orchestrator.tools.registry import get_tool_spec
 from orchestrator.tracing import add_trace_metadata, traced
@@ -63,7 +62,6 @@ async def _execute_agentic_tool(
     if not is_agent_stage_allowed(spec.stage):
         raise StageExecutionError(agent_stage_not_allowed_message())
     tool_spec = get_tool_spec(tool_name)
-    output_model = agent_output_model(spec.stage)
     terminal_submission = tool_spec.terminal_submission and spec.schema_version == "creative-v2"
     add_trace_metadata(
         executor="langchain-agent",
@@ -76,26 +74,26 @@ async def _execute_agentic_tool(
         run_id=ctx.run_id,
     )
 
-    async def materialize(submission: dict[str, Any]) -> Any:
-        if not isinstance(submission, dict):
-            raise StageExecutionError("structured_response must be an object")
-        try:
-            validated = output_model.model_validate(submission)
-        except ValidationError as exc:
-            raise StageExecutionError(
-                f"structured_response for stage {spec.stage!r} failed Pydantic validation"
-            ) from exc
-        safe = validated.model_dump(mode="json")
-        trusted = {"agent_submission": True} if terminal_submission else {}
-        return await tool_fn(ctx, **{**kwargs, **trusted, **safe})
+    try:
+        submission = await runtime.generate_structured(
+            stage=spec.stage,
+            inputs=kwargs,
+            system_prompt=spec.system_prompt,
+            model=spec.target_model,
+        )
+    except ValidationError as exc:
+        raise StageExecutionError(
+            f"structured_response for stage {spec.stage!r} failed Pydantic validation"
+        ) from exc
 
-    return await runtime.run_agent(
-        stage=spec.stage,
-        inputs=kwargs,
-        system_prompt=spec.system_prompt,
-        model=spec.target_model,
-        materialize=materialize,
-    )
+    if not isinstance(submission, BaseModel):
+        raise StageExecutionError(
+            f"structured_response for stage {spec.stage!r} must be a Pydantic model"
+        )
+
+    safe = submission.model_dump(mode="json")
+    trusted = {"agent_submission": True} if terminal_submission else {}
+    return await tool_fn(ctx, **{**kwargs, **trusted, **safe})
 
 
 async def execute_stage_tool(

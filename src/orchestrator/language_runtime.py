@@ -431,15 +431,14 @@ class LanguageRuntime:
             payload["draft"]["estimated_duration"] = sum(beat["seconds"] for beat in beats)
         return agent_output_model(stage).model_validate(payload)
 
-    async def run_agent(
+    async def generate_structured(
         self,
         *,
         stage: str,
         inputs: dict[str, Any],
         system_prompt: str | None = None,
         model: str | None = None,
-        materialize: Any,
-    ) -> Any:
+    ) -> BaseModel:
         if stage not in _AGENT_STAGES:
             raise ValueError(f"native creative agents are only supported for: {sorted(_AGENT_STAGES)}")
         if self.provider == "mock":
@@ -449,14 +448,17 @@ class LanguageRuntime:
             result = await agent.ainvoke(
                 {"messages": [HumanMessage(content=serialize_agent_inputs(inputs))]}
             )
-            structured = result.get("structured_response") if isinstance(result, dict) else None
-            if structured is None:
+            raw = result.get("structured_response") if isinstance(result, dict) else None
+            if raw is None:
                 raise RuntimeError(f"agent for stage {stage!r} did not return structured_response")
-            structured = agent_output_model(stage).model_validate(structured)
-        args = structured.model_dump(mode="json")
-        output = await materialize(args)
+            if isinstance(raw, BaseModel):
+                structured = raw
+            elif isinstance(raw, dict):
+                structured = agent_output_model(stage).model_validate(raw)
+            else:
+                raise RuntimeError(f"agent for stage {stage!r} returned unexpected structured_response type")
         add_trace_metadata(agent_backend="langchain", stage=stage, provider=self.provider)
-        return output
+        return structured
 
     async def generate_concepts(self, **kwargs: Any) -> list[dict[str, Any]]:
         if self.provider == "mock":
