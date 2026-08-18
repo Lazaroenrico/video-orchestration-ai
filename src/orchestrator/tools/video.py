@@ -2,11 +2,15 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
+import inspect
 import json
+import mimetypes
 import os
 import time
-from typing import Optional
+from pathlib import Path
+from typing import Any, Awaitable, Callable, Optional
 
 import httpx
 from replicate.exceptions import ReplicateError
@@ -86,47 +90,29 @@ def _video_poll_seconds(ctx: ToolContext) -> float:
     return max(float(video.get("reconciliation_poll_seconds", 1.0)), 0.0)
 
 
-async def _durable_replicate_clip(
+async def _durable_prediction_lifecycle(
     ctx: ToolContext,
     *,
-    item_id: str,
-    tier: str,
-    seconds: int,
-    attempt: int,
-    system_prompt: Optional[str],
-    reference_image_uri: Optional[str],
-    stage: str,
+    effect_key: str,
+    provider: str,
+    units: int,
+    request: dict[str, Any],
+    submit_fn: Callable[[str], Awaitable[Any]],
+    artifact_fn: Callable[[Any], Artifact],
+    persist_fn: Callable[[Artifact], Awaitable[Artifact]] | None = None,
 ) -> Artifact:
-    if os.environ.get("ORCH_ENABLE_PAID_ADAPTERS", "").lower() not in {
-        "1",
-        "true",
-        "yes",
-    }:
-        raise RuntimeError("durable paid adapters require ORCH_ENABLE_PAID_ADAPTERS=true")
     ledger = ctx.effect_ledger
     if ledger is None:
         raise RuntimeError("durable paid adapters require PostgresEffectLedger")
 
-    prompt_hash = _sha256(system_prompt)
-    reference_hash = _sha256(reference_image_uri)
-    request = {
-        "model": ctx.adapter.clip_model(tier),
-        "tier": tier,
-        "seconds": seconds,
-        "attempt": attempt,
-        "prompt_hash": prompt_hash,
-        "reference_hash": reference_hash,
-    }
-    request_hash = _sha256(json.dumps(request, sort_keys=True, separators=(",", ":")))
-    effect_key = f"video:{ctx.run_id}:{item_id}:{stage}:{attempt}:{request_hash}"
     deadline = time.monotonic() + _video_timeout_seconds(ctx)
 
     try:
         reservation = await ledger.reserve(
             effect_key,
             run_id=ctx.run_id,
-            provider="replicate_video_seconds",
-            units=seconds,
+            provider=provider,
+            units=units,
             request=request,
         )
     except Exception as exc:
@@ -145,15 +131,7 @@ async def _durable_replicate_clip(
     ambiguity_error_type = getattr(reservation, "error_type", None)
     if reservation.created:
         try:
-            prediction = await ctx.adapter.submit_clip_prediction(
-                item_id=item_id,
-                tier=tier,
-                seconds=seconds,
-                attempt=attempt,
-                system_prompt=system_prompt,
-                reference_image_uri=reference_image_uri,
-                webhook_url=_webhook_url(ctx, effect_key),
-            )
+            prediction = await submit_fn(_webhook_url(ctx, effect_key))
         except (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout) as exc:
             await ledger.mark_failed(
                 effect_key,
@@ -295,13 +273,7 @@ async def _durable_replicate_clip(
             canceled = None
         if prediction is not None and prediction.status == "succeeded":
             try:
-                artifact = ctx.adapter.clip_artifact_from_prediction(
-                    prediction,
-                    tier=tier,
-                    seconds=seconds,
-                    attempt=attempt,
-                    reference_image_uri=reference_image_uri,
-                )
+                artifact = artifact_fn(prediction)
             except RuntimeError as exc:
                 await ledger.mark_failed(
                     effect_key,
@@ -316,6 +288,8 @@ async def _durable_replicate_clip(
                     error_type=type(exc).__name__,
                     effect_key=effect_key,
                 ) from exc
+            if persist_fn is not None:
+                artifact = await persist_fn(artifact)
             await ledger.mark_succeeded(
                 effect_key,
                 result={
@@ -353,13 +327,7 @@ async def _durable_replicate_clip(
         )
 
     try:
-        artifact = ctx.adapter.clip_artifact_from_prediction(
-            prediction,
-            tier=tier,
-            seconds=seconds,
-            attempt=attempt,
-            reference_image_uri=reference_image_uri,
-        )
+        artifact = artifact_fn(prediction)
     except RuntimeError as exc:
         await ledger.mark_failed(
             effect_key,
@@ -374,6 +342,8 @@ async def _durable_replicate_clip(
             error_type=type(exc).__name__,
             effect_key=effect_key,
         ) from exc
+    if persist_fn is not None:
+        artifact = await persist_fn(artifact)
     await ledger.mark_succeeded(
         effect_key,
         result={
@@ -382,6 +352,262 @@ async def _durable_replicate_clip(
         },
     )
     return artifact
+
+
+def _build_latentsync_artifact(
+    adapter: Any,
+    prediction: Any,
+    *,
+    base_artifact: Artifact,
+) -> Artifact:
+    if hasattr(adapter, "latentsync_artifact_from_prediction"):
+        return adapter.latentsync_artifact_from_prediction(
+            prediction,
+            base_artifact=base_artifact,
+        )
+    if prediction.status != "succeeded":
+        detail = getattr(prediction, "error", None) or prediction.status
+        raise RuntimeError(f"Replicate LatentSync prediction did not succeed: {detail}")
+    from orchestrator.adapters.replicate_video import ReplicateVideoAdapter
+
+    uri = ReplicateVideoAdapter._coerce_output(prediction.output)
+    meta = dict(base_artifact.meta)
+    meta["latentsync_applied"] = True
+    meta["latentsync_model"] = getattr(adapter, "latentsync_model", "bytedance/latentsync")
+    meta["prediction_id"] = prediction.id
+    meta["base_clip_uri"] = base_artifact.uri
+    seconds = int(base_artifact.meta.get("seconds") or 0)
+    base_cost = float(base_artifact.meta.get("cost_usd") or 0.0)
+    ls_cost_per_sec = float(getattr(adapter, "latentsync_cost_per_second", 0.003))
+    ls_cost = round(ls_cost_per_sec * seconds, 4)
+    meta["latentsync_cost_usd"] = ls_cost
+    meta["cost_usd"] = round(base_cost + ls_cost, 4)
+    return Artifact(
+        kind="clip",
+        uri=uri,
+        meta=meta,
+    )
+
+
+async def _resolve_base_video_url_for_provider(
+    base_artifact: Artifact,
+    ctx: ToolContext,
+) -> str:
+    uri = base_artifact.uri if isinstance(base_artifact.uri, str) else ""
+
+    if ctx.storage_resolver is not None:
+        if callable(ctx.storage_resolver):
+            res = ctx.storage_resolver(uri)
+            if asyncio.iscoroutine(res):
+                res = await res
+            if res:
+                return str(res)
+        elif hasattr(ctx.storage_resolver, "resolve_url"):
+            res = ctx.storage_resolver.resolve_url(uri)
+            if asyncio.iscoroutine(res):
+                res = await res
+            if res:
+                return str(res)
+        elif hasattr(ctx.storage_resolver, "resolve"):
+            res = ctx.storage_resolver.resolve(uri)
+            if asyncio.iscoroutine(res):
+                res = await res
+            if res:
+                return str(res)
+        elif hasattr(ctx.storage_resolver, "get_signed_url"):
+            from orchestrator.storage.resolve import object_pointer_from_uri
+
+            pointer = object_pointer_from_uri(uri)
+            if pointer:
+                _, key = pointer
+                return await ctx.storage_resolver.get_signed_url(key)
+
+    if (
+        ctx.videos_root is not None
+        and uri.startswith("/videos/")
+    ):
+        vpath = Path(ctx.videos_root) / uri[len("/videos/"):]
+        if vpath.is_file():
+            mime = mimetypes.guess_type(vpath.name)[0] or "video/mp4"
+            payload = base64.b64encode(vpath.read_bytes()).decode("ascii")
+            return f"data:{mime};base64,{payload}"
+
+    if uri.startswith("data:") or (
+        (uri.startswith("http://") or uri.startswith("https://"))
+        and not uri.startswith("r2://")
+        and not uri.startswith("s3://")
+    ):
+        return uri
+
+    source_uri = base_artifact.meta.get("source_uri") if base_artifact.meta else None
+    if isinstance(source_uri, str) and (
+        source_uri.startswith("http://")
+        or source_uri.startswith("https://")
+        or source_uri.startswith("data:")
+    ):
+        return source_uri
+
+    return uri
+
+
+async def _durable_replicate_clip(
+    ctx: ToolContext,
+    *,
+    item_id: str,
+    tier: str,
+    seconds: int,
+    attempt: int,
+    system_prompt: Optional[str],
+    reference_image_uri: Optional[str],
+    audio_uri: Optional[str] = None,
+    stage: str,
+) -> Artifact:
+    if os.environ.get("ORCH_ENABLE_PAID_ADAPTERS", "").lower() not in {
+        "1",
+        "true",
+        "yes",
+    }:
+        raise RuntimeError("durable paid adapters require ORCH_ENABLE_PAID_ADAPTERS=true")
+    if ctx.effect_ledger is None:
+        raise RuntimeError("durable paid adapters require PostgresEffectLedger")
+
+    prompt_hash = _sha256(system_prompt)
+    reference_hash = _sha256(reference_image_uri)
+    base_request = {
+        "model": ctx.adapter.clip_model(tier),
+        "tier": tier,
+        "seconds": seconds,
+        "attempt": attempt,
+        "prompt_hash": prompt_hash,
+        "reference_hash": reference_hash,
+    }
+    base_request_hash = _sha256(json.dumps(base_request, sort_keys=True, separators=(",", ":")))
+    base_effect_key = f"video:{ctx.run_id}:{item_id}:{stage}:{attempt}:{base_request_hash}"
+
+    if getattr(ctx.adapter, "latentsync_required", False) and stage != "product_demo":
+        if not audio_uri:
+            raise VideoEffectError(
+                "latentsync_audio_missing",
+                retryable=False,
+                uncertain=False,
+                error_type="LatentSyncRequiredError",
+                effect_key=base_effect_key,
+            )
+        if not getattr(ctx.adapter, "latentsync_enabled", False):
+            raise VideoEffectError(
+                "latentsync_disabled",
+                retryable=False,
+                uncertain=False,
+                error_type="LatentSyncRequiredError",
+                effect_key=base_effect_key,
+            )
+
+    has_latentsync = bool(audio_uri and getattr(ctx.adapter, "latentsync_enabled", False))
+    stage_1_basename = f"base-clip-{attempt}" if has_latentsync else f"clip-{attempt}"
+    stage_1_kind = "base_clip" if has_latentsync else "clip"
+
+    async def _persist_base(art: Artifact) -> Artifact:
+        if ctx.storage is None and ctx.videos_root is None:
+            return art
+        from orchestrator.media_store import persist_artifact_from_url
+
+        return await persist_artifact_from_url(
+            art,
+            run_id=ctx.run_id,
+            item_id=item_id,
+            basename=stage_1_basename,
+            kind=stage_1_kind,
+            videos_root=ctx.videos_root,
+            storage=ctx.storage,
+            db=ctx.artifact_db,
+        )
+
+    base_artifact = await _durable_prediction_lifecycle(
+        ctx,
+        effect_key=base_effect_key,
+        provider="replicate_video_seconds",
+        units=seconds,
+        request=base_request,
+        submit_fn=lambda webhook_url: ctx.adapter.submit_clip_prediction(
+            item_id=item_id,
+            tier=tier,
+            seconds=seconds,
+            attempt=attempt,
+            system_prompt=system_prompt,
+            reference_image_uri=reference_image_uri,
+            webhook_url=webhook_url,
+        ),
+        artifact_fn=lambda pred: ctx.adapter.clip_artifact_from_prediction(
+            pred,
+            tier=tier,
+            seconds=seconds,
+            attempt=attempt,
+            reference_image_uri=reference_image_uri,
+        ),
+        persist_fn=_persist_base,
+    )
+
+    if has_latentsync:
+        input_video_uri = await _resolve_base_video_url_for_provider(base_artifact, ctx)
+        ls_model = str(getattr(ctx.adapter, "latentsync_model", "bytedance/latentsync"))
+        ls_resolution = str(getattr(ctx.adapter, "latentsync_resolution", "720p"))
+        ls_request = {
+            "model": ls_model,
+            "video_hash": _sha256(base_artifact.uri),
+            "audio_hash": _sha256(audio_uri),
+            "resolution": ls_resolution,
+            "seconds": seconds,
+            "attempt": attempt,
+        }
+        ls_request_hash = _sha256(json.dumps(ls_request, sort_keys=True, separators=(",", ":")))
+        ls_effect_key = f"latentsync:{ctx.run_id}:{item_id}:{stage}:{attempt}:{ls_request_hash}"
+
+        async def _persist_final(art: Artifact) -> Artifact:
+            if "base_clip_uri" not in art.meta:
+                meta = dict(art.meta)
+                meta["base_clip_uri"] = base_artifact.uri
+                art = art.model_copy(update={"meta": meta})
+            if ctx.storage is None and ctx.videos_root is None:
+                return art
+            from orchestrator.media_store import persist_artifact_from_url
+
+            return await persist_artifact_from_url(
+                art,
+                run_id=ctx.run_id,
+                item_id=item_id,
+                basename=f"clip-{attempt}",
+                kind="clip",
+                videos_root=ctx.videos_root,
+                storage=ctx.storage,
+                db=ctx.artifact_db,
+            )
+
+        final_artifact = await _durable_prediction_lifecycle(
+            ctx,
+            effect_key=ls_effect_key,
+            provider="replicate_video_seconds",
+            units=seconds,
+            request=ls_request,
+            submit_fn=lambda webhook_url: ctx.adapter.submit_latentsync_prediction(
+                video_uri=input_video_uri,
+                audio_uri=audio_uri,
+                resolution=ls_resolution,
+                webhook_url=webhook_url,
+            ),
+            artifact_fn=lambda pred: _build_latentsync_artifact(
+                ctx.adapter,
+                pred,
+                base_artifact=base_artifact,
+            ),
+            persist_fn=_persist_final,
+        )
+        if "base_clip_uri" not in final_artifact.meta:
+            final_meta = dict(final_artifact.meta)
+            final_meta["base_clip_uri"] = base_artifact.uri
+            final_artifact = final_artifact.model_copy(update={"meta": final_meta})
+        return final_artifact
+
+    return base_artifact
 
 
 def _compose_prompt(system_prompt: Optional[str], revision: Optional[str]) -> Optional[str]:
@@ -436,16 +662,33 @@ async def generate_clip_tool(
             attempt=attempt,
             system_prompt=prompt,
             reference_image_uri=reference_image_uri,
+            audio_uri=audio_uri,
             stage=stage,
         )
     else:
-        clip = await ctx.adapter.generate_clip(
-            item_id=item_id,
-            tier=tier,
-            seconds=seconds,
-            attempt=attempt,
-            system_prompt=prompt,
-            reference_image_uri=reference_image_uri,
-            audio_uri=audio_uri,
-        )
+        gen_fn = ctx.adapter.generate_clip
+        call_kwargs: dict[str, Any] = {
+            "item_id": item_id,
+            "tier": tier,
+            "seconds": seconds,
+            "attempt": attempt,
+            "system_prompt": prompt,
+            "reference_image_uri": reference_image_uri,
+            "audio_uri": audio_uri,
+        }
+        try:
+            sig = inspect.signature(gen_fn)
+            if "stage" in sig.parameters:
+                call_kwargs["stage"] = stage
+        except (ValueError, TypeError):
+            pass
+
+        try:
+            clip = await gen_fn(**call_kwargs)
+        except TypeError as exc:
+            if "stage" in call_kwargs and ("stage" in str(exc) or "unexpected keyword" in str(exc)):
+                call_kwargs.pop("stage", None)
+                clip = await gen_fn(**call_kwargs)
+            else:
+                raise
     return require_artifact(clip, tool_name="generate_clip_tool")

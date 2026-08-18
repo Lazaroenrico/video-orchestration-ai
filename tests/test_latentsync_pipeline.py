@@ -126,3 +126,209 @@ async def test_latentsync_mock_adapter_metadata():
         audio_uri="https://cdn.r2.com/audio.wav",
     )
     assert artifact.meta.get("latentsync_applied") is True
+
+
+async def test_generate_clip_with_prediction_client_chains_latentsync():
+    from types import SimpleNamespace
+
+    created: list[dict[str, Any]] = []
+
+    async def async_create(*, model, input, **params):
+        created.append({"model": model, "input": input, "params": params})
+        if model == "lightricks/ltx-2.3-fast":
+            return SimpleNamespace(id="pred-ltx-10", status="succeeded", output="https://cdn.replicate.com/ltx10.mp4", error=None)
+        if model == "bytedance/latentsync":
+            return SimpleNamespace(id="pred-ls-10", status="succeeded", output="https://cdn.replicate.com/ls10.mp4", error=None)
+        raise ValueError(f"unknown model {model}")
+
+    async def async_get(prediction_id):
+        if prediction_id == "pred-ltx-10":
+            return SimpleNamespace(id="pred-ltx-10", status="succeeded", output="https://cdn.replicate.com/ltx10.mp4", error=None)
+        if prediction_id == "pred-ls-10":
+            return SimpleNamespace(id="pred-ls-10", status="succeeded", output="https://cdn.replicate.com/ls10.mp4", error=None)
+        raise ValueError(f"unknown prediction {prediction_id}")
+
+    predictions = SimpleNamespace(
+        async_create=async_create,
+        async_get=async_get,
+        async_cancel=lambda _id: None,
+    )
+
+    adapter = ReplicateVideoAdapter(
+        tiers=TIERS,
+        prediction_client=SimpleNamespace(
+            models=SimpleNamespace(predictions=predictions),
+            predictions=predictions,
+        ),
+        clip={"resolution": "720p", "aspect_ratio": "9:16", "fps": 24},
+        latentsync=LATENTSYNC_CONFIG,
+        allow_mock_fallback=False,
+    )
+
+    artifact = await adapter.generate_clip(
+        item_id="item-talking-head",
+        tier="ltx",
+        seconds=8,
+        attempt=1,
+        system_prompt="Creator talks enthusiastically about the product.",
+        reference_image_uri="data:image/png;base64,creator_img",
+        audio_uri="https://cdn.r2.com/elevenlabs_narration.wav",
+    )
+
+    assert artifact.uri == "https://cdn.replicate.com/ls10.mp4"
+    assert artifact.meta["latentsync_applied"] is True
+    assert artifact.meta["latentsync_model"] == "bytedance/latentsync"
+    assert artifact.meta["prediction_id"] == "pred-ls-10"
+    assert len(created) == 2
+    assert created[0]["model"] == "lightricks/ltx-2.3-fast"
+    assert created[1]["model"] == "bytedance/latentsync"
+    assert created[1]["input"]["video"] == "https://cdn.replicate.com/ltx10.mp4"
+    assert created[1]["input"]["audio"] == "https://cdn.r2.com/elevenlabs_narration.wav"
+    assert artifact.meta["base_clip_uri"] == "https://cdn.replicate.com/ltx10.mp4"
+
+
+async def test_generate_clip_raises_when_latentsync_required_and_audio_missing():
+    async def fake_runner(ref: str, input: dict[str, Any]):
+        return "https://cdn.replicate.com/ltx_raw.mp4"
+
+    adapter = ReplicateVideoAdapter(
+        tiers=TIERS,
+        runner=fake_runner,
+        clip={"resolution": "720p", "aspect_ratio": "9:16", "fps": 24},
+        latentsync=LATENTSYNC_CONFIG,
+        allow_mock_fallback=False,
+    )
+
+    with pytest.raises(RuntimeError, match="LatentSync is required.*audio_uri"):
+        await adapter.generate_clip(
+            item_id="item-talking-head",
+            tier="ltx",
+            seconds=8,
+            attempt=1,
+            system_prompt="Creator talks enthusiastically about the product.",
+            reference_image_uri="data:image/png;base64,creator_img",
+            audio_uri=None,
+        )
+
+
+async def test_generate_clip_raises_when_latentsync_required_and_latentsync_disabled():
+    async def fake_runner(ref: str, input: dict[str, Any]):
+        return "https://cdn.replicate.com/ltx_raw.mp4"
+
+    disabled_config = dict(LATENTSYNC_CONFIG, enabled=False, required=True)
+    adapter = ReplicateVideoAdapter(
+        tiers=TIERS,
+        runner=fake_runner,
+        clip={"resolution": "720p", "aspect_ratio": "9:16", "fps": 24},
+        latentsync=disabled_config,
+        allow_mock_fallback=False,
+    )
+
+    with pytest.raises(RuntimeError, match="LatentSync is required.*disabled"):
+        await adapter.generate_clip(
+            item_id="item-talking-head",
+            tier="ltx",
+            seconds=8,
+            attempt=1,
+            system_prompt="Creator talks enthusiastically about the product.",
+            reference_image_uri="data:image/png;base64,creator_img",
+            audio_uri="https://cdn.r2.com/elevenlabs_narration.wav",
+        )
+
+
+async def test_mock_adapter_raises_when_latentsync_required_and_audio_missing():
+    adapter = MockAdapter(tiers=TIERS, latentsync={"required": True, "enabled": True})
+    with pytest.raises(RuntimeError, match="LatentSync is required.*audio_uri"):
+        await adapter.generate_clip(
+            item_id="item-mock-1",
+            tier="ltx",
+            seconds=8,
+            attempt=1,
+            system_prompt="Creator talks enthusiastically.",
+            reference_image_uri="data:image/png;base64,creator_img",
+            audio_uri=None,
+            stage="talking_head",
+        )
+
+
+async def test_generate_clip_product_demo_succeeds_without_audio_even_when_latentsync_required():
+    async def fake_runner(ref: str, input: dict[str, Any]):
+        return "https://cdn.replicate.com/demo.mp4"
+
+    adapter = ReplicateVideoAdapter(
+        tiers=TIERS,
+        runner=fake_runner,
+        clip={"resolution": "720p", "aspect_ratio": "9:16", "fps": 24},
+        latentsync=LATENTSYNC_CONFIG,
+        allow_mock_fallback=False,
+    )
+
+    # Product demo without audio should succeed and NOT raise
+    artifact = await adapter.generate_clip(
+        item_id="item-demo-1",
+        tier="ltx",
+        seconds=8,
+        attempt=1,
+        system_prompt="Show the product bottle.",
+        reference_image_uri="data:image/png;base64,product_img",
+        audio_uri=None,
+        stage="product_demo",
+    )
+    assert artifact.uri == "https://cdn.replicate.com/demo.mp4"
+    assert artifact.meta.get("latentsync_applied") is None
+
+    mock_adapter = MockAdapter(tiers=TIERS, latentsync=LATENTSYNC_CONFIG)
+    mock_artifact = await mock_adapter.generate_clip(
+        item_id="item-demo-2",
+        tier="ltx",
+        seconds=8,
+        attempt=1,
+        system_prompt="Show the product bottle.",
+        reference_image_uri="data:image/png;base64,product_img",
+        audio_uri=None,
+        stage="product_demo",
+    )
+    assert mock_artifact.kind == "clip"
+    assert mock_artifact.meta.get("latentsync_applied") is None
+
+
+async def test_latentsync_cost_is_included_in_clip_cost():
+    async def fake_runner(ref: str, input: dict[str, Any]):
+        if ref == "lightricks/ltx-2.3-fast":
+            return "https://cdn.replicate.com/ltx_raw.mp4"
+        return "https://cdn.replicate.com/latentsync_final.mp4"
+
+    adapter = ReplicateVideoAdapter(
+        tiers=TIERS,
+        runner=fake_runner,
+        clip={"resolution": "720p", "aspect_ratio": "9:16", "fps": 24},
+        latentsync=LATENTSYNC_CONFIG,
+        allow_mock_fallback=False,
+    )
+
+    artifact = await adapter.generate_clip(
+        item_id="item-cost-1",
+        tier="ltx",
+        seconds=8,
+        attempt=1,
+        system_prompt="Creator talks.",
+        reference_image_uri="data:image/png;base64,img",
+        audio_uri="https://cdn.r2.com/audio.wav",
+        stage="talking_head",
+    )
+    # LTX (0.01 * 8 = 0.08) + LatentSync (0.003 * 8 = 0.024) = 0.104
+    assert artifact.meta["cost_usd"] == 0.104
+    assert artifact.meta["latentsync_cost_usd"] == 0.024
+
+    mock_adapter = MockAdapter(tiers=TIERS, latentsync=LATENTSYNC_CONFIG)
+    mock_art = await mock_adapter.generate_clip(
+        item_id="item-cost-mock",
+        tier="ltx",
+        seconds=8,
+        attempt=1,
+        audio_uri="https://cdn.r2.com/audio.wav",
+        stage="talking_head",
+    )
+    assert mock_art.meta["cost_usd"] == 0.104
+    assert mock_art.meta["latentsync_cost_usd"] == 0.024
+

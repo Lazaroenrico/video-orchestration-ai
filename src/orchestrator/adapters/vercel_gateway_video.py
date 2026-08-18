@@ -52,6 +52,8 @@ class VercelGatewayVideoAdapter:
         system_prompt: Optional[str] = None,
         reference_image_uri: Optional[str] = None,
         audio_uri: Optional[str] = None,
+        stage: Optional[str] = None,
+        **kwargs: Any,
     ) -> Artifact:
         spec = self.tiers[tier]
         model = str(spec["model"])
