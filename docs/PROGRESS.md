@@ -30,11 +30,11 @@ novas entregas usam uma página própria em `docs/progress/changes/`.
 - [Centralização de deployments LangChain em LanguageModelFactory](progress/changes/2026-08-17-centralizar-deployments-langchain-factory.md) — factory centralizada com `init_chat_model`, paridade de credenciais/URLs/retries e delegação em `LanguageRuntime`.
 - [Classificação de aliases, adapters e integrações legadas](progress/changes/2026-08-17-classificacao-aliases-e-integracoes.md) — inventário de 19 itens classificados em `supported`, `compatibility` e `dead` com plano de rollback para subsidiar a issue #16.
 - [Caracterização de paridade do SDK ElevenLabs e decisão arquitetural](progress/changes/2026-08-17-caracterizacao-paridade-sdk-elevenlabs.md) — matriz de paridade executável e decisão HITL de manter REST artesanal seguro e sem dependências extras.
-- [Contratos de prompt dos agents LangChain](progress/changes/2026-08-14-langchain-agent-prompt-contracts.md) — separação trusted/untrusted, ToolStrategy terminal e prompts v3 idênticos nos três perfis.
 - [LatentSync obrigatório e storage do vídeo-base](progress/changes/2026-08-15-latentsync-required-e-base-clip-storage.md) — validação estrita de `latentsync.required` e persistência do vídeo base LTX no storage canônico.
 - [LatentSync durável, idempotente e reconciliável](progress/changes/2026-08-15-latentsync-duravel-idempotente.md) — 2 estágios (LTX + LatentSync) com reservas duráveis, reconciliação de WriteTimeout e cancelamento no provider.
 - [Proteção da geração de imagem paga com effects](progress/changes/2026-08-15-proteger-geracao-imagem-paga-effects.md) — idempotência, quota `openai_image_units`, kill switch obrigatório e classificação de falhas de transporte no `PostgresEffectLedger`.
 - [Persistência e validação do runtime contract dos runs](progress/changes/2026-08-15-runtime-contract-runs.md) — persistência de fingerprint canônico sem segredos, bloqueio de resume incompatível antes de chamadas pagas e preservação de consultas legacy.
+- [Isolamento do GatewayJudge no módulo de evaluation](progress/changes/2026-08-15-isolar-gatewayjudge-module-evaluation.md) — GatewayJudge e cassette tooling isolados em orchestrator.evaluation, JudgePort removido dos adapters de produção.
 
 ## Índice do histórico
 
