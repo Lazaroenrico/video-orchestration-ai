@@ -37,11 +37,159 @@ def serialize_agent_inputs(inputs: dict[str, Any]) -> str:
 DEFAULT_GATEWAY_BASE_URL = "https://ai-gateway.vercel.sh/v1"
 DEFAULT_MODEL = "anthropic/claude-opus-4.8"
 _AGENT_STAGES = {"concepts", "scripts", "creator_profiles"}
+_HOOK_STYLES = ["problem", "curiosity", "bold_claim", "emotional", "social_proof"]
+
+
+def _unit(*parts: Any) -> float:
+    """Hash determinístico dos inputs -> float uniforme em [0, 1)."""
+    key = "|".join(str(p) for p in parts)
+    digest = hashlib.sha256(key.encode()).hexdigest()
+    return int(digest[:12], 16) / float(1 << 48)
+
+
+def _mock_structured_submission(stage: str, inputs: dict[str, Any]) -> dict[str, Any]:
+    campaign = inputs.get("campaign")
+    campaign = campaign if isinstance(campaign, dict) else {}
+    if stage == "concepts":
+        count = int(inputs.get("n") or campaign.get("batch_size") or 1)
+        offer = str(campaign.get("offer") or inputs.get("offer") or "the offer")
+        audience = str(campaign.get("audience") or "the audience")
+        return {
+            "proposals": [
+                {
+                    "hook": f"{offer}: angle {index + 1} for {audience}",
+                    "angle": f"Deterministic test angle {index + 1}",
+                    "audience_problem": f"A relevant problem for {audience}",
+                    "product_mechanism": f"The supplied mechanism for {offer}",
+                    "evidence_basis": "cold_test",
+                    "format": "direct-to-camera",
+                    "hook_style": _HOOK_STYLES[index % len(_HOOK_STYLES)],
+                }
+                for index in range(count)
+            ]
+        }
+    if stage == "scripts":
+        concept = inputs.get("concept")
+        concept = concept if isinstance(concept, dict) else {}
+        hook = str(concept.get("hook") or "I changed one part of my routine.")
+        beats = [
+            {"section": "hook", "text": hook, "seconds": 3},
+            {
+                "section": "body",
+                "text": (
+                    "Here is how the approved product fits naturally into a simple routine "
+                    "while addressing the audience problem with a clear, honest, practical "
+                    "and easy-to-follow demonstration for everyday use."
+                ),
+                "seconds": 8,
+            },
+            {"section": "cta", "text": "See the approved offer.", "seconds": 3},
+        ]
+        return {
+            "draft": {
+                "spoken_beats": beats,
+                "visual_beats": [
+                    "Creator addresses camera",
+                    "Approved product demonstration",
+                ],
+                "on_screen_text": [hook[:80]],
+                "call_to_action": "See the approved offer.",
+                "estimated_duration": sum(beat["seconds"] for beat in beats),
+            }
+        }
+    if stage == "creator_profiles":
+        concept_ids = [str(value) for value in inputs.get("concept_ids") or []]
+        return {
+            "creators": [
+                {
+                    "archetype": "Warm routine guide",
+                    "visual_brief": "Adult creator in a bright, realistic home setting.",
+                    "voice_brief": "Warm, clear, conversational delivery.",
+                    "performance_style": "Calm, practical, and credible.",
+                    "exclusions": ["medical authority", "guaranteed outcomes"],
+                },
+                {
+                    "archetype": "Direct product tester",
+                    "visual_brief": "Adult creator at a clean vanity with the real product.",
+                    "voice_brief": "Direct, energetic, natural delivery.",
+                    "performance_style": "Concise demonstration with visible product handling.",
+                    "exclusions": ["medical authority", "guaranteed outcomes"],
+                },
+            ],
+            "assignments": [
+                {"concept_id": concept_id, "creator_index": index % 2}
+                for index, concept_id in enumerate(concept_ids)
+            ],
+        }
+    raise ValueError(f"unsupported terminal mock stage: {stage}")
+
+
+def _mock_direct_generate_concepts(
+    *,
+    offer: str,
+    n: int,
+    seed: str,
+    bias: list[str] | None = None,
+    revision: str | None = None,
+    persona: str | None = None,
+) -> list[dict[str, Any]]:
+    bias_styles = [b for b in (bias or []) if b in _HOOK_STYLES]
+    bias_strength = 0.6
+    concepts: list[dict[str, Any]] = []
+    for i in range(n):
+        persona_part = (f"persona:{persona}",) if persona else ()
+        if revision:
+            style_parts: tuple[Any, ...] = (seed, offer, *persona_part, f"rev:{revision}", i)
+            tag_key = "|".join(str(part) for part in style_parts)
+        else:
+            style_parts = (seed, offer, *persona_part, i)
+            tag_key = "|".join(str(part) for part in style_parts)
+        style = _HOOK_STYLES[int(_unit(*style_parts) * len(_HOOK_STYLES))]
+        if bias_styles and _unit("bias", seed, offer, i) < bias_strength:
+            style = bias_styles[0]
+        tag = hashlib.sha256(tag_key.encode()).hexdigest()[:8]
+        concepts.append(
+            {
+                "id": f"concept-{tag}",
+                "offer": offer,
+                "hook": f"hook[{style}]-{tag}",
+                "angle": style,
+                "hook_style": style,
+                "format": ["talking_head", "demo", "reaction"][i % 3],
+            }
+        )
+    return concepts
+
+
+def _mock_direct_write_script(
+    *,
+    concept: dict[str, Any],
+    creator_ref: str,
+    platform: str,
+    revision: str | None = None,
+    persona: str | None = None,
+) -> str:
+    hook = str(concept.get("hook") or "hook")
+    pacing = "fast" if platform.lower() == "tiktok" else "medium"
+    script = (
+        f"HOOK: {hook} Se você não conhece precisa ver isso.\n"
+        f"BODY: ({platform} / pacing={pacing}) creator={creator_ref} fala sobre "
+        f"{concept.get('offer', 'o produto')} com resultados reais comprovados no dia a dia.\n"
+        f"CTA: confere o link e garante o seu hoje mesmo."
+    )
+    if persona:
+        tag = hashlib.sha256(persona.encode()).hexdigest()[:8]
+        script += f"\nPERSONA_CONTEXT[{tag}]: {persona}"
+    if revision:
+        tag = hashlib.sha256(f"{hook}|{revision}".encode()).hexdigest()[:8]
+        script += f"\nREVISED[{tag}]: {revision}"
+    return script
 
 
 class ConceptAgentOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     proposals: list[ConceptSubmission]
+
 
 
 class ScriptAgentOutput(BaseModel):
@@ -418,17 +566,7 @@ class LanguageRuntime:
     @staticmethod
     def _mock_output(stage: str, inputs: dict[str, Any]) -> BaseModel:
         # Mock agents are still schema-first, but do not invoke a provider or incur cost.
-        from orchestrator.adapters.mock import _terminal_submission
-
-        payload = _terminal_submission(stage, inputs)
-        if stage == "scripts":
-            beats = payload["draft"]["spoken_beats"]
-            beats[1]["text"] = (
-                "Here is how the approved product fits naturally into a simple routine "
-                "while addressing the audience problem with a clear, honest, practical "
-                "and easy-to-follow demonstration for everyday use."
-            )
-            payload["draft"]["estimated_duration"] = sum(beat["seconds"] for beat in beats)
+        payload = _mock_structured_submission(stage, inputs)
         return agent_output_model(stage).model_validate(payload)
 
     async def generate_structured(
@@ -460,20 +598,59 @@ class LanguageRuntime:
         add_trace_metadata(agent_backend="langchain", stage=stage, provider=self.provider)
         return structured
 
-    async def generate_concepts(self, **kwargs: Any) -> list[dict[str, Any]]:
+    async def generate_concepts(
+        self,
+        *,
+        offer: str = "the offer",
+        n: int = 1,
+        seed: str = "seed",
+        bias: list[str] | None = None,
+        revision: str | None = None,
+        persona: str | None = None,
+        **kwargs: Any,
+    ) -> list[dict[str, Any]]:
         if self.provider == "mock":
-            payload = self._mock_output("concepts", kwargs)
-            return [proposal.model_dump(mode="json") for proposal in payload.proposals]
+            resolved_offer = str(kwargs.get("offer") or offer)
+            resolved_n = int(kwargs.get("n") or n)
+            resolved_seed = str(kwargs.get("seed") or seed)
+            resolved_bias = kwargs.get("bias", bias)
+            resolved_revision = kwargs.get("revision", revision)
+            resolved_persona = kwargs.get("persona", persona)
+            return _mock_direct_generate_concepts(
+                offer=resolved_offer,
+                n=resolved_n,
+                seed=resolved_seed,
+                bias=resolved_bias,
+                revision=resolved_revision,
+                persona=resolved_persona,
+            )
         raise RuntimeError("direct concept generation is only available for the mock runtime")
 
-    async def write_script(self, **kwargs: Any) -> str:
+    async def write_script(
+        self,
+        *,
+        concept: dict[str, Any] | None = None,
+        creator_ref: str = "creator",
+        platform: str = "tiktok",
+        revision: str | None = None,
+        persona: str | None = None,
+        **kwargs: Any,
+    ) -> str:
         if self.provider == "mock":
-            payload = self._mock_output("scripts", kwargs)
-            return "\n".join(
-                f"{beat.section.upper()}: {beat.text}"
-                for beat in payload.draft.spoken_beats
+            resolved_concept = kwargs.get("concept") or concept or {}
+            resolved_creator_ref = str(kwargs.get("creator_ref") or creator_ref)
+            resolved_platform = str(kwargs.get("platform") or platform)
+            resolved_revision = kwargs.get("revision", revision)
+            resolved_persona = kwargs.get("persona", persona)
+            return _mock_direct_write_script(
+                concept=resolved_concept,
+                creator_ref=resolved_creator_ref,
+                platform=resolved_platform,
+                revision=resolved_revision,
+                persona=resolved_persona,
             )
         raise RuntimeError("direct script generation is only available for the mock runtime")
+
 
 
 __all__ = [

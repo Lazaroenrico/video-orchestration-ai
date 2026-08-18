@@ -49,11 +49,9 @@ async def generate_concepts_tool(
         }
         if persona is not None:
             kwargs["persona"] = persona
-        generated = (
-            await ctx.language_runtime.generate_concepts(**kwargs)
-            if ctx.language_runtime is not None
-            else await ctx.adapter.generate_concepts(**kwargs)
-        )
+        if ctx.language_runtime is None:
+            raise RuntimeError("generate_concepts requires LanguageRuntime in ToolContext")
+        generated = await ctx.language_runtime.generate_concepts(**kwargs)
         return require_dict_list(generated, tool_name="generate_concepts_tool")
 
     campaign_input = CampaignInput.model_validate(
@@ -71,7 +69,7 @@ async def generate_concepts_tool(
     if proposals is None and agent_submission:
         raise ValueError("agent must submit proposals")
     if proposals is None:
-        kwargs: dict[str, Any] = {
+        kwargs = {
             "offer": offer,
             "n": n,
             "seed": seed,
@@ -80,12 +78,11 @@ async def generate_concepts_tool(
         }
         if persona is not None:
             kwargs["persona"] = persona
-        generated = (
-            await ctx.language_runtime.generate_concepts(**kwargs)
-            if ctx.language_runtime is not None
-            else await ctx.adapter.generate_concepts(**kwargs)
-        )
+        if ctx.language_runtime is None:
+            raise RuntimeError("generate_concepts requires LanguageRuntime in ToolContext")
+        generated = await ctx.language_runtime.generate_concepts(**kwargs)
         generated = require_dict_list(generated, tool_name="generate_concepts_tool")
+
         submissions = [
             ConceptSubmission(
                 hook=str(concept.get("hook") or "Untitled hook"),

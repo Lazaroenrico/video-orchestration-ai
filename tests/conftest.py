@@ -89,12 +89,16 @@ def adapter(pipeline_cfg):
 
 @pytest.fixture
 def run_config(adapter, pipeline_cfg):
+    from orchestrator.language_runtime import LanguageRuntime
+
     return {
         "configurable": {
             "adapter": adapter,
+            "language_runtime": LanguageRuntime.from_provider("mock", pipeline_cfg),
             "pipeline": pipeline_cfg,
             "run": {"platform": "tiktok"},
         },
         "max_concurrency": pipeline_cfg["batch"]["max_concurrency"],
         "recursion_limit": 50,
     }
+

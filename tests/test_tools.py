@@ -10,10 +10,16 @@ from orchestrator.adapters.base import RenderedMedia, VoiceProfile
 from orchestrator.graph.state import Artifact, QCResult, new_item
 
 
-def _config(adapter: Any, *, pipeline: dict[str, Any] | None = None) -> dict[str, Any]:
+def _config(
+    adapter: Any,
+    *,
+    pipeline: dict[str, Any] | None = None,
+    language_runtime: Any | None = None,
+) -> dict[str, Any]:
     return {
         "configurable": {
             "adapter": adapter,
+            "language_runtime": language_runtime,
             "pipeline": pipeline or {"clip": {"duration_seconds": 8}},
             "run": {"platform": "reels"},
             "thread_id": "run-tools",
@@ -21,7 +27,7 @@ def _config(adapter: Any, *, pipeline: dict[str, Any] | None = None) -> dict[str
     }
 
 
-class _SpyAdapter:
+class _SpyLanguageRuntime:
     def __init__(self, output: Any) -> None:
         self.output = output
         self.calls: list[tuple[str, dict[str, Any]]] = []
@@ -33,6 +39,12 @@ class _SpyAdapter:
     async def write_script(self, **kwargs: Any) -> Any:
         self.calls.append(("write_script", kwargs))
         return self.output
+
+
+class _SpyAdapter:
+    def __init__(self, output: Any) -> None:
+        self.output = output
+        self.calls: list[tuple[str, dict[str, Any]]] = []
 
     async def build_creator(self, **kwargs: Any) -> Any:
         self.calls.append(("build_creator", kwargs))
@@ -73,15 +85,15 @@ async def test_generate_concepts_tool_delegates_and_validates_output():
     from orchestrator.tools.base import tool_context_from_config
     from orchestrator.tools.concepts import generate_concepts_tool
 
-    adapter = _SpyAdapter([{"id": "concept-1", "hook": "h"}])
-    ctx = tool_context_from_config(_config(adapter))
+    runtime = _SpyLanguageRuntime([{"id": "concept-1", "hook": "h"}])
+    ctx = tool_context_from_config(_config(object(), language_runtime=runtime))
 
     result = await generate_concepts_tool(
         ctx, offer="serum", n=1, seed="run-tools", bias=["problem"]
     )
 
     assert result == [{"id": "concept-1", "hook": "h"}]
-    assert adapter.calls == [
+    assert runtime.calls == [
         (
             "generate_concepts",
             {
@@ -99,8 +111,8 @@ async def test_write_script_tool_delegates_and_requires_non_empty_script():
     from orchestrator.tools.base import tool_context_from_config
     from orchestrator.tools.scripts import write_script_tool
 
-    adapter = _SpyAdapter("HOOK: h\nCTA: buy")
-    ctx = tool_context_from_config(_config(adapter))
+    runtime = _SpyLanguageRuntime("HOOK: h\nCTA: buy")
+    ctx = tool_context_from_config(_config(object(), language_runtime=runtime))
     concept = {"id": "concept-1", "hook": "h"}
 
     result = await write_script_tool(
@@ -108,7 +120,7 @@ async def test_write_script_tool_delegates_and_requires_non_empty_script():
     )
 
     assert result == "HOOK: h\nCTA: buy"
-    assert adapter.calls == [
+    assert runtime.calls == [
         (
             "write_script",
             {
@@ -119,6 +131,7 @@ async def test_write_script_tool_delegates_and_requires_non_empty_script():
             },
         )
     ]
+
 
 
 async def test_build_creator_tool_delegates_with_voice_profile():
@@ -398,7 +411,13 @@ async def test_tools_raise_clear_error_for_invalid_adapter_output(
     from orchestrator.tools.base import ToolOutputError, tool_context_from_config
 
     fn = getattr(importlib.import_module(tool_path), function_name)
-    ctx = tool_context_from_config(_config(_SpyAdapter(adapter_output)))
+    ctx = tool_context_from_config(
+        _config(
+            _SpyAdapter(adapter_output),
+            language_runtime=_SpyLanguageRuntime(adapter_output),
+        )
+    )
+
 
     with pytest.raises(ToolOutputError, match=function_name):
         await fn(ctx, **kwargs)

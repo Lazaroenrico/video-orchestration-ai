@@ -403,3 +403,105 @@ def test_language_model_factory_enforces_trace_redaction(monkeypatch):
     LanguageModelFactory("anthropic").create_model()
     assert len(captured) == 1
 
+
+
+@pytest.mark.asyncio
+async def test_mock_language_runtime_generate_concepts_determinism_and_spread():
+    from orchestrator.language_runtime import LanguageRuntime
+
+    runtime = LanguageRuntime.from_provider("mock", {})
+    a = await runtime.generate_concepts(offer="serum X", n=10, seed="wk1")
+    b = await runtime.generate_concepts(offer="serum X", n=10, seed="wk1")
+
+    assert len(a) == 10
+    assert a == b
+    assert len({c["hook_style"] for c in a}) > 1
+
+
+@pytest.mark.asyncio
+async def test_mock_language_runtime_generate_concepts_seed_changes_output():
+    from orchestrator.language_runtime import LanguageRuntime
+
+    runtime = LanguageRuntime.from_provider("mock", {})
+    a = await runtime.generate_concepts(offer="serum X", n=5, seed="wk1")
+    b = await runtime.generate_concepts(offer="serum X", n=5, seed="wk2")
+
+    assert a != b
+
+
+@pytest.mark.asyncio
+async def test_mock_language_runtime_write_script_has_hook_and_cta():
+    from orchestrator.language_runtime import LanguageRuntime
+
+    runtime = LanguageRuntime.from_provider("mock", {})
+    concept = {"id": "concept-1", "hook": "você está fazendo errado", "angle": "problema", "hook_style": "problem", "offer": "o serum"}
+    script = await runtime.write_script(concept=concept, creator_ref="creator-1", platform="tiktok")
+
+    assert isinstance(script, str)
+    assert "HOOK" in script.upper()
+    assert "CTA" in script.upper()
+    assert "tiktok" in script.lower()
+
+
+@pytest.mark.asyncio
+async def test_mock_language_runtime_generate_structured_all_stages():
+    from orchestrator.language_runtime import (
+        ConceptAgentOutput,
+        CreatorProfilesAgentOutput,
+        LanguageRuntime,
+        ScriptAgentOutput,
+    )
+
+    runtime = LanguageRuntime.from_provider("mock", {})
+
+    concepts_out = await runtime.generate_structured(
+        stage="concepts",
+        inputs={"offer": "Serum Y", "n": 3, "campaign": {"offer": "Serum Y", "batch_size": 3}},
+    )
+    assert isinstance(concepts_out, ConceptAgentOutput)
+    assert len(concepts_out.proposals) == 3
+
+    script_out = await runtime.generate_structured(
+        stage="scripts",
+        inputs={"concept": {"id": "c-1", "hook": "Look here", "offer": "Serum Y"}},
+    )
+    assert isinstance(script_out, ScriptAgentOutput)
+    assert len(script_out.draft.spoken_beats) >= 2
+    assert script_out.draft.estimated_duration >= 14
+
+    creators_out = await runtime.generate_structured(
+        stage="creator_profiles",
+        inputs={"concept_ids": ["c-1", "c-2"]},
+    )
+    assert isinstance(creators_out, CreatorProfilesAgentOutput)
+    assert len(creators_out.creators) == 2
+    assert len(creators_out.assignments) == 2
+
+
+@pytest.mark.asyncio
+async def test_mock_language_runtime_unsupported_stage_raises_value_error():
+    from orchestrator.language_runtime import _mock_structured_submission
+
+    with pytest.raises(ValueError, match="unsupported terminal mock stage"):
+        _mock_structured_submission("unknown_stage", {})
+
+
+@pytest.mark.asyncio
+async def test_non_mock_language_runtime_direct_methods_raise_runtime_error(monkeypatch):
+    from orchestrator.language_runtime import LanguageRuntime
+
+    monkeypatch.setenv("AI_GATEWAY_TOKEN", "mock-token")
+    runtime = LanguageRuntime.from_provider(
+        "vercel_gateway_llm",
+        {"pipeline": {"llm_model": "google/gemini-2.5-flash"}},
+    )
+
+    with pytest.raises(RuntimeError, match="direct concept generation is only available for the mock runtime"):
+        await runtime.generate_concepts(offer="test")
+
+    with pytest.raises(RuntimeError, match="direct script generation is only available for the mock runtime"):
+        await runtime.write_script(concept={"id": "c-1"})
+
+
+
+
