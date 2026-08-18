@@ -14,6 +14,7 @@ concurrency:
 
 jobs:
   backup-and-restore:
+    if: ${{ secrets.STAGING_MIGRATION_DATABASE_URL != '' }}
     runs-on: ubuntu-latest
     services:
       restore:
@@ -67,6 +68,7 @@ jobs:
             --endpoint-url "$R2_ENDPOINT_URL"
 
   inventory-retention-and-alerts:
+    if: ${{ secrets.STAGING_DATABASE_URL != '' && secrets.R2_ACCESS_KEY_ID != '' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
