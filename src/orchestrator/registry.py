@@ -104,7 +104,7 @@ class CompositeAdapter:
     # chama usa ``getattr(adapter, ..., None)`` e cai no fallback quando ausente
     # (ex.: MockAdapter) — por isso delegamos via __getattr__ em vez de métodos
     # fixos, que fariam o fallback nunca disparar.
-    _OPTIONAL_CREATOR_ATTRS = frozenset({"reroll_creator_voice", "voice"})
+    _OPTIONAL_CREATOR_ATTRS = frozenset({"reroll_creator_voice", "voice", "image"})
     _OPTIONAL_VIDEO_ATTRS = frozenset(
         {
             "clip_model",

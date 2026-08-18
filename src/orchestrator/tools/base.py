@@ -49,6 +49,27 @@ def direct_elevenlabs_voice_enabled(ctx: ToolContext) -> bool:
     )
 
 
+def is_paid_creator_adapter(ctx: ToolContext) -> bool:
+    adapter = ctx.adapter
+    if adapter is None:
+        return False
+    if type(adapter).__name__ in ("MockAdapter", "MockCreatorAdapter") or getattr(adapter, "is_mock", False):
+        return False
+    if hasattr(adapter, "_by_role"):
+        creator_adapter = adapter._by_role.get("creator")
+        if (
+            creator_adapter is None
+            or type(creator_adapter).__name__ in ("MockAdapter", "MockCreatorAdapter")
+            or getattr(creator_adapter, "is_mock", False)
+        ):
+            return False
+        return True
+    return True
+
+
+direct_creator_image_enabled = is_paid_creator_adapter
+
+
 def _definitely_not_billed(exc: BaseException) -> bool:
     if isinstance(
         exc,
