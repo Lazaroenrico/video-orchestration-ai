@@ -232,3 +232,123 @@ async def test_native_agent_keeps_base_model_and_binds_serial_structured_output(
         call.get("parallel_tool_calls") is False
         for call in FakeStructuredModel.bind_calls
     )
+
+
+def test_language_model_factory_resolves_mock_deployment():
+    from orchestrator.language_runtime import LanguageModelFactory, MockChatModel
+
+    factory = LanguageModelFactory("mock")
+    model = factory.create_model()
+    assert isinstance(model, MockChatModel)
+    assert model.model == "mock"
+    assert factory.resolve_model_name() == "mock"
+    assert factory.resolve_model_name("custom-mock") == "custom-mock"
+
+
+def test_language_model_factory_rejects_arbitrary_or_unknown_provider():
+    from orchestrator.language_runtime import LanguageModelFactory
+
+    with pytest.raises(KeyError, match="desconhecido"):
+        LanguageModelFactory("untrusted_provider").create_model()
+
+    with pytest.raises(KeyError, match="desconhecido"):
+        LanguageModelFactory.resolve_model_name("arbitrary_user_provider")
+
+    with pytest.raises(KeyError, match="desconhecido"):
+        LanguageModelFactory.create_model("attacker_supplied_provider")
+
+
+def test_language_model_factory_auth_precedence_and_missing_credentials(monkeypatch):
+    from orchestrator.language_runtime import LanguageModelFactory
+
+    # vercel_gateway_llm without keys
+    monkeypatch.delenv("AI_GATEWAY_API_KEY", raising=False)
+    monkeypatch.delenv("VERCEL_OIDC_TOKEN", raising=False)
+    with pytest.raises(RuntimeError, match="AI_GATEWAY_API_KEY or VERCEL_OIDC_TOKEN"):
+        LanguageModelFactory("vercel_gateway_llm").create_model()
+
+    # anthropic without keys
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    with pytest.raises(RuntimeError, match="ANTHROPIC_API_KEY"):
+        LanguageModelFactory("anthropic").create_model()
+
+    # anthropic_sdk_gateway without keys
+    with pytest.raises(RuntimeError, match="AI_GATEWAY_API_KEY or VERCEL_OIDC_TOKEN"):
+        LanguageModelFactory("anthropic_sdk_gateway").create_model()
+
+
+def test_language_model_factory_init_chat_model_deployments(monkeypatch):
+    from orchestrator.language_runtime import LanguageModelFactory
+
+    captured_inits: list[dict[str, object]] = []
+
+    def fake_init_chat_model(model: str, **kwargs: object):
+        captured_inits.append({"model": model, **kwargs})
+        return object()
+
+    monkeypatch.setattr("langchain.chat_models.init_chat_model", fake_init_chat_model)
+
+    # 1. vercel_gateway_llm with VERCEL_OIDC_TOKEN
+    monkeypatch.delenv("AI_GATEWAY_API_KEY", raising=False)
+    monkeypatch.setenv("VERCEL_OIDC_TOKEN", "oidc-token-123")
+    monkeypatch.setenv("AI_GATEWAY_BASE_URL", "https://gateway.internal")
+    LanguageModelFactory("vercel_gateway_llm", {"llm_model": "openai/gpt-5"}).create_model()
+
+    assert captured_inits[-1] == {
+        "model": "openai/gpt-5",
+        "model_provider": "openai",
+        "api_key": "oidc-token-123",
+        "base_url": "https://gateway.internal/v1",
+        "timeout": 120,
+        "max_retries": 3,
+    }
+
+    # 2. AI_GATEWAY_API_KEY takes precedence over VERCEL_OIDC_TOKEN
+    monkeypatch.setenv("AI_GATEWAY_API_KEY", "primary-api-key")
+    LanguageModelFactory("vercel_gateway_llm").create_model("custom/model-override")
+    assert captured_inits[-1]["api_key"] == "primary-api-key"
+    assert captured_inits[-1]["model"] == "custom/model-override"
+
+    # 3. anthropic direct
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-secret")
+    LanguageModelFactory("anthropic").create_model()
+    assert captured_inits[-1] == {
+        "model": "claude-opus-4-8",
+        "model_provider": "anthropic",
+        "api_key": "anthropic-secret",
+        "timeout": 120,
+        "max_retries": 3,
+    }
+
+    # 4. anthropic_sdk_gateway strips /v1
+    monkeypatch.setenv("AI_GATEWAY_BASE_URL", "https://ai-gateway.vercel.sh/v1")
+    LanguageModelFactory("anthropic_sdk_gateway").create_model()
+    assert captured_inits[-1] == {
+        "model": "anthropic/claude-opus-4.8",
+        "model_provider": "anthropic",
+        "api_key": "primary-api-key",
+        "base_url": "https://ai-gateway.vercel.sh",
+        "timeout": 120,
+        "max_retries": 4,
+    }
+
+
+def test_language_model_factory_enforces_trace_redaction(monkeypatch):
+    from orchestrator.language_runtime import LanguageModelFactory
+
+    monkeypatch.setenv("LANGSMITH_TRACING", "true")
+    monkeypatch.setenv("LANGSMITH_HIDE_INPUTS", "false")
+    monkeypatch.setenv("LANGSMITH_HIDE_OUTPUTS", "false")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "secret")
+
+    with pytest.raises(RuntimeError, match="LANGSMITH_HIDE_INPUTS=true and LANGSMITH_HIDE_OUTPUTS=true"):
+        LanguageModelFactory("anthropic").create_model()
+
+    # With redaction properly enabled, it succeeds
+    monkeypatch.setenv("LANGSMITH_HIDE_INPUTS", "true")
+    monkeypatch.setenv("LANGSMITH_HIDE_OUTPUTS", "true")
+    captured = []
+    monkeypatch.setattr("langchain.chat_models.init_chat_model", lambda *a, **kw: captured.append(kw) or object())
+    LanguageModelFactory("anthropic").create_model()
+    assert len(captured) == 1
+
