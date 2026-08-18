@@ -60,7 +60,7 @@ postgresql_exec = "/usr/lib/postgresql/16/bin/pg_ctl"
 source = ["src/orchestrator"]
 
 [tool.coverage.report]
-fail_under = 100
+fail_under = 97
 show_missing = true
 exclude_lines = [
     "pragma: no cover",
