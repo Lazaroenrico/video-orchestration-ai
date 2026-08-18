@@ -822,3 +822,56 @@ As partes aplicáveis de D16–D18, D29, D31, D32 e D34 ficam substituídas por 
 D33 já foi substituída por D38. D7, D8, Judge, `judge.yaml`, cassettes, banco,
 REST/SSE e adapters de mídia permanecem preservados. Detalhes e matriz completa:
 [`ADR-D46`](ADR-D46-langchain-native-language-runtime.md).
+
+## 2026-08-15
+
+### D47 — Isolamento do GatewayJudge no módulo `orchestrator.evaluation`
+
+- **Contexto:** `GatewayJudge` é uma ferramenta de avaliação determinística (LLM-as-judge)
+  via cassette / live gateway e não um provider/adapter de produção da pipeline em runtime.
+  Sua permanência dentro de `orchestrator.adapters` e a declaração de `JudgePort` / `judge: gateway`
+  em `providers.yaml` geravam acoplamento conceitual indevido com o runtime de produção.
+- **Decisão:** Mover todo o ownership de `GatewayJudge`, `Cassette`, `CassetteMiss`,
+  `JudgeVerdict`, evaluators e helpers para o novo módulo `src/orchestrator/evaluation/`
+  (`orchestrator.evaluation.judge`). Remover `JudgePort` de `src/orchestrator/adapters/base.py`,
+  remover `JudgeVerdict` de `src/orchestrator/graph/state.py`, remover a chave `judge: gateway`
+  de `config*/providers.yaml` e remover a validação de `load_judge` de `readyz` no servidor web.
+- **Consequência:** A suíte de testes de avaliação (`test_judge_eval.py` e `test_scope_eval.py`)
+  continua determinística offline via cassettes (`tests/cassettes/`) e com modo live opt-in
+  (`--live`), sem risco de regravação acidental de cassettes. Adapters de produção e o runtime
+  de API/servidor não mantêm dependências ou validações de judge.
+
+### D48 — Proteção da geração de imagem paga com PostgresEffectLedger
+
+- **Contexto:** a chamada `build_creator_tool` invocava diretamente o adapter sem passar
+  por reserva de quota ou ledger de efeitos. Em ambientes duráveis com adapter pago
+  (OpenAI Image / GPT Image 2 via Vercel AI Gateway), falhas parciais, timeouts ou retries
+  arriscavam dupla cobrança e ausência de rastreabilidade de quota. Além disso, gravar o
+  resultado antes da persistência canônica no R2/disco expunha o ledger a URLs efêmeras
+  (expiração em 1h) e base64 volumoso em `external_effects.result`.
+- **Decisão e proteção:** chamadas pagas de criação de creator são envelopadas em
+  `execute_paid_effect` com o bucket `openai_image_units`, consumindo 1 unidade por
+  imagem gerada. A chave de efeito canônica é
+  `creator-image:{run_id}:{creator_id}:{model_slug}:{prompt_hash}`, onde `creator_id = f"creator-{index}"`,
+  `model_slug = model.replace("/", "_").replace(":", "_").replace(".", "_")` e
+  `prompt_hash` deriva do `system_prompt` e do preset do `voice_profile`.
+- **Persistência canônica protegida e validação estrita:** a persistência dos bytes de imagem e metadados
+  (`media_store.persist_creator_media`) é executada dentro da operação protegida por
+  `execute_paid_effect` em `build_creator_tool`. Uma validação estrita pós-persistência verifica se
+  `image_source_uri` foi populada e se `upscaled_base` não é mais uma URI baixável/efêmera. Caso o storage
+  falhe silenciosamente (`put_from_url` retornando `None`), `build_creator_tool` levanta `RuntimeError`,
+  impedindo que `execute_paid_effect` execute `mark_succeeded`. Antes de retornar para `execute_paid_effect`,
+  o dict é sanitizado para que o resultado gravado no ledger contenha apenas ponteiros canônicos (`upscaled_base`)
+  e metadados leves (`id`, `angles`, `voice_id`, `voice_ref`, `voice_preview_uri`, `voice_profile`, etc.),
+  sem carregar URLs efêmeras brutas ou payloads de data URI base64 no banco de dados (ADR-D30 e D45).
+  Falhas de upload ou persistência ocorrem antes de `mark_succeeded`, impedindo estado `succeeded` corrompido.
+- **Idempotência e falhas:** replay de efeito com status `succeeded` retorna o resultado
+  canônico existente sem chamar a API externa. Falha pré-envio comprovada (`ConnectTimeout`, etc.)
+  marca o efeito como `failed` e libera a quota (`release_quota=True`). Timeouts pós-envio,
+  erros inesperados ou falhas de persistência marcam o efeito como `uncertain`. Replay de efeito
+  em estado `failed` ou `reserved` sem conclusão (status pré-existente com `created=False`) é tratado como
+  ambíguo, transita para `uncertain` e levanta `RuntimeError`.
+- **Compatibilidade e ambiente:** `MockAdapter` continua executando diretamente sem ledger
+  nem quota. O ambiente de desenvolvimento (`DEFAULT_DEV_QUOTAS` e `./scripts/dev-local image-quota`)
+  ganha suporte nativo ao bucket `openai_image_units`. Execuções duráveis exigem opt-in
+  explícito via `ORCH_ENABLE_PAID_ADAPTERS=true` e `PostgresEffectLedger`.

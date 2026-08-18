@@ -173,9 +173,10 @@ orchestrator storage migrate-run <run_id>
 
 ---
 
-## Testes (TDD Estrito)
+## Testes e Avaliação (TDD Estrito)
 
 A suíte de testes garante 100% de integridade funcional. É uma regra do projeto **nunca afrouxar asserções** para obter testes verdes.
+Avaliações determinísticas de LLM-as-judge (QC e aderência ao escopo) pertencem ao módulo `src/orchestrator/evaluation/` (`GatewayJudge`, `Cassette` e evaluators) e operam offline por padrão via cassettes gravados.
 
 ```bash
 # Executar a suíte de testes backend via rtk proxy

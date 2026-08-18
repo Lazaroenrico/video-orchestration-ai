@@ -30,35 +30,6 @@ class QCResult(BaseModel):
     reasons: list[str] = Field(default_factory=list)
 
 
-class JudgeVerdict(BaseModel):
-    """Veredito do LLM Judge (via API Gateway)."""
-
-    score: float
-    verdict: str
-    passed: bool
-    raw: dict[str, Any] = Field(default_factory=dict)
-
-    @classmethod
-    def from_response(
-        cls,
-        score: float,
-        verdict: Optional[str],
-        threshold: float,
-        raw: Optional[dict[str, Any]] = None,
-    ) -> "JudgeVerdict":
-        """Constrói o veredito a partir da resposta do gateway.
-
-        Se o gateway devolve um ``verdict`` explícito ("pass"/"fail"), ele manda;
-        caso contrário deriva-se de ``score >= threshold``.
-        """
-        if verdict is not None:
-            passed = verdict.strip().lower() in {"pass", "passed", "ok", "true", "1"}
-        else:
-            passed = score >= threshold
-            verdict = "pass" if passed else "fail"
-        return cls(score=score, verdict=verdict, passed=passed, raw=raw or {})
-
-
 class FailureDetail(BaseModel):
     """Safe, persisted description of an expected per-item failure."""
 
@@ -126,6 +97,7 @@ class BatchState(TypedDict, total=False):
     """Estado do grafo de topo (um batch/semana de produção)."""
 
     run_id: str
+    runtime_contract: dict[str, Any]
     campaign: dict[str, Any]
     persona: str
     concepts: list[dict[str, Any]]

@@ -174,6 +174,7 @@ async def test_generate_clip_tool_delegates_and_returns_artifact():
                 "system_prompt": "video prompt",
                 "reference_image_uri": "data:image/png;base64,AAAA",
                 "audio_uri": None,
+                "stage": "talking_head",
             },
         )
     ]
@@ -669,3 +670,64 @@ async def test_voice_design_tools_delegate_to_adapter() -> None:
     )
     assert finalized["selected_candidate_id"] == batch["candidates"][0]["candidate_id"]
     assert "creator-0" in finalized["voice_ref"]
+
+
+async def test_generate_clip_tool_with_strict_videoport_adapter() -> None:
+    from orchestrator.adapters.base import VideoPort
+    from orchestrator.tools.base import ToolContext
+    from orchestrator.tools.video import generate_clip_tool
+
+    calls: list[dict[str, Any]] = []
+
+    class StrictVideoAdapter:
+        async def generate_clip(
+            self,
+            item_id: str,
+            tier: str,
+            seconds: int,
+            attempt: int,
+            system_prompt: str | None = None,
+            reference_image_uri: str | None = None,
+            audio_uri: str | None = None,
+        ) -> Artifact:
+            calls.append(
+                {
+                    "item_id": item_id,
+                    "tier": tier,
+                    "seconds": seconds,
+                    "attempt": attempt,
+                    "system_prompt": system_prompt,
+                    "reference_image_uri": reference_image_uri,
+                    "audio_uri": audio_uri,
+                }
+            )
+            return Artifact(kind="clip", uri="https://example.com/clip.mp4", meta={"cost_usd": 0.05})
+
+    adapter = StrictVideoAdapter()
+    assert isinstance(adapter, VideoPort)
+
+    ctx = ToolContext(
+        adapter=adapter,
+        pipeline={},
+        run={},
+        run_id="run-strict",
+        durable=False,
+    )
+    artifact = await generate_clip_tool(
+        ctx,
+        item_id="item-strict",
+        tier="ltx",
+        seconds=8,
+        attempt=0,
+        system_prompt="Prompt text",
+        reference_image_uri="https://example.com/ref.png",
+        audio_uri="https://example.com/audio.wav",
+        stage="talking_head",
+    )
+
+    assert artifact.kind == "clip"
+    assert artifact.uri == "https://example.com/clip.mp4"
+    assert len(calls) == 1
+    assert calls[0]["item_id"] == "item-strict"
+    assert calls[0]["audio_uri"] == "https://example.com/audio.wav"
+

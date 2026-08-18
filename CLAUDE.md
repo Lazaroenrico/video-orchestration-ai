@@ -37,7 +37,8 @@ config*/        pipeline.yaml, providers.yaml, agents.yaml, prompts/, judge.yaml
 src/orchestrator/
   graph/        state.py, routing.py, builder.py, checkpoint.py
   nodes/        base.py, stages.py  (os stages da pipeline como nodes)
-  adapters/     base.py (Protocols), mock.py, adapters reais, judge.py
+  adapters/     base.py (Protocols), mock.py, adapters reais
+  evaluation/   judge.py (GatewayJudge, Cassette, evaluators)
   db/           PostgreSQL, RLS, jobs, gates, runs, effects, Alembic
   storage/      local/R2/S3/dual, signed URLs, retenção e migração
   web/          FastAPI/dashboard API/SSE

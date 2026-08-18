@@ -30,6 +30,7 @@ from orchestrator.storage.base import (
     MediaStorage,
     StoredObject,
     fetch_media,
+    is_downloadable,
 )
 from orchestrator.storage.db import ArtifactRecord, ArtifactRepository
 from orchestrator.storage.local import LocalMediaStorage
@@ -41,6 +42,7 @@ __all__ = [
     "persist_bytes",
     "persist_creator_media",
     "persist_artifact_bytes",
+    "persist_artifact_from_url",
     "persist_item_media",
     "persist_media",
     "persist_voice_candidates",
@@ -258,6 +260,53 @@ async def persist_artifact_bytes(
     )
 
 
+async def persist_artifact_from_url(
+    artifact: Artifact,
+    *,
+    run_id: str,
+    item_id: str,
+    basename: str,
+    kind: str = "clip",
+    videos_root: str | Path | None = None,
+    storage: Optional[MediaStorage] = None,
+    db: Optional[ArtifactRepository] = None,
+    client: Optional[httpx.AsyncClient] = None,
+) -> Artifact:
+    """Baixa e persiste os bytes de um Artifact a partir de sua URI remota.
+
+    Se a URI for baixável (HTTP/HTTPS/data:), salva no storage sob
+    ``{run_id}/items/{item_id}/{basename}.{ext}``, grava o registro no DB (se fornecido)
+    e retorna uma cópia do Artifact com URI canônica e metadados atualizados
+    (source_uri, storage_key, storage_backend).
+    Se não for baixável (mock://, etc.) ou se o download falhar, retorna o artifact inalterado.
+    """
+    if not isinstance(artifact.uri, str) or not is_downloadable(artifact.uri):
+        return artifact
+
+    backend = _storage_for(
+        storage,
+        videos_root,
+        web_prefix="/videos",
+        required_arg="videos_root",
+    )
+    key_base = f"{run_id}/items/{item_id}/{basename}"
+    stored = await backend.put_from_url(artifact.uri, key_base=key_base, client=client)
+    if stored:
+        meta = dict(artifact.meta or {})
+        meta["source_uri"] = artifact.uri
+        meta.update(_pointer(stored))
+        await _record(
+            db,
+            stored,
+            run_id=run_id,
+            kind=kind,
+            source_uri=artifact.uri,
+            item_id=item_id,
+        )
+        return artifact.model_copy(update={"uri": stored.uri, "meta": meta})
+    return artifact
+
+
 def _storage_for(
     storage: Optional[MediaStorage],
     root: str | Path | None,
@@ -306,18 +355,41 @@ async def persist_item_media(
     new_clips: list[dict[str, Any]] = []
     for n, clip in enumerate(clips):
         clip = dict(clip)
+        meta = dict(clip.get("meta") or {})
         uri = clip.get("uri")
         if isinstance(uri, str):
             stored = await backend.put_from_url(uri, key_base=f"{key_prefix}/clip-{n}", client=client)
             if stored:
-                meta = dict(clip.get("meta") or {})
                 meta["source_uri"] = uri
                 meta.update(_pointer(stored))
-                clip = {**clip, "uri": stored.uri, "meta": meta}
+                clip["uri"] = stored.uri
                 await _record(
                     db, stored, run_id=run_id, kind=clip.get("kind") or "clip",
                     source_uri=uri, item_id=item_id,
                 )
+
+        base_uri = meta.get("base_clip_uri")
+        if isinstance(base_uri, str):
+            stored_base = await backend.put_from_url(
+                base_uri,
+                key_base=f"{key_prefix}/base-clip-{n}",
+                client=client,
+            )
+            if stored_base:
+                meta["base_clip_source_uri"] = base_uri
+                meta["base_clip_uri"] = stored_base.uri
+                meta["base_clip_storage_key"] = stored_base.key
+                meta["base_clip_storage_backend"] = stored_base.backend
+                await _record(
+                    db,
+                    stored_base,
+                    run_id=run_id,
+                    kind="base_clip",
+                    source_uri=base_uri,
+                    item_id=item_id,
+                )
+
+        clip["meta"] = meta
         new_clips.append(clip)
     data["clips"] = new_clips
 

@@ -24,6 +24,7 @@ Uso:
   ./scripts/dev-local up
   ./scripts/dev-local quotas --design-chars N --voice-slots N --tts-chars N
   ./scripts/dev-local video-quota --seconds N
+  ./scripts/dev-local image-quota --units N
   ./scripts/dev-local down
   ./scripts/dev-local reset --yes
 EOF
@@ -160,6 +161,19 @@ configure_video_quota() {
     --provider replicate_video_seconds --limit-units "$2"
 }
 
+configure_image_quota() {
+  [[ $# -eq 2 && "$1" == "--units" ]] || usage
+  [[ "$ORCH_DEV_CONFIG_DIR" == "config" ]] \
+    || die "quota de imagem paga exige ORCH_DEV_CONFIG_DIR=config"
+  is_positive_integer "$2" \
+    || die "limite de quota deve ser um inteiro positivo"
+  if ! run_compose exec -T api true >/dev/null 2>&1; then
+    die "serviço api não está em execução; rode ./scripts/dev-local up primeiro"
+  fi
+  run_compose exec -T api orchestrator db set-provider-quota \
+    --provider openai_image_units --limit-units "$2"
+}
+
 main() {
   local action="${1-}"
   detect_compose
@@ -188,6 +202,10 @@ main() {
     video-quota)
       shift
       configure_video_quota "$@"
+      ;;
+    image-quota)
+      shift
+      configure_image_quota "$@"
       ;;
     down)
       [[ $# -eq 1 ]] || usage

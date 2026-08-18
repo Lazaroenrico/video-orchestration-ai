@@ -15,7 +15,7 @@ from typing import (
     runtime_checkable,
 )
 
-from orchestrator.graph.state import Artifact, Item, JudgeVerdict, QCResult
+from orchestrator.graph.state import Artifact, Item, QCResult
 
 VoicePreset = Literal["male", "female", "neutral"]
 
@@ -207,10 +207,3 @@ class AssemblyPort(Protocol):
     async def assemble(
         self, item: Item, platform: str, system_prompt: Optional[str] = None
     ) -> Artifact | RenderedMedia: ...
-
-
-@runtime_checkable
-class JudgePort(Protocol):
-    """LLM Judge via API Gateway (avaliação determinística do QC)."""
-
-    def judge(self, criteria: dict[str, Any], subject: dict[str, Any]) -> JudgeVerdict: ...

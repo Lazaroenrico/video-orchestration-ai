@@ -11,7 +11,6 @@ adapters:
   qc: mock
   assembly: mock
   upscale: mock
-  judge: gateway   # informativo: 'judge' não está em ROLES, não é instanciado no run
 
 # O bucket permanece privado; a API assina ponteiros r2:// apenas na saída.
 storage:

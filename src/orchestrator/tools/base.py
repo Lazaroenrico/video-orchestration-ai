@@ -24,6 +24,10 @@ class ToolContext:
     language_runtime: Any | None = None
     effect_ledger: Any | None = None
     durable: bool = False
+    storage: Any | None = None
+    artifact_db: Any | None = None
+    storage_resolver: Any | None = None
+    videos_root: str | os.PathLike[str] | None = None
 
 
 def tool_context_from_config(config: RunnableConfig) -> ToolContext:
@@ -37,6 +41,10 @@ def tool_context_from_config(config: RunnableConfig) -> ToolContext:
         run_id=configurable.get("thread_id", "run"),
         effect_ledger=configurable.get("effect_ledger"),
         durable=bool(configurable.get("durable", False)),
+        storage=configurable.get("videos_storage") or configurable.get("storage"),
+        artifact_db=configurable.get("artifact_db"),
+        storage_resolver=configurable.get("storage_resolver"),
+        videos_root=configurable.get("videos_root"),
     )
 
 
@@ -47,6 +55,27 @@ def direct_elevenlabs_voice_enabled(ctx: ToolContext) -> bool:
         and voice.get("mode") == "designed"
         and voice.get("provider") == "elevenlabs"
     )
+
+
+def is_paid_creator_adapter(ctx: ToolContext) -> bool:
+    adapter = ctx.adapter
+    if adapter is None:
+        return False
+    if type(adapter).__name__ in ("MockAdapter", "MockCreatorAdapter") or getattr(adapter, "is_mock", False):
+        return False
+    if hasattr(adapter, "_by_role"):
+        creator_adapter = adapter._by_role.get("creator")
+        if (
+            creator_adapter is None
+            or type(creator_adapter).__name__ in ("MockAdapter", "MockCreatorAdapter")
+            or getattr(creator_adapter, "is_mock", False)
+        ):
+            return False
+        return True
+    return True
+
+
+direct_creator_image_enabled = is_paid_creator_adapter
 
 
 def _definitely_not_billed(exc: BaseException) -> bool:
