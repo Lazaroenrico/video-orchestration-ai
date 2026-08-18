@@ -174,6 +174,7 @@ async def test_generate_clip_tool_delegates_and_returns_artifact():
                 "system_prompt": "video prompt",
                 "reference_image_uri": "data:image/png;base64,AAAA",
                 "audio_uri": None,
+                "stage": "talking_head",
             },
         )
     ]

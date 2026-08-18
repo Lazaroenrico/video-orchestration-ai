@@ -678,7 +678,9 @@ async def generate_clip_tool(
         }
         try:
             sig = inspect.signature(gen_fn)
-            if "stage" in sig.parameters:
+            if "stage" in sig.parameters or any(
+                p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+            ):
                 call_kwargs["stage"] = stage
         except (ValueError, TypeError):
             pass
