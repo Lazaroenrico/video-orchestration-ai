@@ -84,6 +84,14 @@ def _definitely_not_billed(exc: BaseException) -> bool:
         (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout),
     ):
         return True
+    if hasattr(exc, "__cause__") and isinstance(
+        exc.__cause__,
+        (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout),
+    ):
+        return True
+    if getattr(exc, "status_code", None) is not None:
+        status = getattr(exc, "status_code")
+        return bool(isinstance(status, int) and 400 <= status < 500)
     return bool(
         isinstance(exc, httpx.HTTPStatusError)
         and 400 <= exc.response.status_code < 500

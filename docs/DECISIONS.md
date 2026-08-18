@@ -875,3 +875,74 @@ REST/SSE e adapters de mídia permanecem preservados. Detalhes e matriz completa
   nem quota. O ambiente de desenvolvimento (`DEFAULT_DEV_QUOTAS` e `./scripts/dev-local image-quota`)
   ganha suporte nativo ao bucket `openai_image_units`. Execuções duráveis exigem opt-in
   explícito via `ORCH_ENABLE_PAID_ADAPTERS=true` e `PostgresEffectLedger`.
+
+## 2026-08-17
+
+### D49 — Caracterização de paridade do SDK ElevenLabs e decisão arquitetural
+
+- **Contexto:** A issue `#7` avaliou a viabilidade de migrar as operações de voz
+  (Voice Design, create/finalize, TTS, list voices e reconciliação) para o SDK oficial
+  `AsyncElevenLabs` em vez da implementação REST atual baseada em `httpx.AsyncClient`.
+- **Matriz de paridade executável:**
+  1. *Voice Design (`/v1/text-to-voice/design`):* REST permite parsing direto de `previews`,
+     validação estrita de áudio base64 e hashing determinístico de descrição com modelo
+     `eleven_ttv_v3`. SDK oferece método equivalente, mas tipagem não agrega ganhos
+     ao contrato já encapsulado em `CreatorVoiceSpec` / `VoiceDesignBatch`.
+  2. *Create/Finalize Voice (`/v1/text-to-voice`):* REST usa nome determinístico
+     `ugc-{org}-{creator}-{hash}` e descrição estática `FINALIZED_VOICE_DESCRIPTION`.
+     SDK envia exatamente o mesmo payload JSON.
+  3. *TTS / Voiceover (`/v1/text-to-speech/{voice_id}`):* REST consome o corpo binário direto
+     (`response.content`), codifica em data URI e calcula custo estimado por caracteres
+     com `cost_source=estimate`. SDK retorna stream assíncrono que exige acumulação em buffer.
+  4. *List Voices & Reconciliação (`/v1/voices`):* REST filtra por nome exato e exige
+     correspondência única para resolver ambiguidades pós-envio.
+  5. *Retry e Timeouts:* REST utiliza `with_transport_retry`, restringindo retries em POST
+     a erros pré-envio (`ConnectTimeout`, `ConnectError`, `PoolTimeout`) e 429 (throttle),
+     falhando imediatamente em 5xx ou pós-envio para proteger o `PostgresEffectLedger`
+     contra dupla cobrança. O SDK oficial não oferece esse particionamento fino de
+     transporte por padrão.
+  6. *Test doubles e isolamento offline:* REST usa `httpx.MockTransport` de forma transparente
+     sem bibliotecas externas e sem chamadas de rede live.
+- **Decisão HITL:** **Manter o adapter REST atual (`httpx.AsyncClient`)** e **não migrar para o SDK**.
+  - *Justificativa:* O REST atual oferece controle cirúrgico sobre retries e idempotência
+    de efeitos pagos, zero dependências externas adicionais no `pyproject.toml`, total
+    testabilidade offline e paridade completa comprovada pela suíte `test_elevenlabs_sdk_parity.py`.
+- **Consequência para a Issue #12:** Como a decisão HITL é manter REST, a issue `#12`
+  (`[P2][AFK] Migrar operações aprovadas para AsyncElevenLabs`) torna-se **não aplicável**
+  e deve ser encerrada sem alteração de código, conforme previsto em seu contrato de execução.
+- **Rollback:** Se uma futura versão do SDK trouxer recursos exclusivos indispensáveis, o
+  isolamento de `VoicePort` / `ElevenLabsVoiceDesignAdapter` permite a substituição do
+  transporte sem impactos no grafo LangGraph ou no ledger.
+
+### D50 — Classificação e plano de depreciação de aliases, adapters e integrações legadas
+
+- **Contexto:** o motor de orquestração acumulou aliases históricos de creator (`creator_real_vercel`,
+  `creator_real_replicate`, `creator_vercel_replicate_voice`, `creator_real`), adapters não utilizados
+  (`TopazUpscaleAdapter`, `ReplicateUpscaleAdapter`), adapters e bridges experimentais Node
+  (`VercelGatewayVideoAdapter`, `VercelSeedanceAssemblyAdapter`, `scripts/vercel_generate_video.mjs`,
+  dependências root Node) e protocolos legados (`JudgePort`). Antes da remoção (Issue #16), é necessário
+  inventário formal e classificação para evitar regressão operacional.
+- **Decisão e Classificação:**
+  - **`supported` (Canônico / Live / Staging / Mock):**
+    - Creator: `creator_vercel_elevenlabs_design` (OpenAI Image via Vercel AI Gateway + ElevenLabs Voice Design direto).
+    - Video: `replicate` (P-Video/LTX + LatentSync 2 estágios durável) e `mock`.
+    - Assembly: `ffmpeg_assembly` (FFmpeg local) e `mock`.
+    - Upscale: `passthrough_upscale`.
+    - Language: `vercel_gateway_llm` e `mock`.
+  - **`compatibility` (Mantidos temporariamente com rollback):**
+    - Aliases de creator: `creator_real_vercel`, `creator_real_replicate`, `creator_vercel_replicate_voice`, `creator_real`.
+    - Voice: `ElevenLabsVoiceAdapter` (modo legacy) e `ReplicateVoiceAdapter`.
+    - Language deployments: `anthropic_sdk_gateway`, `anthropic` (a serem centralizados em `LanguageModelFactory` na issue #10).
+    - Dependência `anthropic>=0.40` no `pyproject.toml` (transitiva sob `langchain-anthropic`).
+  - **`dead` (Aprovados para remoção na issue #16):**
+    - `TopazUpscaleAdapter` (`adapters/topaz_upscale.py`) e `ReplicateUpscaleAdapter` (`adapters/replicate_upscale.py`).
+    - `VercelGatewayVideoAdapter` (`adapters/vercel_gateway_video.py`) e `VercelSeedanceAssemblyAdapter` (`adapters/vercel_seedance_assembly.py`).
+    - Bridge script `scripts/vercel_generate_video.mjs`.
+    - Root `package.json`, `package-lock.json` e `node_modules` (o frontend em `front/` é independente e permanece).
+    - Layer de instalação do NodeSource no `Dockerfile`.
+    - `JudgePort` (já removido de produção em D47 e isolado em `orchestrator.evaluation`).
+- **Janela de depreciação e Rollback:** Itens de compatibilidade permanecem até a conclusão das
+  issues #10, #14, #15 e a execução da remoção em fatias na issue #16. Rollback é garantido pela
+  rastreabilidade de commits e histórico Git canônico.
+
+

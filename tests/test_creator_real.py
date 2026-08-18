@@ -6,9 +6,12 @@ Os handlers validam método, rota e headers antes de retornar respostas mock.
 from __future__ import annotations
 
 import json
+from typing import Any
 
 import httpx
+import openai
 import pytest
+from openai import AsyncOpenAI
 
 from orchestrator import media_store
 from orchestrator.adapters.base import VoiceProfile
@@ -133,7 +136,7 @@ async def test_openai_image_sends_correct_endpoint_and_auth() -> None:
 
 
 async def test_openai_image_raises_on_http_error() -> None:
-    """generate_face deve propagar erro HTTP (raise_for_status)."""
+    """generate_face deve propagar erro HTTP (APIStatusError)."""
 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(401, json={"error": "unauthorized"})
@@ -141,7 +144,7 @@ async def test_openai_image_raises_on_http_error() -> None:
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url=BASE_OPENAI)
     adapter = OpenAIImageAdapter(base_url=BASE_OPENAI, token="bad-key", client=client)
 
-    with pytest.raises(httpx.HTTPStatusError):
+    with pytest.raises(openai.APIStatusError):
         await adapter.generate_face(0)
 
 
@@ -159,7 +162,7 @@ async def test_openai_image_logs_error_body(caplog: pytest.LogCaptureFixture) ->
     adapter = OpenAIImageAdapter(base_url=BASE_OPENAI, token=FAKE_TOKEN, client=client)
 
     with caplog.at_level("ERROR", logger="orchestrator.adapters.openai_image"):
-        with pytest.raises(httpx.HTTPStatusError):
+        with pytest.raises(openai.APIStatusError):
             await adapter.generate_face(0)
 
     assert any("status=400" in r.message and "prompt rejeitado" in r.message for r in caplog.records)
@@ -177,13 +180,12 @@ async def test_openai_image_http_error_includes_response_body() -> None:
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url=BASE_OPENAI)
     adapter = OpenAIImageAdapter(base_url=BASE_OPENAI, token=FAKE_TOKEN, client=client)
 
-    with pytest.raises(httpx.HTTPStatusError) as excinfo:
+    with pytest.raises(openai.APIStatusError) as excinfo:
         await adapter.generate_face(0)
 
     message = str(excinfo.value)
-    assert "openai_image: 400 Bad Request" in message
+    assert "400" in message
     assert "Model 'openai/gpt-image-2' is not available" in message
-    assert "/images/generations" in message
 
 
 async def test_openai_image_wraps_custom_prompt_with_safety_guardrails() -> None:
@@ -651,7 +653,7 @@ async def test_openai_image_does_not_retry_non_429_status() -> None:
         base_url=BASE_OPENAI, token=FAKE_TOKEN, client=client, backoff_base=0
     )
 
-    with pytest.raises(httpx.HTTPStatusError):
+    with pytest.raises(openai.APIStatusError):
         await adapter.generate_face(0)
     assert calls == 1
 
@@ -793,6 +795,55 @@ async def test_openai_image_raises_when_no_url_or_b64() -> None:
 
     with pytest.raises(RuntimeError):
         await adapter.generate_face(0)
+
+
+async def test_openai_image_accepts_direct_asyncopenai_client() -> None:
+    """OpenAIImageAdapter deve aceitar uma instância AsyncOpenAI injetada diretamente."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": [{"url": "https://direct.openai.com/img.png"}]})
+
+    http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    openai_client = AsyncOpenAI(api_key="direct-key", base_url=BASE_OPENAI, http_client=http_client)
+    adapter = OpenAIImageAdapter(client=openai_client)
+
+    result = await adapter.generate_face(0)
+
+    assert result["primary"] == "https://direct.openai.com/img.png"
+    assert result["angles"] == ["front", "3/4", "profile", "smile", "neutral"]
+
+
+async def test_openai_image_accepts_fake_client_without_network() -> None:
+    """OpenAIImageAdapter deve aceitar fake client com interface compatível sem usar rede."""
+    class FakeImageObj:
+        def __init__(self, url: str | None = None, b64_json: str | None = None):
+            self.url = url
+            self.b64_json = b64_json
+
+    class FakeResponse:
+        def __init__(self, items):
+            self.data = items
+
+    class FakeImagesResource:
+        def __init__(self, items):
+            self.items = items
+            self.captured_calls: list[dict[str, Any]] = []
+
+        async def generate(self, *, model: str, prompt: str, **kwargs):
+            self.captured_calls.append({"model": model, "prompt": prompt})
+            return FakeResponse(self.items)
+
+    class FakeOpenAIClient:
+        def __init__(self, items):
+            self.images = FakeImagesResource(items)
+
+    fake_client = FakeOpenAIClient([FakeImageObj(b64_json="fakebase64str")])
+    adapter = OpenAIImageAdapter(client=fake_client)
+
+    result = await adapter.generate_face(1)
+
+    assert result["primary"] == "data:image/png;base64,fakebase64str"
+    assert len(fake_client.images.captured_calls) == 1
+    assert "creator-1" in fake_client.images.captured_calls[0]["prompt"]
 
 
 # ---------------------------------------------------------------------------
@@ -1192,13 +1243,13 @@ async def test_reroll_creator_voice_shifts_again_on_second_reroll() -> None:
 
 
 def _patch_own_client(monkeypatch, module, transport: httpx.MockTransport, base_url: str):
-    # module.httpx é o módulo global compartilhado; captura o construtor real antes
-    # de patchar para não recursar quando a fábrica criar o client de teste.
-    real_async_client = httpx.AsyncClient
-    monkeypatch.setattr(
-        module.httpx, "AsyncClient",
-        lambda *a, **k: real_async_client(transport=transport, base_url=base_url),
-    )
+    class _PatchedAsyncClient(httpx.AsyncClient):
+        def __init__(self, *args, **kwargs):
+            kwargs["transport"] = transport
+            kwargs.setdefault("base_url", base_url)
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(module.httpx, "AsyncClient", _PatchedAsyncClient)
 
 
 async def test_openai_generate_face_uses_own_client_and_gender_clause(monkeypatch):

@@ -25,16 +25,16 @@ novas entregas usam uma página própria em `docs/progress/changes/`.
 
 ## Últimas 10 entregas
 
+- [Migração do adapter de imagem para AsyncOpenAI](progress/changes/2026-08-17-migrar-adapter-imagem-asyncopenai.md) — transição para AsyncOpenAI com client injetável, compatibilidade Vercel Gateway e retries determinísticos.
+- [Centralização de deployments LangChain em LanguageModelFactory](progress/changes/2026-08-17-centralizar-deployments-langchain-factory.md) — factory centralizada com `init_chat_model`, paridade de credenciais/URLs/retries e delegação em `LanguageRuntime`.
+- [Classificação de aliases, adapters e integrações legadas](progress/changes/2026-08-17-classificacao-aliases-e-integracoes.md) — inventário de 19 itens classificados em `supported`, `compatibility` e `dead` com plano de rollback para subsidiar a issue #16.
+- [Caracterização de paridade do SDK ElevenLabs e decisão arquitetural](progress/changes/2026-08-17-caracterizacao-paridade-sdk-elevenlabs.md) — matriz de paridade executável e decisão HITL de manter REST artesanal seguro e sem dependências extras.
 - [LatentSync obrigatório e storage do vídeo-base](progress/changes/2026-08-15-latentsync-required-e-base-clip-storage.md) — validação estrita de `latentsync.required` e persistência do vídeo base LTX no storage canônico.
 - [LatentSync durável, idempotente e reconciliável](progress/changes/2026-08-15-latentsync-duravel-idempotente.md) — 2 estágios (LTX + LatentSync) com reservas duráveis, reconciliação de WriteTimeout e cancelamento no provider.
 - [Proteção da geração de imagem paga com effects](progress/changes/2026-08-15-proteger-geracao-imagem-paga-effects.md) — idempotência, quota `openai_image_units`, kill switch obrigatório e classificação de falhas de transporte no `PostgresEffectLedger`.
 - [Persistência e validação do runtime contract dos runs](progress/changes/2026-08-15-runtime-contract-runs.md) — persistência de fingerprint canônico sem segredos, bloqueio de resume incompatível antes de chamadas pagas e preservação de consultas legacy.
 - [Isolamento do GatewayJudge no módulo de evaluation](progress/changes/2026-08-15-isolar-gatewayjudge-module-evaluation.md) — GatewayJudge e cassette tooling isolados em orchestrator.evaluation, JudgePort removido dos adapters de produção.
 - [Runtime de linguagem nativo LangChain](progress/changes/2026-08-14-langchain-native-runtime.md) — composição central de dependências, models/agents nativos, mock determinístico e vídeo sem `agent_takes` novo.
-- [Integração LatentSync 2-Estágios no Talking Head](progress/changes/2026-08-07-latentsync-talking-head.md) — LTX gera vídeo base em 720p e LatentSync aplica lip-sync com a voz ElevenLabs (3 retries, sem fallback silencioso).
-- [Prediction Replicate durável e falha parcial por item](progress/changes/2026-08-04-replicate-prediction-duravel.md) — criação/polling/webhook reconciliam timeout ambíguo sem POST duplicado nem encerrar os demais itens.
-- [Compatibilidade de layout mono na montagem FFmpeg](progress/changes/2026-08-04-ffmpeg-layout-mono.md) — runtime Bookworm monta locução mono a 48 kHz e testa o FFmpeg da própria imagem antes do deploy.
-- [Finalização de voz compatível com o contrato ElevenLabs](progress/changes/2026-08-04-elevenlabs-finalizacao-voice-description.md) — descrição server-owned válida elimina o 422 antes da criação da voz permanente.
 
 ## Índice do histórico
 
