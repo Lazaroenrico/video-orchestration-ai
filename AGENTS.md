@@ -156,6 +156,16 @@ The main agent should retain ownership of architectural decisions.
 Do not delegate ambiguous requirements directly to the implementer.
 Resolve ambiguity and define the implementation boundary first.
 
+## Agent skills
+
+### Issue tracker
+
+Tracked on GitHub Issues via the `gh` CLI. See `docs/agents/issue-tracker.md`.
+
+### Domain docs
+
+Single-context layout using `Context.md` and `docs/DECISIONS.md`. See `docs/agents/domain.md`.
+
 <!-- rtk-instructions v2 -->
 # RTK (Rust Token Killer) - Token-Optimized Commands
 
