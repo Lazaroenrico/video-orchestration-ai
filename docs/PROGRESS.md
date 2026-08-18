@@ -25,6 +25,7 @@ novas entregas usam uma página própria em `docs/progress/changes/`.
 
 ## Últimas 10 entregas
 
+- [Gate final de regressão da refatoração LangChain](progress/changes/2026-08-18-gate-final-regressao-refatoracao.md) — validação completa das suítes offline (1.218 testes), LLM Judge cassette replay, matriz dos 3 perfis, review gate/checkpoint, efeitos/quotas/webhooks e lockfile determinístico.
 - [Alinhar documentação canônica e instalação reproduzível](progress/changes/2026-08-18-alinhar-documentacao-canonica-e-instalacao.md) — alinhamento de D46/D47, ToolStrategy vs action tools, CompositeAdapter domain/media-only, diagramas V2 e instalação reproduzível frozen via uv.lock.
 - [Remoção de bridge, aliases e dependências mortos](progress/changes/2026-08-18-remover-bridge-aliases-dependencias-mortos.md) — remoção de Topaz/Replicate upscale, Vercel video/assembly, script bridge Node, package.json raiz e Node do Dockerfile runtime.
 - [Reduzir CreativeStageExecutor e catálogo aos três stages criativos](progress/changes/2026-08-18-reduzir-creativestageexecutor-e-catalogo.md) — redução do catálogo e executor aos stages `concepts`, `scripts` e `creator_profiles` com `materializer` único, remoção de metadados mortos e nós não criativos diretos.
@@ -34,7 +35,6 @@ novas entregas usam uma página própria em `docs/progress/changes/`.
 - [Migração do adapter de imagem para AsyncOpenAI](progress/changes/2026-08-17-migrar-adapter-imagem-asyncopenai.md) — transição para AsyncOpenAI com client injetável, compatibilidade Vercel Gateway e retries determinísticos.
 - [Centralização de deployments LangChain em LanguageModelFactory](progress/changes/2026-08-17-centralizar-deployments-langchain-factory.md) — factory centralizada com `init_chat_model`, paridade de credenciais/URLs/retries e delegação em `LanguageRuntime`.
 - [Classificação de aliases, adapters e integrações legadas](progress/changes/2026-08-17-classificacao-aliases-e-integracoes.md) — inventário de 19 itens classificados em `supported`, `compatibility` e `dead` com plano de rollback para subsidiar a issue #16.
-- [Caracterização de paridade do SDK ElevenLabs e decisão arquitetural](progress/changes/2026-08-17-caracterizacao-paridade-sdk-elevenlabs.md) — matriz de paridade executável e decisão HITL de manter REST artesanal seguro e sem dependências extras.
 
 ## Índice do histórico
 
