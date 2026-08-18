@@ -914,3 +914,35 @@ REST/SSE e adapters de mídia permanecem preservados. Detalhes e matriz completa
   isolamento de `VoicePort` / `ElevenLabsVoiceDesignAdapter` permite a substituição do
   transporte sem impactos no grafo LangGraph ou no ledger.
 
+### D50 — Classificação e plano de depreciação de aliases, adapters e integrações legadas
+
+- **Contexto:** o motor de orquestração acumulou aliases históricos de creator (`creator_real_vercel`,
+  `creator_real_replicate`, `creator_vercel_replicate_voice`, `creator_real`), adapters não utilizados
+  (`TopazUpscaleAdapter`, `ReplicateUpscaleAdapter`), adapters e bridges experimentais Node
+  (`VercelGatewayVideoAdapter`, `VercelSeedanceAssemblyAdapter`, `scripts/vercel_generate_video.mjs`,
+  dependências root Node) e protocolos legados (`JudgePort`). Antes da remoção (Issue #16), é necessário
+  inventário formal e classificação para evitar regressão operacional.
+- **Decisão e Classificação:**
+  - **`supported` (Canônico / Live / Staging / Mock):**
+    - Creator: `creator_vercel_elevenlabs_design` (OpenAI Image via Vercel AI Gateway + ElevenLabs Voice Design direto).
+    - Video: `replicate` (P-Video/LTX + LatentSync 2 estágios durável) e `mock`.
+    - Assembly: `ffmpeg_assembly` (FFmpeg local) e `mock`.
+    - Upscale: `passthrough_upscale`.
+    - Language: `vercel_gateway_llm` e `mock`.
+  - **`compatibility` (Mantidos temporariamente com rollback):**
+    - Aliases de creator: `creator_real_vercel`, `creator_real_replicate`, `creator_vercel_replicate_voice`, `creator_real`.
+    - Voice: `ElevenLabsVoiceAdapter` (modo legacy) e `ReplicateVoiceAdapter`.
+    - Language deployments: `anthropic_sdk_gateway`, `anthropic` (a serem centralizados em `LanguageModelFactory` na issue #10).
+    - Dependência `anthropic>=0.40` no `pyproject.toml` (transitiva sob `langchain-anthropic`).
+  - **`dead` (Aprovados para remoção na issue #16):**
+    - `TopazUpscaleAdapter` (`adapters/topaz_upscale.py`) e `ReplicateUpscaleAdapter` (`adapters/replicate_upscale.py`).
+    - `VercelGatewayVideoAdapter` (`adapters/vercel_gateway_video.py`) e `VercelSeedanceAssemblyAdapter` (`adapters/vercel_seedance_assembly.py`).
+    - Bridge script `scripts/vercel_generate_video.mjs`.
+    - Root `package.json`, `package-lock.json` e `node_modules` (o frontend em `front/` é independente e permanece).
+    - Layer de instalação do NodeSource no `Dockerfile`.
+    - `JudgePort` (já removido de produção em D47 e isolado em `orchestrator.evaluation`).
+- **Janela de depreciação e Rollback:** Itens de compatibilidade permanecem até a conclusão das
+  issues #10, #14, #15 e a execução da remoção em fatias na issue #16. Rollback é garantido pela
+  rastreabilidade de commits e histórico Git canônico.
+
+
