@@ -25,6 +25,7 @@ novas entregas usam uma página própria em `docs/progress/changes/`.
 
 ## Últimas 10 entregas
 
+- [Separar submissão LangChain da materialização de criativos](progress/changes/2026-08-18-separar-submissao-langchain-materializacao.md) — desacoplamento do `LanguageRuntime.generate_structured` retornando Pydantic sem callbacks e materialização server-owned no executor.
 - [Correção de CI (FFmpeg, migração 0007 e guards operacionais)](progress/changes/2026-08-18-ci-fixes-ffmpeg-migration.md) — instalação de FFmpeg no host de teste, inserção retrocompatível no teste de migração 0007 e guards de secrets em staging.
 - [Migração do adapter de imagem para AsyncOpenAI](progress/changes/2026-08-17-migrar-adapter-imagem-asyncopenai.md) — transição para AsyncOpenAI com client injetável, compatibilidade Vercel Gateway e retries determinísticos.
 - [Centralização de deployments LangChain em LanguageModelFactory](progress/changes/2026-08-17-centralizar-deployments-langchain-factory.md) — factory centralizada com `init_chat_model`, paridade de credenciais/URLs/retries e delegação em `LanguageRuntime`.
@@ -34,7 +35,6 @@ novas entregas usam uma página própria em `docs/progress/changes/`.
 - [LatentSync durável, idempotente e reconciliável](progress/changes/2026-08-15-latentsync-duravel-idempotente.md) — 2 estágios (LTX + LatentSync) com reservas duráveis, reconciliação de WriteTimeout e cancelamento no provider.
 - [Proteção da geração de imagem paga com effects](progress/changes/2026-08-15-proteger-geracao-imagem-paga-effects.md) — idempotência, quota `openai_image_units`, kill switch obrigatório e classificação de falhas de transporte no `PostgresEffectLedger`.
 - [Persistência e validação do runtime contract dos runs](progress/changes/2026-08-15-runtime-contract-runs.md) — persistência de fingerprint canônico sem segredos, bloqueio de resume incompatível antes de chamadas pagas e preservação de consultas legacy.
-- [Isolamento do GatewayJudge no módulo de evaluation](progress/changes/2026-08-15-isolar-gatewayjudge-module-evaluation.md) — GatewayJudge e cassette tooling isolados em orchestrator.evaluation, JudgePort removido dos adapters de produção.
 
 ## Índice do histórico
 

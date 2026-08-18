@@ -9,14 +9,13 @@ from orchestrator.tools.base import ToolContext
 
 
 class RecordingRuntime:
-    def __init__(self, submission: dict[str, object]) -> None:
+    def __init__(self, submission: dict[str, object] | object) -> None:
         self.submission = submission
         self.calls: list[dict[str, object]] = []
 
-    async def run_agent(self, **kwargs: object) -> object:
+    async def generate_structured(self, **kwargs: object) -> object:
         self.calls.append(kwargs)
-        materialize = kwargs["materialize"]
-        return await materialize(self.submission)
+        return self.submission
 
 
 def _config(*, executor: str, stage: str = "concepts") -> RunnableConfig:
@@ -165,6 +164,42 @@ async def test_native_agent_rejects_server_owned_fields_at_pydantic_boundary() -
             catalog_stage="concepts",
             tool_name="generate_concepts",
             tool_fn=tool,
+        )
+
+
+@pytest.mark.asyncio
+async def test_native_agent_rejects_non_object_submission() -> None:
+    runtime = RecordingRuntime("invalid-string-output")
+
+    async def tool(_ctx: ToolContext, **_kwargs: object) -> object:
+        return object()
+
+    with pytest.raises(StageExecutionError, match="structured_response must be an object"):
+        await execute_stage_tool(
+            _config(executor="agent"),
+            _context(runtime),
+            catalog_stage="concepts",
+            tool_name="generate_concepts",
+            tool_fn=tool,
+        )
+
+
+@pytest.mark.asyncio
+async def test_native_agent_propagates_validation_error_from_runtime() -> None:
+    from orchestrator.language_runtime import ConceptAgentOutput
+
+    class FailingRuntime:
+        async def generate_structured(self, **kwargs: object) -> object:
+            # Trigger real validation error
+            ConceptAgentOutput.model_validate({"proposals": "not-a-list"})
+
+    with pytest.raises(StageExecutionError, match="Pydantic validation"):
+        await execute_stage_tool(
+            _config(executor="agent"),
+            _context(FailingRuntime()),
+            catalog_stage="concepts",
+            tool_name="generate_concepts",
+            tool_fn=lambda *_a, **_kw: None,
         )
 
 

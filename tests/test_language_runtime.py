@@ -15,24 +15,21 @@ def test_mock_language_runtime_is_deterministic_and_offline():
 
 
 @pytest.mark.asyncio
-async def test_mock_agent_returns_schema_submission_to_server_materializer():
-    from orchestrator.language_runtime import LanguageRuntime
+async def test_mock_agent_generate_structured_returns_pydantic_model():
+    from pydantic import BaseModel
+
+    from orchestrator.language_runtime import ConceptAgentOutput, LanguageRuntime
 
     runtime = LanguageRuntime.from_provider("mock", {})
-    materialized: dict[str, object] = {}
 
-    async def materialize(submission: dict[str, object]) -> object:
-        materialized.update(submission)
-        return "materialized"
-
-    result = await runtime.run_agent(
+    result = await runtime.generate_structured(
         stage="concepts",
         inputs={"offer": "offer", "n": 2, "campaign": {"offer": "offer", "batch_size": 2}},
-        materialize=materialize,
     )
 
-    assert result == "materialized"
-    assert len(materialized["proposals"]) == 2  # type: ignore[arg-type]
+    assert isinstance(result, BaseModel)
+    assert isinstance(result, ConceptAgentOutput)
+    assert len(result.proposals) == 2
 
 
 def test_live_language_provider_fails_before_model_construction_without_credentials(monkeypatch):
@@ -91,6 +88,60 @@ def test_native_agents_are_limited_to_creative_stages():
     runtime = LanguageRuntime.from_provider("mock", {})
     with pytest.raises(ValueError, match="only supported"):
         runtime.agent_for("video")
+
+
+@pytest.mark.asyncio
+async def test_generate_structured_rejects_non_creative_stage():
+    from orchestrator.language_runtime import LanguageRuntime
+
+    runtime = LanguageRuntime.from_provider("mock", {})
+    with pytest.raises(ValueError, match="only supported"):
+        await runtime.generate_structured(stage="video", inputs={})
+
+
+@pytest.mark.asyncio
+async def test_generate_structured_handles_dict_and_error_modes(monkeypatch):
+    from orchestrator.language_runtime import ConceptAgentOutput, LanguageRuntime
+
+    class FakeAgent:
+        def __init__(self, response):
+            self.response = response
+
+        async def ainvoke(self, _inputs):
+            return self.response
+
+    runtime = LanguageRuntime.from_provider("anthropic", {"llm_model": "test-model"})
+
+    # 1. Dict response gets converted to Pydantic model
+    valid_dict = {
+        "structured_response": {
+            "proposals": [
+                {
+                    "hook": "h",
+                    "angle": "a",
+                    "audience_problem": "p",
+                    "product_mechanism": "m",
+                    "evidence_basis": "cold_test",
+                    "format": "f",
+                    "hook_style": "s",
+                }
+            ]
+        }
+    }
+    monkeypatch.setattr(runtime, "agent_for", lambda *a, **kw: FakeAgent(valid_dict))
+    res = await runtime.generate_structured(stage="concepts", inputs={"offer": "x"})
+    assert isinstance(res, ConceptAgentOutput)
+    assert res.proposals[0].hook == "h"
+
+    # 2. Missing structured_response raises RuntimeError
+    monkeypatch.setattr(runtime, "agent_for", lambda *a, **kw: FakeAgent({"messages": []}))
+    with pytest.raises(RuntimeError, match="did not return structured_response"):
+        await runtime.generate_structured(stage="concepts", inputs={"offer": "x"})
+
+    # 3. Unexpected type raises RuntimeError
+    monkeypatch.setattr(runtime, "agent_for", lambda *a, **kw: FakeAgent({"structured_response": 12345}))
+    with pytest.raises(RuntimeError, match="unexpected structured_response type"):
+        await runtime.generate_structured(stage="concepts", inputs={"offer": "x"})
 
 
 def test_agent_budgets_use_pipeline_overrides_and_are_not_silenced(monkeypatch):

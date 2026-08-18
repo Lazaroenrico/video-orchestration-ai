@@ -78,21 +78,17 @@ def test_concrete_domain_adapters_keep_trace_markers():
 
 
 def test_language_runtime_marks_native_agent_backend(monkeypatch):
+    import asyncio
+
     from orchestrator import language_runtime
     observed: dict[str, object] = {}
     monkeypatch.setattr(language_runtime, "add_trace_metadata", lambda **values: observed.update(values))
     runtime = language_runtime.LanguageRuntime.from_provider("mock", {})
 
-    async def materialize(submission):
-        return submission
-
-    import asyncio
-
     asyncio.run(
-        runtime.run_agent(
+        runtime.generate_structured(
             stage="concepts",
             inputs={"offer": "x", "n": 1},
-            materialize=materialize,
         )
     )
     assert observed == {"agent_backend": "langchain", "stage": "concepts", "provider": "mock"}
