@@ -37,7 +37,7 @@ mindmap
         um Item por conceito
         preserva assignment creator_id
       process_item
-        PrunaAI talking-head e product demo
+        LTX-2.3 Fast + LatentSync talking-head e product demo
         QC gate e loop limitado
         ElevenLabs TTS direto após QC
     Montagem
@@ -128,7 +128,7 @@ observabilidade registra provider, modelo, status, hashes e request ID.
 | Plano criativo | `voice_candidates` | `creator_vercel_elevenlabs_design` | Voice Design direto, `eleven_ttv_v3` |
 | Revisão | `review` | gate `review_creative_plan` | Um interrupt versionado |
 | Produção | `finalize_voices` | ElevenLabs direto | Cria somente candidato selecionado |
-| Produção | tier `pruna`, `product_demo` | `replicate` | P-Video sem áudio |
+| Produção | tier `ltx`, `product_demo` | `replicate` | LTX-2.3 Fast + LatentSync sem áudio |
 | Produção | `qc` | `integrity_qc` | Local; loop até `qc.max_attempts` |
 | Produção | `voiceover` | ElevenLabs direto | TTS `eleven_turbo_v2_5` |
 | Montagem | `assembly` | `ffmpeg_assembly` | Local, H.264 + AAC |

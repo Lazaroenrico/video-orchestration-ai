@@ -34,9 +34,9 @@ O orquestrador suporta três perfis de execução configuráveis:
 ### Instalação
 
 ```bash
-# Clone o repositório e configure a venv
+# Clone o repositório e configure o ambiente sincronizado com o lockfile
 uv venv --python 3.12
-uv pip install -e ".[dev]"
+uv sync --frozen --all-extras
 
 # Instale dependências do frontend (opcional para rodar somente a CLI)
 cd front && npm install && npm run build && cd ..
@@ -164,6 +164,10 @@ orchestrator storage migrate-run <run_id>
 ## Arquitetura e Engenharia
 
 - **Engine de Orquestração**: **LangGraph** (`StateGraph` assíncrono com suporte a fan-out paralelo `Send` e conditional routing para Tier Routing de vídeo e QC loop).
+- **Runtime de Linguagem Nativo (D46)**: `LanguageRuntime` é o componente único para resolução de modelos LLM (`ChatOpenAI`, `ChatAnthropic`, mock) e execução dos 3 estágios criativos (`concepts`, `scripts`, `creator_profiles`) via `create_agent` com `ToolStrategy` para structured output Pydantic.
+- **Adapters de Domínio e Mídia**: `CompositeAdapter` é domain/media-only (`creator`, `video`, `qc`, `assembly`, `upscale`), mantendo o grafo desacoplado de providers externos.
+- **Distinção de Estratégias e Tools**: `ToolStrategy` é uma estratégia declarativa de resposta do LangChain para estruturação tipada, enquanto as *action tools* (`src/orchestrator/tools/`) executam chamadas de domínio, persistência, quotas e idempotência (`execute_paid_effect`).
+- **Avaliação e LLM Judge Isolados (D47)**: `GatewayJudge`, cassettes e evaluators pertencem exclusivamente ao módulo `src/orchestrator/evaluation/`, sem vazar para o runtime de produção.
 - **Checkpointer Resumível**: `AsyncPostgresSaver` com **Row Level Security (RLS)** habilitado por `organization_id` no PostgreSQL, garantindo isolamento multi-tenant completo.
 - **Pattern Outbox & Workers**: Concorrência otimista nos jobs (`FOR UPDATE SKIP LOCKED`), leases com heartbeat de 30s e isolamento por `PostgresEffectLedger` para impedir cobranças duplicadas em provedores pagos.
 - **Gate Humano V2**: Ponto único de interrupção (`review_creative_plan`). A aprovação/edição é enviada via `POST /api/v2/runs/{run_id}/review` com verificação de versão para evitar conflitos de concorrência (*stale gate rejection*).

@@ -20,9 +20,8 @@ Perfis atuais:
   um único interrupt `review_creative_plan` e **checkpointer** para resumibilidade
   (`thread_id` = run id). Local usa SQLite; com `DATABASE_URL`, usa
   `AsyncPostgresSaver` tenant-scoped.
-- **LangChain/adapters** — adapters abstraídos por papel (`llm`, `creator`, `video`,
-  `qc`, `assembly`, `upscale`). O `CompositeAdapter` permite misturar mock e real por
-  perfil de config.
+- **LangChain/LanguageRuntime** — runtime nativo para modelos de linguagem e agentes criativos (`concepts`, `scripts`, `creator_profiles`) via `create_agent` + `ToolStrategy` com structured output (D46).
+- **Adapters/CompositeAdapter** — `CompositeAdapter` é domain/media-only (`creator`, `video`, `qc`, `assembly`, `upscale`), permitindo misturar mock e real por perfil de config. O LLM Judge é isolado em `orchestrator.evaluation` (D47).
 - **LangSmith** — tracing e avaliação do LLM Judge. Tracing é automático quando
   `LANGSMITH_TRACING=true` e `LANGSMITH_API_KEY` estão setados (nada a codar — vem de
   usar LangChain/LangGraph). Sem as envs, roda offline.
@@ -137,9 +136,9 @@ Registre toda falha investigada (sintoma → causa → correção) na página da
 
 ## Como plugar ou trocar um adapter real
 
-1. Implemente os Protocols de `adapters/base.py` num novo adapter.
+1. Implemente os Protocols de `adapters/base.py` num novo adapter de domínio.
 2. Registre em `registry.py` (`register_adapter("replicate", factory)`).
-3. Troque o nome em `config/providers.yaml` (ex.: `video: vercel_gateway_video`).
+3. Troque o nome em `config/providers.yaml` (ex.: `creator: creator_vercel_elevenlabs_design` ou `video: replicate`). Para linguagem, configure `LanguageRuntime` via `providers.yaml` (`llm: vercel_gateway_llm`).
 4. O grafo não muda. Em execução durável com adapters pagos, só habilite
    `ORCH_ENABLE_PAID_ADAPTERS=true` quando a reserva/idempotência de efeitos estiver
    validada para o caminho que será rodado.
