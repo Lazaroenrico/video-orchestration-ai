@@ -25,6 +25,7 @@ novas entregas usam uma página própria em `docs/progress/changes/`.
 
 ## Últimas 10 entregas
 
+- [Persistência e validação do runtime contract dos runs](progress/changes/2026-08-15-runtime-contract-runs.md) — persistência de fingerprint canônico sem segredos, bloqueio de resume incompatível antes de chamadas pagas e preservação de consultas legacy.
 - [Isolamento do GatewayJudge no módulo de evaluation](progress/changes/2026-08-15-isolar-gatewayjudge-module-evaluation.md) — GatewayJudge e cassette tooling isolados em orchestrator.evaluation, JudgePort removido dos adapters de produção.
 - [Runtime de linguagem nativo LangChain](progress/changes/2026-08-14-langchain-native-runtime.md) — composição central de dependências, models/agents nativos, mock determinístico e vídeo sem `agent_takes` novo.
 - [Integração LatentSync 2-Estágios no Talking Head](progress/changes/2026-08-07-latentsync-talking-head.md) — LTX gera vídeo base em 720p e LatentSync aplica lip-sync com a voz ElevenLabs (3 retries, sem fallback silencioso).
@@ -34,7 +35,6 @@ novas entregas usam uma página própria em `docs/progress/changes/`.
 - [Quotas pagas no ambiente local](progress/changes/2026-08-03-dev-local-quotas-pagas.md) — wrapper configura limites no PostgreSQL local sem risco de usar o Neon do host.
 - [Reorganização do histórico de progresso](progress/changes/2026-08-03-reorganizacao-historico-progresso.md) — painel curto, legado mensal íntegro e contrato documental testado.
 - [Integração completa ElevenLabs Voice Design](progress/archive/2026-08.md#correção--integração-completa-elevenlabs-voice-design-2026-08-03) — design, seleção e finalização de voz entraram no fluxo V2 durável.
-- [Vídeo final com locução e montagem FFmpeg](progress/archive/2026-07.md#correção--vídeo-final-com-locução-elevenlabs-e-montagem-ffmpeg-2026-07-29) — finais passaram a concatenar clips e incluir áudio validado.
 
 ## Índice do histórico
 

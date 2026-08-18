@@ -2081,3 +2081,30 @@ async def test_local_execute_persists_combined_review_completion_and_error(
     assert "awaiting" not in phases
     assert "running" in phases
     assert phases[-2:] == ["done", "error"]
+
+
+async def test_local_run_task_records_runtime_contract(tmp_path):
+    run_id = "local-run-contract"
+    web_server._runs[run_id] = {"queues": [], "buffer": [], "done": False}
+    db_path = str(tmp_path / "web_contract.sqlite")
+
+    task = asyncio.create_task(
+        web_server._execute_run(
+            run_id,
+            offer="vitamin c",
+            batch=1,
+            platform="reels",
+            config_dir="config-mock",
+            db_path=db_path,
+            approve_creators=False,
+            edit_concepts=False,
+        )
+    )
+    await asyncio.wait_for(task, timeout=8)
+
+    assert "runtime_contract" in web_server._runs[run_id]
+    contract_data = web_server._runs[run_id]["runtime_contract"]
+    assert contract_data["graph_version"] == "v2"
+    assert contract_data["schema_version"] == "creative-v2"
+    assert len(contract_data["fingerprint"]) == 64
+

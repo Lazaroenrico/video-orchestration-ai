@@ -19,6 +19,8 @@ from orchestrator.graph.builder import build_graph
 from orchestrator.graph.checkpoint import open_checkpointer
 from orchestrator.graph.state import Item
 from orchestrator.progress import ProgressEventTranslator
+from orchestrator.registry import ROLES
+from orchestrator.runtime_contract import build_runtime_contract, validate_runtime_contract
 from orchestrator.storage.db import (
     ArtifactRepository,
     open_artifact_repository,
@@ -105,8 +107,11 @@ async def run_pipeline(
                 prior = await repository.load_latest_feedback()
         prior_styles = (prior or {}).get("winning_styles", [])
         campaign = (run_options or {}).get("campaign")
+        catalog = agent_catalog or default_agent_catalog()
+        contract = build_runtime_contract(pipeline, providers, agent_catalog=catalog)
         init = {
             "run_id": run_id,
+            "runtime_contract": contract.as_dict(),
             "config": {
                 "offer": offer,
                 "batch_size": batch,
@@ -172,22 +177,39 @@ async def resume_pipeline(
     effect_ledger: Any | None = None,
     durable: bool = False,
 ) -> tuple[str, dict[str, Any]]:
-    async with open_artifact_repository(default_artifacts_db_path()) as artifact_repository:
-        cfg = _build_config(
-            pipeline,
-            providers,
-            run_id,
-            platform,
-            feedback_store,
-            agent_catalog,
-            artifact_repository,
-            run_options,
-            effect_ledger,
-            durable,
+    catalog = agent_catalog or default_agent_catalog()
+    current_contract = build_runtime_contract(pipeline, providers, agent_catalog=catalog)
+    configured = (providers or {}).get("adapters", {}) if isinstance(providers, dict) else {}
+    if not isinstance(configured, dict):
+        configured = {}
+    is_paid = any(
+        str(adapter).strip().lower() != "mock"
+        for role, adapter in configured.items()
+        if role in ROLES or role == "llm"
+    )
+
+    async with open_checkpointer(db_path) as cp:
+        app = build_graph(pipeline, checkpointer=cp)
+        snap = await app.aget_state({"configurable": {"thread_id": run_id}})
+        persisted_contract = (
+            snap.values.get("runtime_contract") if snap and snap.values else None
         )
-        cfg.update(run_trace_config(run_id, platform=platform))
-        async with open_checkpointer(db_path) as cp:
-            app = build_graph(pipeline, checkpointer=cp)
+        validate_runtime_contract(current_contract, persisted_contract, is_paid=is_paid)
+
+        async with open_artifact_repository(default_artifacts_db_path()) as artifact_repository:
+            cfg = _build_config(
+                pipeline,
+                providers,
+                run_id,
+                platform,
+                feedback_store,
+                agent_catalog,
+                artifact_repository,
+                run_options,
+                effect_ledger,
+                durable,
+            )
+            cfg.update(run_trace_config(run_id, platform=platform))
             resume_input = (
                 Command(resume=resume_value)
                 if resume_value is not None
