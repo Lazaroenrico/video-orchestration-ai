@@ -16,7 +16,7 @@ Desacoplamento completo entre a geração estruturada do LangChain (`LanguageRun
 
 - **RED:** `tests/test_language_runtime.py`, `tests/test_stage_executor.py` e `tests/test_tracing_coverage.py` ajustados para invocar `generate_structured` e esperar retorno `BaseModel` sem callback `materialize`; falha inicial com `AttributeError: 'LanguageRuntime' object has no attribute 'generate_structured'`.
 - **GREEN:** Implementação de `generate_structured` em `src/orchestrator/language_runtime.py` e refatoração de `_execute_agentic_tool` em `src/orchestrator/stage_executor.py` para materialização direta pós-validação de schema.
-- **REFACTOR:** Adição de testes de borda para tipos de resposta inesperados, payloads não-dicionário e propagação de `ValidationError`.
+- **REFACTOR:** Adição de testes de borda para tipos de resposta inesperados, propagação de `ValidationError` e eliminação de fallback defensivo de dicionário no executor, aderindo estritamente ao retorno `BaseModel`.
 
 ## Falhas investigadas
 

@@ -4,6 +4,7 @@ import pytest
 from langchain_core.runnables import RunnableConfig
 
 from orchestrator.agent_catalog import AgentCatalog, StageExecutionSpec
+from orchestrator.language_runtime import agent_output_model
 from orchestrator.stage_executor import StageExecutionError, execute_stage_tool
 from orchestrator.tools.base import ToolContext
 
@@ -15,6 +16,9 @@ class RecordingRuntime:
 
     async def generate_structured(self, **kwargs: object) -> object:
         self.calls.append(kwargs)
+        if isinstance(self.submission, dict):
+            stage = str(kwargs.get("stage", "concepts"))
+            return agent_output_model(stage).model_validate(self.submission)
         return self.submission
 
 
@@ -168,13 +172,13 @@ async def test_native_agent_rejects_server_owned_fields_at_pydantic_boundary() -
 
 
 @pytest.mark.asyncio
-async def test_native_agent_rejects_non_object_submission() -> None:
+async def test_native_agent_rejects_non_pydantic_submission() -> None:
     runtime = RecordingRuntime("invalid-string-output")
 
     async def tool(_ctx: ToolContext, **_kwargs: object) -> object:
         return object()
 
-    with pytest.raises(StageExecutionError, match="structured_response must be an object"):
+    with pytest.raises(StageExecutionError, match="must be a Pydantic model"):
         await execute_stage_tool(
             _config(executor="agent"),
             _context(runtime),
