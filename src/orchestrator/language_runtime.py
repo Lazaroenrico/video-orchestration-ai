@@ -170,12 +170,160 @@ def agent_output_schema(stage: str) -> dict[str, Any]:
     return agent_output_model(stage).model_json_schema()
 
 
+class _FactoryMethod:
+    """Descriptor that dispatches factory methods for both class and instance calls."""
+
+    def __init__(self, method_name: str) -> None:
+        self.method_name = method_name
+
+    def __get__(self, instance: Any, owner: type) -> Any:
+        impl = getattr(owner, f"_{self.method_name}")
+        if instance is None:
+            def class_call(provider: str, *args: Any, **kwargs: Any) -> Any:
+                return impl(provider, *args, **kwargs)
+
+            return class_call
+
+        def instance_call(override_or_model: str | None = None, **kwargs: Any) -> Any:
+            return impl(instance.provider, override_or_model, settings=instance.settings, **kwargs)
+
+        return instance_call
+
+
+class LanguageModelFactory:
+    """Centralized factory for supported LangChain chat model deployments."""
+
+    SUPPORTED_PROVIDERS: frozenset[str] = frozenset(
+        {"mock", "vercel_gateway_llm", "anthropic", "anthropic_sdk_gateway"}
+    )
+
+    def __init__(self, provider: str, settings: Mapping[str, Any] | None = None) -> None:
+        if provider not in self.SUPPORTED_PROVIDERS:
+            raise KeyError(f"language provider desconhecido: {provider!r}")
+        self.provider = provider
+        self.settings = dict(settings or {})
+
+    resolve_model_name = _FactoryMethod("resolve_model_name")
+    create_model = _FactoryMethod("create_model")
+
+    @classmethod
+    def resolve_name(
+        cls,
+        provider: str,
+        override: str | None = None,
+        settings: Mapping[str, Any] | None = None,
+    ) -> str:
+        return cls._resolve_model_name(provider, override=override, settings=settings)
+
+    @classmethod
+    def create(
+        cls,
+        provider: str,
+        model: str | None = None,
+        settings: Mapping[str, Any] | None = None,
+    ) -> BaseChatModel:
+        return cls._create_model(provider, model=model, settings=settings)
+
+    @classmethod
+    def _resolve_model_name(
+        cls,
+        provider: str,
+        override: str | None = None,
+        settings: Mapping[str, Any] | None = None,
+    ) -> str:
+        if provider not in cls.SUPPORTED_PROVIDERS:
+            raise KeyError(f"language provider desconhecido: {provider!r}")
+        if provider == "mock":
+            default = "mock"
+        else:
+            default = "claude-opus-4-8" if provider == "anthropic" else DEFAULT_MODEL
+        cfg = settings or {}
+        gateway_model = (
+            os.environ.get("AI_GATEWAY_LLM_MODEL")
+            if provider in {"vercel_gateway_llm", "anthropic_sdk_gateway"}
+            else None
+        )
+        return str(
+            override
+            or gateway_model
+            or cfg.get("llm_model")
+            or cfg.get("model")
+            or default
+        )
+
+    @classmethod
+    def _create_model(
+        cls,
+        provider: str,
+        model: str | None = None,
+        settings: Mapping[str, Any] | None = None,
+    ) -> BaseChatModel:
+        if provider not in cls.SUPPORTED_PROVIDERS:
+            raise KeyError(f"language provider desconhecido: {provider!r}")
+
+        resolved_model = cls._resolve_model_name(provider, override=model, settings=settings)
+
+        if provider == "mock":
+            return MockChatModel(model=resolved_model)
+
+        _require_trace_redaction()
+
+        from langchain.chat_models import init_chat_model
+
+        if provider == "vercel_gateway_llm":
+            token = os.environ.get("AI_GATEWAY_API_KEY") or os.environ.get("VERCEL_OIDC_TOKEN")
+            if not token:
+                raise RuntimeError(
+                    "AI_GATEWAY_API_KEY or VERCEL_OIDC_TOKEN is required for vercel_gateway_llm"
+                )
+            base_url = _gateway_url(os.environ.get("AI_GATEWAY_BASE_URL"))
+            return init_chat_model(
+                resolved_model,
+                model_provider="openai",
+                api_key=token,
+                base_url=base_url,
+                timeout=120,
+                max_retries=3,
+            )
+
+        if provider == "anthropic":
+            token = os.environ.get("ANTHROPIC_API_KEY")
+            if not token:
+                raise RuntimeError("ANTHROPIC_API_KEY is required for anthropic")
+            return init_chat_model(
+                resolved_model,
+                model_provider="anthropic",
+                api_key=token,
+                timeout=120,
+                max_retries=3,
+            )
+
+        if provider == "anthropic_sdk_gateway":
+            token = os.environ.get("AI_GATEWAY_API_KEY") or os.environ.get("VERCEL_OIDC_TOKEN")
+            if not token:
+                raise RuntimeError(
+                    "AI_GATEWAY_API_KEY or VERCEL_OIDC_TOKEN is required for anthropic_sdk_gateway"
+                )
+            base_url = _anthropic_gateway_url(os.environ.get("AI_GATEWAY_BASE_URL"))
+            return init_chat_model(
+                resolved_model,
+                model_provider="anthropic",
+                api_key=token,
+                base_url=base_url,
+                timeout=120,
+                max_retries=4,
+            )
+
+        raise KeyError(f"language provider desconhecido: {provider!r}")
+
+
 class LanguageRuntime:
     """Cached provider models and stateless native creative agents for one run."""
 
     def __init__(self, provider: str, settings: Mapping[str, Any] | None = None) -> None:
         self.provider = provider
         self.settings = dict(settings or {})
+        self.factory = LanguageModelFactory(provider, settings)
         self._models: dict[str, Any] = {}
         self._agents: dict[tuple[str, str, str, int, int | None], Any] = {}
 
@@ -186,22 +334,7 @@ class LanguageRuntime:
         return cls(provider, pipeline)
 
     def _model_name(self, override: str | None = None) -> str:
-        if self.provider == "mock":
-            default = "mock"
-        else:
-            default = "claude-opus-4-8" if self.provider == "anthropic" else DEFAULT_MODEL
-        gateway_model = (
-            os.environ.get("AI_GATEWAY_LLM_MODEL")
-            if self.provider in {"vercel_gateway_llm", "anthropic_sdk_gateway"}
-            else None
-        )
-        return str(
-            override
-            or gateway_model
-            or self.settings.get("llm_model")
-            or self.settings.get("model")
-            or default
-        )
+        return self.factory.resolve_model_name(override)
 
     def model_for(self, stage: str, model: str | None = None) -> Any:
         key = self._model_name(model)
@@ -210,54 +343,8 @@ class LanguageRuntime:
         return self._models[key]
 
     def _build_model(self, model: str) -> Any:
-        provider = self.provider
-        if provider == "mock":
-            return MockChatModel()
+        return self.factory.create_model(model)
 
-        _require_trace_redaction()
-        if provider == "vercel_gateway_llm":
-            from langchain_openai import ChatOpenAI
-
-            token = os.environ.get("AI_GATEWAY_API_KEY") or os.environ.get("VERCEL_OIDC_TOKEN")
-            if not token:
-                raise RuntimeError(
-                    "AI_GATEWAY_API_KEY or VERCEL_OIDC_TOKEN is required for vercel_gateway_llm"
-                )
-            return ChatOpenAI(
-                model=model,
-                api_key=token,
-                base_url=_gateway_url(os.environ.get("AI_GATEWAY_BASE_URL")),
-                timeout=120,
-                max_retries=3,
-            )
-        if provider == "anthropic":
-            from langchain_anthropic import ChatAnthropic
-
-            token = os.environ.get("ANTHROPIC_API_KEY")
-            if not token:
-                raise RuntimeError("ANTHROPIC_API_KEY is required for anthropic")
-            return ChatAnthropic(
-                model=model,
-                api_key=token,
-                timeout=120,
-                max_retries=3,
-            )
-        if provider == "anthropic_sdk_gateway":
-            from langchain_anthropic import ChatAnthropic
-
-            token = os.environ.get("AI_GATEWAY_API_KEY") or os.environ.get("VERCEL_OIDC_TOKEN")
-            if not token:
-                raise RuntimeError(
-                    "AI_GATEWAY_API_KEY or VERCEL_OIDC_TOKEN is required for anthropic_sdk_gateway"
-                )
-            return ChatAnthropic(
-                model=model,
-                api_key=token,
-                base_url=_anthropic_gateway_url(os.environ.get("AI_GATEWAY_BASE_URL")),
-                timeout=120,
-                max_retries=4,
-            )
-        raise KeyError(f"language provider desconhecido: {provider!r}")
 
     def _agent_budgets(self, stage: str) -> tuple[int, int | None]:
         raw = self.settings.get("agent", {})
@@ -389,6 +476,7 @@ class LanguageRuntime:
 
 __all__ = [
     "LanguageRuntime",
+    "LanguageModelFactory",
     "MockChatModel",
     "ConceptAgentOutput",
     "ScriptAgentOutput",
