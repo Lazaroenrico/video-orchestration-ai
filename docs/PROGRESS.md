@@ -25,6 +25,7 @@ novas entregas usam uma página própria em `docs/progress/changes/`.
 
 ## Últimas 10 entregas
 
+- [Remoção de bridge, aliases e dependências mortos](progress/changes/2026-08-18-remover-bridge-aliases-dependencias-mortos.md) — remoção de Topaz/Replicate upscale, Vercel video/assembly, script bridge Node, package.json raiz e Node do Dockerfile runtime.
 - [Reduzir CreativeStageExecutor e catálogo aos três stages criativos](progress/changes/2026-08-18-reduzir-creativestageexecutor-e-catalogo.md) — redução do catálogo e executor aos stages `concepts`, `scripts` e `creator_profiles` com `materializer` único, remoção de metadados mortos e nós não criativos diretos.
 - [Consolidação da implementação mock de linguagem no LanguageRuntime](progress/changes/2026-08-18-consolidar-mock-linguagem.md) — centralização da geração e schemas mock de linguagem em `LanguageRuntime`, purga de métodos de LLM do `MockAdapter` e bloqueio de fallbacks.
 - [Separar submissão LangChain da materialização de criativos](progress/changes/2026-08-18-separar-submissao-langchain-materializacao.md) — desacoplamento do `LanguageRuntime.generate_structured` retornando Pydantic sem callbacks e materialização server-owned no executor.
@@ -34,7 +35,6 @@ novas entregas usam uma página própria em `docs/progress/changes/`.
 - [Classificação de aliases, adapters e integrações legadas](progress/changes/2026-08-17-classificacao-aliases-e-integracoes.md) — inventário de 19 itens classificados em `supported`, `compatibility` e `dead` com plano de rollback para subsidiar a issue #16.
 - [Caracterização de paridade do SDK ElevenLabs e decisão arquitetural](progress/changes/2026-08-17-caracterizacao-paridade-sdk-elevenlabs.md) — matriz de paridade executável e decisão HITL de manter REST artesanal seguro e sem dependências extras.
 - [LatentSync obrigatório e storage do vídeo-base](progress/changes/2026-08-15-latentsync-required-e-base-clip-storage.md) — validação estrita de `latentsync.required` e persistência do vídeo base LTX no storage canônico.
-- [LatentSync durável, idempotente e reconciliável](progress/changes/2026-08-15-latentsync-duravel-idempotente.md) — 2 estágios (LTX + LatentSync) com reservas duráveis, reconciliação de WriteTimeout e cancelamento no provider.
 
 ## Índice do histórico
 

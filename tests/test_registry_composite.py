@@ -6,8 +6,7 @@ from orchestrator.adapters.ffmpeg_assembly import FfmpegAssemblyAdapter
 from orchestrator.adapters.integrity_qc import IntegrityQCAdapter
 from orchestrator.adapters.mock import MockAdapter
 from orchestrator.adapters.passthrough_upscale import PassthroughUpscaleAdapter
-from orchestrator.adapters.vercel_gateway_video import VercelGatewayVideoAdapter
-from orchestrator.adapters.vercel_seedance_assembly import VercelSeedanceAssemblyAdapter
+from orchestrator.adapters.replicate_video import ReplicateVideoAdapter
 from orchestrator.registry import (
     ROLES,
     CompositeAdapter,
@@ -37,17 +36,17 @@ def test_registered_domain_adapters_are_resolved_by_role(pipeline_cfg):
     composite = build_adapter_from_providers(
         {
             "adapters": {
-                "video": "vercel_gateway_video",
+                "video": "replicate",
                 "qc": "integrity_qc",
-                "assembly": "vercel_seedance_assembly",
+                "assembly": "ffmpeg_assembly",
                 "upscale": "passthrough_upscale",
             }
         },
         pipeline_cfg,
     )
-    assert isinstance(composite._by_role["video"], VercelGatewayVideoAdapter)
+    assert isinstance(composite._by_role["video"], ReplicateVideoAdapter)
     assert isinstance(composite._by_role["qc"], IntegrityQCAdapter)
-    assert isinstance(composite._by_role["assembly"], VercelSeedanceAssemblyAdapter)
+    assert isinstance(composite._by_role["assembly"], FfmpegAssemblyAdapter)
     assert isinstance(composite._by_role["upscale"], PassthroughUpscaleAdapter)
 
 
