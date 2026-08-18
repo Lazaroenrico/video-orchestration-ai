@@ -75,6 +75,47 @@ def test_dead_adapters_not_in_active_configs() -> None:
             assert adapter_name not in dead_items
 
 
+def test_dead_files_and_bridges_are_purged() -> None:
+    """Verifica que todos os arquivos classificados como dead foram fisicamente removidos."""
+    root = Path(__file__).resolve().parents[1]
+    dead_files = [
+        root / "src" / "orchestrator" / "adapters" / "topaz_upscale.py",
+        root / "src" / "orchestrator" / "adapters" / "replicate_upscale.py",
+        root / "src" / "orchestrator" / "adapters" / "vercel_gateway_video.py",
+        root / "src" / "orchestrator" / "adapters" / "vercel_seedance_assembly.py",
+        root / "scripts" / "vercel_generate_video.mjs",
+        root / "package.json",
+        root / "package-lock.json",
+        root / "tests" / "test_vercel_gateway_video.py",
+        root / "tests" / "test_vercel_seedance_assembly.py",
+        root / "tests" / "test_replicate_upscale.py",
+    ]
+    for dead_file in dead_files:
+        assert not dead_file.exists(), f"Arquivo dead ainda existe: {dead_file}"
+
+
+def test_dead_adapters_not_in_registry_map() -> None:
+    """Garante que nenhum adapter dead consta no mapa de resoluções de _ADAPTERS."""
+    dead_adapter_names = {
+        "topaz_upscale",
+        "replicate_upscale",
+        "vercel_gateway_video",
+        "vercel_seedance_assembly",
+    }
+    for name in dead_adapter_names:
+        assert name not in _ADAPTERS, f"Adapter dead {name!r} ainda está registrado em _ADAPTERS"
+
+
+def test_dockerfile_runtime_does_not_install_node() -> None:
+    """Garante que o runtime Python no Dockerfile não instala nem copia Node/npm ou package.json raiz."""
+    root = Path(__file__).resolve().parents[1]
+    dockerfile_content = (root / "Dockerfile").read_text(encoding="utf-8")
+    runtime_stage = dockerfile_content.split("FROM python:3.12-slim-bookworm AS runtime")[-1]
+    assert "node" not in runtime_stage.lower() or "from=front-build /front/dist" in runtime_stage
+    assert "COPY --from=front-build /usr/local/bin/node" not in runtime_stage
+    assert "npm ci" not in runtime_stage
+
+
 def test_image_upscalers_not_in_registry_adapters() -> None:
     """Upscalers de imagem (Topaz/Replicate) foram retirados do registry do Step 3."""
     assert "topaz_upscale" not in _ADAPTERS
@@ -118,3 +159,4 @@ def test_language_runtime_providers_classification() -> None:
     # Unknown
     with pytest.raises(KeyError):
         LanguageRuntime.from_provider("unknown_provider", {})
+
