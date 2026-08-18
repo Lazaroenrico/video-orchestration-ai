@@ -1,4 +1,4 @@
-"""LLM Judge — adapter config-driven via API Gateway, com cassette record/replay.
+"""LLM Judge — avaliação determinística via API Gateway, com cassette record/replay.
 
 - A request é montada inteiramente a partir de ``config/judge.yaml`` (url, method,
   headers, body_template) — o contrato exato do gateway é trocável sem mexer no código.
@@ -13,8 +13,37 @@ from pathlib import Path
 from typing import Any, Optional
 
 import httpx
+from pydantic import BaseModel, Field
 
-from orchestrator.graph.state import JudgeVerdict
+
+class JudgeVerdict(BaseModel):
+    """Veredito do LLM Judge (via API Gateway)."""
+
+    score: float
+    verdict: str
+    passed: bool
+    raw: dict[str, Any] = Field(default_factory=dict)
+
+    @classmethod
+    def from_response(
+        cls,
+        score: float,
+        verdict: Optional[str],
+        threshold: float,
+        raw: Optional[dict[str, Any]] = None,
+    ) -> JudgeVerdict:
+        """Constrói o veredito a partir da resposta do gateway.
+
+        Se o gateway devolve um ``verdict`` explícito ("pass"/"fail"), ele manda;
+        caso contrário deriva-se de ``score >= threshold``.
+        """
+        if verdict is not None:
+            passed = verdict.strip().lower() in {"pass", "passed", "ok", "true", "1"}
+        else:
+            passed = score >= threshold
+            verdict = "pass" if passed else "fail"
+        return cls(score=score, verdict=verdict, passed=passed, raw=raw or {})
+
 
 # Critério fixo de QC (Step 7 do Context.md): realista, detalhe limpo, passa no "real test".
 DEFAULT_QC_CRITERIA = {
@@ -57,7 +86,7 @@ def dig(obj: Any, dotted: str) -> Any:
 
 
 class GatewayJudge:
-    """Implementa o JudgePort chamando um API Gateway descrito por config."""
+    """Implementa avaliação determinística chamando um API Gateway descrito por config."""
 
     def __init__(
         self,

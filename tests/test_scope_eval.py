@@ -11,15 +11,16 @@ from pathlib import Path
 import httpx
 import pytest
 
-from orchestrator.adapters.judge import (
+from orchestrator.config import load_judge
+from orchestrator.evaluation import (
     SCOPE_CRITERIA,
     Cassette,
     CassetteMiss,
     GatewayJudge,
+    JudgeVerdict,
     evaluate_judge,
     scope_adherence_evaluator,
 )
-from orchestrator.config import load_judge
 
 CASSETTE = Path(__file__).parent / "cassettes" / "scope_eval.json"
 
@@ -113,7 +114,6 @@ def test_scope_criteria_has_required_keys():
 
 
 def test_scope_adherence_evaluator_correct():
-    from orchestrator.graph.state import JudgeVerdict
     v_pass = JudgeVerdict(score=0.9, verdict="pass", passed=True)
     ev = scope_adherence_evaluator(v_pass, True)
     assert ev["key"] == "scope_adherence"
@@ -121,7 +121,6 @@ def test_scope_adherence_evaluator_correct():
 
 
 def test_scope_adherence_evaluator_incorrect():
-    from orchestrator.graph.state import JudgeVerdict
     v_fail = JudgeVerdict(score=0.3, verdict="fail", passed=False)
     ev = scope_adherence_evaluator(v_fail, True)  # esperava pass, veio fail
     assert ev["score"] == 0.0
@@ -170,8 +169,8 @@ def test_evaluate_judge_backwards_compatible(judge_config):
     """Sem criteria/evaluator, deve usar DEFAULT_QC_CRITERIA + qc_correctness_evaluator."""
     from pathlib import Path
 
-    from orchestrator.adapters.judge import Cassette, GatewayJudge, evaluate_judge
     from orchestrator.config import load_judge
+    from orchestrator.evaluation import Cassette, GatewayJudge, evaluate_judge
 
     QC_CASSETTE = Path(__file__).parent / "cassettes" / "judge_qc.json"
     QC_DATASET = [

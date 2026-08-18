@@ -63,9 +63,9 @@ async def derive_creator_voice_spec_tool(
         stage="voice_spec",
         run_id=ctx.run_id,
     )
-    from orchestrator.creative_contracts import CreatorVoiceSpec
-
     import re
+
+    from orchestrator.creative_contracts import CreatorVoiceSpec
 
     voice_prof = profile.get("voice_profile") or {}
     preset = voice_prof.get("preset") if isinstance(voice_prof, dict) else getattr(voice_prof, "preset", None)
