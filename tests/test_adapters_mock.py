@@ -23,32 +23,12 @@ def adapter():
     return MockAdapter(tiers=TIERS)
 
 
-# --- concepts (Step 1) ---
+# --- language methods purged from MockAdapter ---
 
-async def test_generate_concepts_count_and_determinism(adapter):
-    a = await adapter.generate_concepts(offer="serum X", n=10, seed="wk1")
-    b = await adapter.generate_concepts(offer="serum X", n=10, seed="wk1")
-    assert len(a) == 10
-    assert a == b  # determinístico
-    # spread: mais de um estilo de hook no batch (não 10 cópias da mesma ideia)
-    assert len({c["hook_style"] for c in a}) > 1
+def test_mock_adapter_has_no_language_methods(adapter):
+    assert not hasattr(adapter, "generate_concepts")
+    assert not hasattr(adapter, "write_script")
 
-
-async def test_generate_concepts_seed_changes_output(adapter):
-    a = await adapter.generate_concepts(offer="serum X", n=5, seed="wk1")
-    b = await adapter.generate_concepts(offer="serum X", n=5, seed="wk2")
-    assert a != b
-
-
-# --- scripts (Step 2) ---
-
-async def test_write_script_has_hook_and_cta(adapter):
-    concept = {"hook": "você está fazendo errado", "angle": "problema", "hook_style": "problem"}
-    script = await adapter.write_script(concept, creator_ref="creator-1", platform="tiktok")
-    assert isinstance(script, str)
-    assert "HOOK" in script.upper()
-    assert "CTA" in script.upper()
-    assert "tiktok" in script.lower()  # calibrado por plataforma
 
 
 # --- creator/roster (Step 3) ---

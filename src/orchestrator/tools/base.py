@@ -32,10 +32,17 @@ class ToolContext:
 
 def tool_context_from_config(config: RunnableConfig) -> ToolContext:
     """Extract the already-resolved adapter and runtime knobs from RunnableConfig."""
-    configurable = config["configurable"]
+    configurable = config.get("configurable", {}) if isinstance(config, dict) else {}
+    language_runtime = configurable.get("language_runtime")
+    if language_runtime is None:
+        from orchestrator.language_runtime import LanguageRuntime
+
+        language_runtime = LanguageRuntime.from_provider(
+            "mock", configurable.get("pipeline", {})
+        )
     return ToolContext(
-        adapter=configurable["adapter"],
-        language_runtime=configurable.get("language_runtime"),
+        adapter=configurable.get("adapter"),
+        language_runtime=language_runtime,
         pipeline=configurable.get("pipeline", {}),
         run=configurable.get("run", {}),
         run_id=configurable.get("thread_id", "run"),
@@ -46,6 +53,7 @@ def tool_context_from_config(config: RunnableConfig) -> ToolContext:
         storage_resolver=configurable.get("storage_resolver"),
         videos_root=configurable.get("videos_root"),
     )
+
 
 
 def direct_elevenlabs_voice_enabled(ctx: ToolContext) -> bool:

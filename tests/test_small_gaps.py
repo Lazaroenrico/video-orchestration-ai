@@ -63,8 +63,8 @@ def test_is_video_uri_false_for_empty():
 
 async def test_mock_adapter_awaits_latency():
     adapter = mock.MockAdapter(tiers=[{"name": "ltx"}], latency=0.001)
-    concepts = await adapter.generate_concepts(offer="x", n=1, seed="s")
-    assert len(concepts) == 1
+    creator = await adapter.build_creator(index=0)
+    assert creator["id"] == "creator-0"
 
 
 async def test_mock_qc_check_requires_item_id():
@@ -101,24 +101,21 @@ def test_native_agent_includes_the_configured_system_prompt(monkeypatch):
     assert captured["system_prompt"] == "safe prompt"
 
 
-def test_mock_terminal_submission_rejects_an_unknown_stage():
-    with pytest.raises(ValueError, match="unsupported terminal mock stage"):
-        mock._terminal_submission("unknown", {})
-
-
 async def test_mock_creative_outputs_change_deterministically_for_persona_and_revision():
-    adapter = mock.MockAdapter(tiers=[])
+    from orchestrator.language_runtime import LanguageRuntime
 
-    concepts = await adapter.generate_concepts(
+    runtime = LanguageRuntime.from_provider("mock", {})
+
+    concepts = await runtime.generate_concepts(
         offer="Serum X",
         n=1,
         seed="run-1",
         revision="shorter",
     )
-    script = await adapter.write_script(
-        concepts[0],
-        "creator-0",
-        "tiktok",
+    script = await runtime.write_script(
+        concept=concepts[0],
+        creator_ref="creator-0",
+        platform="tiktok",
         persona="Busy parent",
         revision="shorter",
     )
@@ -126,6 +123,7 @@ async def test_mock_creative_outputs_change_deterministically_for_persona_and_re
     assert concepts[0]["id"].startswith("concept-")
     assert "PERSONA_CONTEXT[" in script
     assert "REVISED[" in script
+
 
 
 # ------------------------------------------------------------------ #
