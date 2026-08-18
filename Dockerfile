@@ -35,9 +35,12 @@ WORKDIR /app
 
 # Dependências Python (extra [web] traz fastapi/uvicorn p/ o papel `api`).
 RUN pip install --no-cache-dir uv
-COPY pyproject.toml README.md ./
+COPY pyproject.toml uv.lock README.md ./
 COPY src/ ./src/
-RUN uv pip install --system --no-cache -e ".[web]"
+RUN uv export --frozen --extra web --no-dev --output-file /tmp/requirements.txt \
+    && uv pip install --system --no-cache -r /tmp/requirements.txt \
+    && uv pip install --system --no-cache --no-deps -e ".[web]" \
+    && rm /tmp/requirements.txt
 
 # Código de app: configs, scripts e a SPA já buildada.
 COPY config/ ./config/

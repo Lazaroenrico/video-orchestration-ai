@@ -105,7 +105,7 @@
       "id": "composite",
       "type": "backend",
       "label": "CompositeAdapter",
-      "sublabel": "role -> provider",
+      "sublabel": "domain/media roles",
       "pos": [1400, 350],
       "size": [150, 60]
     },
@@ -121,7 +121,7 @@
       "id": "gateway",
       "type": "cloud",
       "label": "Vercel AI Gateway",
-      "sublabel": "LLM + image + Seedance",
+      "sublabel": "LLM (LangChain) + Image",
       "pos": [1400, 115],
       "size": [150, 66]
     },
@@ -129,7 +129,7 @@
       "id": "replicate",
       "type": "cloud",
       "label": "Replicate",
-      "sublabel": "LTX + creator assets",
+      "sublabel": "LTX/P-Video + LatentSync",
       "pos": [1400, 510],
       "size": [150, 60]
     },
@@ -279,27 +279,27 @@
       "dot": "cyan",
       "title": "Core runtime",
       "items": [
-        "LangGraph owns topology and resumability",
-        "Stage Executor enforces tool vs agent execution",
-        "Typed tools validate outputs before adapters"
+        "LangGraph owns topology, resumability and Human Gate V2",
+        "LanguageRuntime executes creative agents with ToolStrategy (D46)",
+        "Typed tools validate outputs before CompositeAdapter"
       ]
     },
     {
       "dot": "emerald",
-      "title": "D35 agent contract",
+      "title": "D46/D47 architecture",
       "items": [
-        "Persona runs before concepts",
-        "Persona, concepts, scripts, video have own system prompts",
-        "Catalog exposes path + has_system_prompt, not prompt text"
+        "LanguageRuntime manages ChatOpenAI / ChatAnthropic / Mock",
+        "CompositeAdapter is domain/media-only (creator, video, qc, assembly, upscale)",
+        "GatewayJudge is isolated in evaluation module (D47)"
       ]
     },
     {
       "dot": "rose",
-      "title": "Profiles and providers",
+      "title": "Profiles and persistence",
       "items": [
-        "config/ uses live providers through role routing",
-        "config-mock/ stays offline and deterministic",
-        "External calls require env keys; LangSmith is optional"
+        "PostgreSQL stores checkpoints, gates, events and effect ledger",
+        "config/ uses live providers with paid adapter protection",
+        "config-mock/ stays offline and deterministic"
       ]
     }
   ]

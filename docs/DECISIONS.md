@@ -125,6 +125,7 @@ Datas absolutas. Apendar novas decisões ao final.
   do anterior). Cada ciclo continua sendo um run inspecionável via `status`/`list`/`resume`.
 
 ### D17 — Resolução de adapter por papel (`CompositeAdapter`)
+*(Substituída em parte por D46 e D47: o papel `llm` pertence exclusivamente ao `LanguageRuntime` e o Judge foi isolado em `orchestrator.evaluation`. `CompositeAdapter` é estritamente domain/media-only: `creator`, `video`, `qc`, `assembly`, `upscale`.)*
 - **Contexto:** o `registry` só resolvia o papel `video` e usava esse adapter único para
   TODOS os métodos. Para misturar adapters reais e mock por papel (ex.: Claude no LLM,
   mock no resto) era preciso rotear por papel.
@@ -140,6 +141,7 @@ Datas absolutas. Apendar novas decisões ao final.
   `test_registry_composite.py` (2).
 
 ### D18 — Adapters reais (Claude LLM + Creator), só as ligações
+*(Substituída no escopo de LLM por D46: `AnthropicLLMAdapter` e `LLMPort` foram substituídos pelo runtime nativo LangChain `LanguageRuntime` / `LanguageModelFactory`.)*
 - **Contexto:** pedido de "rodar com as APIs conectadas"; Steps 8 (montagem) e 9
   (distribuição) não têm API única e seguem mock. O caminho live de LLM será via gateway.
 - **Decisão:** construídos via subagentes Sonnet (Opus coordena — D12), em escopos de
@@ -158,6 +160,7 @@ Datas absolutas. Apendar novas decisões ao final.
   ambiente + flip em `providers.yaml`. Video real (Replicate, D14) já existia.
 
 ### D19 — Vercel AI Gateway só para o LLMPort nesta rodada
+*(Substituída por D46: o tráfego LLM é roteado nativamente pelo `LanguageRuntime` usando `ChatOpenAI`/`ChatAnthropic` através do `LanguageModelFactory`.)*
 - **Contexto:** o LLMPort (Steps 1 e 2) já usa `AnthropicLLMAdapter`; era preciso ativar
   Vercel AI Gateway sem mexer na topologia do grafo nem expandir o escopo para creator,
   video ou judge.
@@ -361,6 +364,7 @@ Datas absolutas. Apendar novas decisões ao final.
 ## 2026-07-14
 
 ### D29 — Migração incremental para agents executions sobre a camada de tools
+*(Substituída no escopo de LLM e agent loops por D46: LangChain nativo em `LanguageRuntime` com `create_agent` + `ToolStrategy`. `CompositeAdapter` é restrito a domain/media-only.)*
 - **Contexto:** o motor atual usa LangGraph como runtime de orquestração, com fan-out,
   conditional edges, interrupts humanos, checkpointer e resume. A base já foi preparada
   com a camada `orchestrator.tools`: nodes chamam tools tipadas, as tools validam shape
@@ -420,6 +424,7 @@ Datas absolutas. Apendar novas decisões ao final.
 ## 2026-07-15
 
 ### D31 — Execução agentic real via adapter LLM gateway-nativo (Fase 7 do D29)
+*(Substituída por D46: o loop agentic customizado foi substituído pelo runtime nativo LangChain `LanguageRuntime`.)*
 - **Contexto:** a Fase 7 do D29 (ADR `docs/ADR-D31-agentic-execution.md`) introduz o loop
   agentic *critique → refine* bounded em `concepts`/`scripts`, com o brain no adapter LLM
   via `AgentPort.run_stage_agent` e `revision` como canal genérico de refino. O backend
@@ -441,6 +446,7 @@ Datas absolutas. Apendar novas decisões ao final.
   `llm: vercel_gateway_llm` passa a resolver o adapter gateway-nativo.
 
 ### D32 — Loop de tool-calling real (substitui o wrapper critique→refine bounded)
+*(Substituída por D46: substituído por `create_agent` + `ToolStrategy` em `LanguageRuntime`.)*
 - **Contexto:** o D31 entregou um wrapper agentic *fixo* de 2 passos (draft → critique →
   refine ×1): o modelo só devolvia uma diretiva de texto ou `APPROVE`, sem receber schemas
   de tools nem escolher tools. O D29 marcou "tool-calling real / live-by-default agents"
@@ -466,6 +472,7 @@ Datas absolutas. Apendar novas decisões ao final.
   fora de escopo (Fase 2); streaming e judge proxy, fora (Fase 3).
 
 ### D33 — Stage `video` agentic: revision apendada, contabilidade de takes e budget por stage
+*(Substituída por D38 e D46: mídia e vídeo não usam loop de agentes; apenas `concepts`, `scripts` e `creator_profiles` usam `create_agent` com `ToolStrategy`.)*
 - **Contexto:** o D32 entregou o loop de tool-calling real, mas restrito a `concepts`/
   `scripts` — `_AGENT_STAGES` bloqueava mídia e o D29 exigia ADR próprio para liberá-la.
   Mídia é onde o agente pode agregar mais (reagir a uma take ruim ou a uma falha do
@@ -506,6 +513,7 @@ Datas absolutas. Apendar novas decisões ao final.
   próprio; multi-tool por stage segue YAGNI (nenhum stage tem 2 tools legítimas).
 
 ### D34 — Streaming de tokens no GatewayLLMAdapter (SSE)
+*(Substituída por D46: streaming e callbacks são integrados diretamente pelo runtime LangChain).*
 - **Contexto:** o D31 deixou streaming de fora e só o `AnthropicLLMAdapter` emitia tokens
   (via `messages.stream` do SDK). Mas o adapter LLM **default do perfil live** é o
   `GatewayLLMAdapter` — ou seja, na prática o dashboard nunca via token nenhum.

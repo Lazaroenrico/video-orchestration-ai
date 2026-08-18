@@ -3,7 +3,7 @@
   "diagram_type": "workflow",
   "meta": {
     "title": "Project Flow Atual do UGC Orchestrator",
-    "subtitle": "persona -> concepts -> scripts -> creator -> per-item media -> QC -> assembly -> feedback",
+    "subtitle": "concepts -> scripts -> creator_profiles -> roster -> voice_candidates -> review -> finalize_voices -> per-item media -> QC -> assembly",
     "output": "docs/project-flow.html",
     "viewBox": [720, 1640]
   },
@@ -162,7 +162,7 @@
       "col": 5,
       "type": "cloud",
       "label": "Assembly",
-      "sublabel": "Seedance"
+      "sublabel": "FFmpeg"
     },
     {
       "id": "upscale",
