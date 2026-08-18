@@ -42,7 +42,7 @@ def _stage_spec(config: RunnableConfig, stage: str) -> StageExecutionSpec:
 
 
 def _ensure_allowed(spec: StageExecutionSpec, tool_name: str) -> None:
-    if tool_name not in spec.tools:
+    if tool_name != spec.materializer and tool_name not in spec.tools:
         raise StageExecutionError(f"tool {tool_name!r} is not allowed for stage {spec.stage!r}")
 
 
@@ -106,6 +106,8 @@ async def execute_stage_tool(
     **kwargs: Any,
 ) -> Any:
     """Execute a typed tool directly or via the native LanguageRuntime agent."""
+    if not is_agent_stage_allowed(catalog_stage):
+        raise StageExecutionError(agent_stage_not_allowed_message())
     spec = _stage_spec(config, catalog_stage)
     _ensure_allowed(spec, tool_name)
     if spec.executor == "tool":

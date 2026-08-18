@@ -395,45 +395,32 @@ async def test_node_upscale_best_effort_on_failure():
     assert result == {}  # preserva o vídeo montado, não derruba o item
 
 
-async def test_node_upscale_propagates_stage_execution_error():
-    """A3: erro de config (catálogo sem o stage) não pode virar no-op best-effort."""
-    from orchestrator.agent_catalog import AgentCatalog
-    from orchestrator.stage_executor import StageExecutionError
+async def test_node_upscale_runs_directly_without_agent_catalog():
+    """A3/Critério 5: upscale roda direto sem intermediário do catálogo."""
+    from orchestrator.adapters.mock import MockAdapter
 
-    class _Upscaler:
-        async def upscale(self, media_uri):
-            raise AssertionError("não deve ser chamado com catálogo inválido")
+    item = _assembled_item()
+    config = _upscale_config(MockAdapter(tiers=[]))
 
-    config = _upscale_config(_Upscaler())
-    config["configurable"]["agent_catalog"] = AgentCatalog(stages=())  # stage 'upscale' ausente
-
-    with pytest.raises(StageExecutionError, match="not configured"):
-        await stages.node_upscale(_assembled_item(), config)
+    result = await stages.node_upscale(item, config)
+    assert result.get("assembled") is not None
 
 
-async def test_node_assembly_propagates_stage_execution_error(monkeypatch, tmp_path):
-    """A3: mesma regra para assembly — erro de config estoura, não vira erro por-item."""
-    from orchestrator.agent_catalog import AgentCatalog
-    from orchestrator.stage_executor import StageExecutionError
-
+async def test_node_assembly_runs_directly_without_agent_catalog(monkeypatch, tmp_path):
+    """A3/Critério 5: assembly roda direto sem intermediário do catálogo."""
     monkeypatch.setattr(stages, "default_videos_path", lambda: tmp_path)
-
-    class _Assembler:
-        async def assemble(self, **kwargs):
-            raise AssertionError("não deve ser chamado com catálogo inválido")
 
     config = {
         "configurable": {
-            "adapter": _Assembler(),
+            "adapter": MockAdapter(tiers=[]),
             "pipeline": {},
             "run": {"platform": "tiktok"},
             "thread_id": "run-x",
-            "agent_catalog": AgentCatalog(stages=()),  # stage 'assembly' ausente
         }
     }
 
-    with pytest.raises(StageExecutionError, match="not configured"):
-        await stages.node_assembly(_assembled_item(), config)
+    result = await stages.node_assembly(_assembly_item(), config)
+    assert result.get("assembled") is not None
 
 
 # ------------------------------------------------------------------ #
@@ -727,8 +714,8 @@ async def test_node_review_preserves_concept_edits_before_regeneration(monkeypat
 async def test_node_finalize_voices_uses_only_selected_candidate(monkeypatch):
     calls = []
 
-    async def execute(*_args, **kwargs):
-        calls.append(kwargs)
+    async def finalize(_ctx, *, candidate_id, batch, creator_id, organization_id=""):
+        calls.append({"candidate_id": candidate_id, "batch": batch, "creator_id": creator_id})
         return {
             "provider": "elevenlabs",
             "voice_ref": "voice-permanent-1",
@@ -738,7 +725,7 @@ async def test_node_finalize_voices_uses_only_selected_candidate(monkeypatch):
             "tts_model": "eleven_turbo_v2_5",
         }
 
-    monkeypatch.setattr(stages, "execute_stage_tool", execute)
+    monkeypatch.setattr(stages, "finalize_creator_voice_tool", finalize)
     candidates = [
         {
             "candidate_id": f"candidate-{index}",
@@ -828,7 +815,7 @@ async def test_node_finalize_voices_blocks_missing_selection_or_empty_voice(monk
     async def empty_voice(*_args, **_kwargs):
         return {"voice_ref": ""}
 
-    monkeypatch.setattr(stages, "execute_stage_tool", empty_voice)
+    monkeypatch.setattr(stages, "finalize_creator_voice_tool", empty_voice)
     with pytest.raises(ValueError, match="empty voice_ref"):
         await stages.node_finalize_voices(state, config)
 
@@ -860,7 +847,7 @@ async def test_node_finalize_voices_requires_canonical_selected_preview(monkeypa
     async def finalize(*_args, **_kwargs):
         return {"voice_ref": "voice-permanent", "provider": "elevenlabs"}
 
-    monkeypatch.setattr(stages, "execute_stage_tool", finalize)
+    monkeypatch.setattr(stages, "finalize_creator_voice_tool", finalize)
     candidate = {"candidate_id": "candidate-0", "preview": {}}
     state = {
         "roster": [
@@ -887,7 +874,7 @@ async def test_node_finalize_voices_blocks_missing_assigned_creator(monkeypatch)
     async def finalize(*_args, **_kwargs):
         return {"voice_ref": "voice-permanent", "provider": "elevenlabs"}
 
-    monkeypatch.setattr(stages, "execute_stage_tool", finalize)
+    monkeypatch.setattr(stages, "finalize_creator_voice_tool", finalize)
     candidate = {
         "candidate_id": "candidate-0",
         "preview": {"uri": "r2://preview.mp3"},
@@ -920,19 +907,19 @@ async def test_node_finalize_voices_blocks_missing_assigned_creator(monkeypatch)
 async def test_node_voice_candidates_rerolls_only_requested_creator(monkeypatch):
     designed_for = []
 
-    async def execute(*_args, **kwargs):
-        if kwargs["tool_name"] == "derive_creator_voice_spec":
-            designed_for.append(kwargs["profile"]["id"])
-            return {
-                "language_code": "pt-BR",
-                "accent": "neutral",
-                "vocal_presentation": "neutral",
-                "vocal_age": "adult",
-                "timbre": "warm",
-                "pace": "conversational",
-                "energy": "balanced",
-            }
-        creator_id = designed_for[-1]
+    async def derive_spec(_ctx, *, profile, **_kwargs):
+        designed_for.append(profile["id"])
+        return {
+            "language_code": "pt-BR",
+            "accent": "neutral",
+            "vocal_presentation": "neutral",
+            "vocal_age": "adult",
+            "timbre": "warm",
+            "pace": "conversational",
+            "energy": "balanced",
+        }
+
+    async def design_voice(_ctx, *, spec, creator_id, reroll_count=0, **_kwargs):
         return {
             "provider": "elevenlabs",
             "design_model": "eleven_ttv_v3",
@@ -955,7 +942,8 @@ async def test_node_voice_candidates_rerolls_only_requested_creator(monkeypatch)
     async def persist(candidates, **_kwargs):
         return candidates
 
-    monkeypatch.setattr(stages, "execute_stage_tool", execute)
+    monkeypatch.setattr(stages, "derive_creator_voice_spec_tool", derive_spec)
+    monkeypatch.setattr(stages, "design_creator_voice_tool", design_voice)
     monkeypatch.setattr(stages.media_store, "persist_voice_candidates", persist)
     untouched = {
         "id": "creator-1",
@@ -1204,17 +1192,18 @@ async def test_node_voiceover_surfaces_provider_failure():
     assert result["error"] == "voiceover: TTS unavailable"
 
 
-async def test_node_voiceover_propagates_stage_configuration_error(monkeypatch):
-    async def misconfigured(*args, **kwargs):
-        raise stages.StageExecutionError("voiceover stage is not configured")
+async def test_node_voiceover_surfaces_adapter_error_and_does_not_raise(monkeypatch):
+    async def failing_tts(*args, **kwargs):
+        raise RuntimeError("TTS quota exceeded")
 
-    monkeypatch.setattr(stages, "execute_stage_tool", misconfigured)
+    monkeypatch.setattr(stages, "synthesize_voiceover_tool", failing_tts)
     item = _assembly_item().model_copy(
         update={"creator_voice_ref": "Rachel", "script": "HOOK: Texto"}
     )
 
-    with pytest.raises(stages.StageExecutionError, match="not configured"):
-        await stages.node_voiceover(item, _assembly_config(object()))
+    result = await stages.node_voiceover(item, _assembly_config(object()))
+    assert result["voiceover"] is None
+    assert "TTS quota exceeded" in result["error"]
 
 
 class _BoomAssembler:
