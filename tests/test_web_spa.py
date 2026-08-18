@@ -114,7 +114,7 @@ async def test_integrations_reads_provider_adapters(monkeypatch) -> None:
     out = await web_server.integrations_index()
     assert out["stages"] == {"video": "replicate", "llm": "gateway"}
     assert out["agents"]["stages"]["concepts"]["executor"] == "tool"
-    assert out["agents"]["stages"]["concepts"]["tools"] == ["generate_concepts"]
+    assert out["agents"]["stages"]["concepts"]["materializer"] == "generate_concepts"
 
 
 @pytest.mark.asyncio
