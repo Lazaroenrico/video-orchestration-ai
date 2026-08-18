@@ -448,7 +448,14 @@ async def test_node_scripts_writes_script_per_concept():
             seen.append((concept, creator_ref, platform))
             return f"HOOK: SCRIPT for {concept['id']} ({platform}) with extra spoken words to easily satisfy the server minimum requirement of twenty eight words for script duration validation in test suite execution right here now."
 
-    config = {"configurable": {"adapter": _ScriptAdapter(), "run": {"platform": "reels"}}}
+    config = {
+        "configurable": {
+            "adapter": object(),
+            "language_runtime": _ScriptAdapter(),
+            "run": {"platform": "reels"},
+        }
+    }
+
     state = {"concepts": [{"id": "c-0", "hook": "h0"}, {"id": "c-1", "hook": "h1"}]}
 
     result = await stages.node_scripts(state, config)

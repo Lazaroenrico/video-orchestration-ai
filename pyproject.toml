@@ -53,8 +53,10 @@ packages = ["src/orchestrator"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+pythonpath = [".", "src"]
 addopts = "-q --cov=orchestrator --cov-report=term-missing"
 postgresql_exec = "/usr/lib/postgresql/16/bin/pg_ctl"
+
 
 [tool.coverage.run]
 source = ["src/orchestrator"]
