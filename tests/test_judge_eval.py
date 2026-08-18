@@ -11,15 +11,16 @@ from pathlib import Path
 import httpx
 import pytest
 
-from orchestrator.adapters.judge import (
+from orchestrator.config import load_judge
+from orchestrator.evaluation import (
     DEFAULT_QC_CRITERIA,
     Cassette,
     CassetteMiss,
     GatewayJudge,
+    JudgeVerdict,
     dig,
     evaluate_judge,
 )
-from orchestrator.config import load_judge
 
 CASSETTE = Path(__file__).parent / "cassettes" / "judge_qc.json"
 
@@ -97,7 +98,7 @@ def test_judge_live_path_uses_own_client(judge_config, tmp_path, monkeypatch):
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"output": {"score": 0.77, "verdict": "pass"}})
 
-    import orchestrator.adapters.judge as judge_mod
+    import orchestrator.evaluation.judge as judge_mod
 
     real_client = httpx.Client  # captura antes de patchar (módulo httpx é global)
     monkeypatch.setattr(
@@ -109,6 +110,25 @@ def test_judge_live_path_uses_own_client(judge_config, tmp_path, monkeypatch):
     v = j.judge(DEFAULT_QC_CRITERIA, {"id": "clip-o"}, key="clip-o")
 
     assert v.score == 0.77
+
+
+def test_judge_verdict_from_response_derives_passed_above_threshold():
+    v = JudgeVerdict.from_response(score=0.91, verdict=None, threshold=0.8)
+    assert v.score == 0.91
+    assert v.passed is True
+    assert v.verdict == "pass"
+
+
+def test_judge_verdict_from_response_below_threshold():
+    v = JudgeVerdict.from_response(score=0.5, verdict=None, threshold=0.8)
+    assert v.passed is False
+    assert v.verdict == "fail"
+
+
+def test_judge_verdict_explicit_verdict_overrides_threshold():
+    v = JudgeVerdict.from_response(score=0.5, verdict="pass", threshold=0.8)
+    assert v.passed is True
+    assert v.verdict == "pass"
 
 
 def test_evaluate_judge_accuracy_is_deterministic(judge_config):
@@ -160,3 +180,8 @@ def test_live_path_records_via_fake_gateway(judge_config, tmp_path):
     # gravou no cassette e o replay devolve o mesmo sem rede
     replay = GatewayJudge(judge_config, cassette=Cassette(tmp_path / "rec.json"), live=False)
     assert replay.judge(DEFAULT_QC_CRITERIA, {"id": "clip-x"}, key="clip-x").score == 0.88
+
+
+def test_adapters_judge_module_does_not_exist():
+    import importlib.util
+    assert importlib.util.find_spec("orchestrator.adapters.judge") is None

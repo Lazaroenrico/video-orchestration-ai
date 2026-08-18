@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 from types import SimpleNamespace
 
 import httpx
@@ -7,7 +8,7 @@ import pytest
 
 from orchestrator.adapters.replicate_video import ReplicateVideoAdapter
 from orchestrator.tools.base import ToolContext
-from orchestrator.tools.video import generate_clip_tool
+from orchestrator.tools.video import VideoEffectError, generate_clip_tool
 
 
 class FakeVideoLedger:
@@ -445,3 +446,1018 @@ async def test_known_prediction_is_canceled_at_deadline_and_becomes_definitive(m
     assert error.value.uncertain is False
     assert cancel_calls == 1
     assert ledger.effect is not None and ledger.effect.status == "failed"
+
+
+async def test_durable_latentsync_executes_both_stages_with_distinct_effect_keys(monkeypatch):
+    """Pipeline durável de 2 estágios cria reservas para vídeo base e LatentSync."""
+    monkeypatch.setenv("ORCH_ENABLE_PAID_ADAPTERS", "true")
+    monkeypatch.setenv("ORCH_PUBLIC_API_BASE_URL", "https://orchestrator.example")
+    monkeypatch.setenv("ORCH_WEBHOOK_CORRELATION_SECRET", "correlation-secret")
+
+    create_calls: list[dict] = []
+
+    async def async_create(*, model, input, **params):
+        create_calls.append({"model": model, "input": input, "params": params})
+        if model == "lightricks/ltx-2.3-fast":
+            return SimpleNamespace(id="pred-ltx-1", status="succeeded", output="https://cdn.replicate.com/ltx.mp4", error=None)
+        if model == "bytedance/latentsync":
+            return SimpleNamespace(id="pred-ls-1", status="succeeded", output="https://cdn.replicate.com/latentsync.mp4", error=None)
+        raise ValueError(f"unknown model {model}")
+
+    async def async_get(prediction_id):
+        if prediction_id == "pred-ltx-1":
+            return SimpleNamespace(id="pred-ltx-1", status="succeeded", output="https://cdn.replicate.com/ltx.mp4", error=None)
+        if prediction_id == "pred-ls-1":
+            return SimpleNamespace(id="pred-ls-1", status="succeeded", output="https://cdn.replicate.com/latentsync.mp4", error=None)
+        raise ValueError(f"unknown prediction {prediction_id}")
+
+    predictions = SimpleNamespace(
+        async_create=async_create,
+        async_get=async_get,
+        async_cancel=lambda _id: None,
+    )
+
+    adapter = ReplicateVideoAdapter(
+        tiers=[{"name": "ltx", "model": "lightricks/ltx-2.3-fast", "cost_per_second": 0.01}],
+        prediction_client=SimpleNamespace(
+            models=SimpleNamespace(predictions=predictions),
+            predictions=predictions,
+        ),
+        clip={"resolution": "720p", "aspect_ratio": "9:16", "fps": 24},
+        latentsync={
+            "enabled": True,
+            "model": "bytedance/latentsync",
+            "resolution": "720p",
+            "max_retries": 3,
+            "required": True,
+            "cost_per_second": 0.003,
+        },
+        allow_mock_fallback=False,
+    )
+
+    class MultiEffectLedger:
+        def __init__(self):
+            self.effects: dict[str, SimpleNamespace] = {}
+            self.reservations: list[dict] = []
+
+        async def reserve(self, effect_key, **kwargs):
+            self.reservations.append({"effect_key": effect_key, **kwargs})
+            effect = SimpleNamespace(
+                effect_key=effect_key,
+                status="reserved",
+                result=None,
+                created=True,
+                provider_operation_id=None,
+                provider_status=None,
+            )
+            self.effects[effect_key] = effect
+            return effect
+
+        async def bind_provider_operation(self, effect_key, *, provider_operation_id, provider_status):
+            effect = self.effects[effect_key]
+            effect.provider_operation_id = provider_operation_id
+            effect.provider_status = provider_status
+            return effect
+
+        async def update_provider_status(self, effect_key, *, provider_status, error_type=None):
+            effect = self.effects[effect_key]
+            effect.provider_status = provider_status
+            if error_type:
+                effect.error_type = error_type
+            return effect
+
+        async def mark_succeeded(self, effect_key, *, result):
+            effect = self.effects[effect_key]
+            effect.status = "succeeded"
+            effect.result = result
+            return effect
+
+        async def mark_failed(self, effect_key, *, error, release_quota, error_type=None):
+            effect = self.effects[effect_key]
+            effect.status = "failed"
+            effect.error = error
+            effect.error_type = error_type
+            effect.release_quota = release_quota
+            return effect
+
+        async def mark_uncertain(self, effect_key, *, error, error_type=None):
+            effect = self.effects[effect_key]
+            effect.status = "uncertain"
+            effect.error = error
+            effect.error_type = error_type
+            return effect
+
+        async def wait_for_provider_operation(self, effect_key, **_kwargs):
+            return self.effects[effect_key]
+
+        async def get(self, effect_key):
+            return self.effects[effect_key]
+
+    ledger = MultiEffectLedger()
+    ctx = ToolContext(
+        adapter=adapter,
+        pipeline={"clip": {"timeout_ms": 100}, "video": {"reconciliation_poll_seconds": 0}},
+        run={"organization_slug": "acme"},
+        run_id="run-ls-1",
+        effect_ledger=ledger,
+        durable=True,
+    )
+
+    artifact = await generate_clip_tool(
+        ctx,
+        item_id="item-1",
+        tier="ltx",
+        seconds=8,
+        attempt=1,
+        system_prompt="PRIVATE PROMPT",
+        reference_image_uri="https://cdn.r2.com/face.png",
+        audio_uri="https://cdn.r2.com/voice.wav",
+        stage="talking_head",
+    )
+
+    assert artifact.uri == "https://cdn.replicate.com/latentsync.mp4"
+    assert artifact.meta["latentsync_applied"] is True
+    assert artifact.meta["latentsync_model"] == "bytedance/latentsync"
+    assert artifact.meta["prediction_id"] == "pred-ls-1"
+    assert artifact.meta["base_clip_uri"] == "https://cdn.replicate.com/ltx.mp4"
+    assert len(ledger.reservations) == 2
+    assert ledger.reservations[0]["effect_key"].startswith("video:run-ls-1:item-1:talking_head:1:")
+    assert ledger.reservations[1]["effect_key"].startswith("latentsync:run-ls-1:item-1:talking_head:1:")
+    assert len(create_calls) == 2
+    assert create_calls[0]["model"] == "lightricks/ltx-2.3-fast"
+    assert create_calls[1]["model"] == "bytedance/latentsync"
+    assert create_calls[1]["input"]["video"] == "https://cdn.replicate.com/ltx.mp4"
+    assert create_calls[1]["input"]["audio"] == "https://cdn.r2.com/voice.wav"
+
+
+async def test_durable_latentsync_replays_completed_ltx_stage_and_only_runs_latentsync(monkeypatch):
+    """Se o estágio 1 (LTX) já estiver concluído no ledger, apenas o LatentSync é executado."""
+    monkeypatch.setenv("ORCH_ENABLE_PAID_ADAPTERS", "true")
+    monkeypatch.setenv("ORCH_PUBLIC_API_BASE_URL", "https://orchestrator.example")
+    monkeypatch.setenv("ORCH_WEBHOOK_CORRELATION_SECRET", "correlation-secret")
+
+    create_calls: list[dict] = []
+
+    async def async_create(*, model, input, **params):
+        create_calls.append({"model": model, "input": input, "params": params})
+        if model == "bytedance/latentsync":
+            return SimpleNamespace(id="pred-ls-cached", status="succeeded", output="https://cdn.replicate.com/latentsync_final.mp4", error=None)
+        raise AssertionError(f"LTX stage must not be recreated: {model}")
+
+    async def async_get(prediction_id):
+        if prediction_id == "pred-ls-cached":
+            return SimpleNamespace(id="pred-ls-cached", status="succeeded", output="https://cdn.replicate.com/latentsync_final.mp4", error=None)
+        raise ValueError(f"unknown prediction {prediction_id}")
+
+    predictions = SimpleNamespace(
+        async_create=async_create,
+        async_get=async_get,
+        async_cancel=lambda _id: None,
+    )
+
+    adapter = ReplicateVideoAdapter(
+        tiers=[{"name": "ltx", "model": "lightricks/ltx-2.3-fast", "cost_per_second": 0.01}],
+        prediction_client=SimpleNamespace(
+            models=SimpleNamespace(predictions=predictions),
+            predictions=predictions,
+        ),
+        clip={"resolution": "720p", "aspect_ratio": "9:16", "fps": 24},
+        latentsync={
+            "enabled": True,
+            "model": "bytedance/latentsync",
+            "resolution": "720p",
+            "max_retries": 3,
+        },
+        allow_mock_fallback=False,
+    )
+
+    class ReplayLTXLedger:
+        def __init__(self):
+            self.effects: dict[str, SimpleNamespace] = {}
+            self.reservations: list[dict] = []
+
+        async def reserve(self, effect_key, **kwargs):
+            self.reservations.append({"effect_key": effect_key, **kwargs})
+            if effect_key.startswith("video:"):
+                effect = SimpleNamespace(
+                    effect_key=effect_key,
+                    status="succeeded",
+                    result={
+                        "provider_prediction_id": "pred-ltx-cached",
+                        "artifact": {
+                            "kind": "clip",
+                            "uri": "https://cdn.replicate.com/ltx_cached.mp4",
+                            "meta": {"tier": "ltx", "model": "lightricks/ltx-2.3-fast", "seconds": 8},
+                        },
+                    },
+                    created=False,
+                    provider_operation_id="pred-ltx-cached",
+                    provider_status="succeeded",
+                )
+            else:
+                effect = SimpleNamespace(
+                    effect_key=effect_key,
+                    status="reserved",
+                    result=None,
+                    created=True,
+                    provider_operation_id=None,
+                    provider_status=None,
+                )
+            self.effects[effect_key] = effect
+            return effect
+
+        async def bind_provider_operation(self, effect_key, *, provider_operation_id, provider_status):
+            effect = self.effects[effect_key]
+            effect.provider_operation_id = provider_operation_id
+            effect.provider_status = provider_status
+            return effect
+
+        async def update_provider_status(self, effect_key, *, provider_status, error_type=None):
+            effect = self.effects[effect_key]
+            effect.provider_status = provider_status
+            return effect
+
+        async def mark_succeeded(self, effect_key, *, result):
+            effect = self.effects[effect_key]
+            effect.status = "succeeded"
+            effect.result = result
+            return effect
+
+        async def mark_failed(self, effect_key, *, error, release_quota, error_type=None):
+            effect = self.effects[effect_key]
+            effect.status = "failed"
+            effect.error = error
+            return effect
+
+        async def mark_uncertain(self, effect_key, *, error, error_type=None):
+            effect = self.effects[effect_key]
+            effect.status = "uncertain"
+            return effect
+
+        async def wait_for_provider_operation(self, effect_key, **_kwargs):
+            return self.effects[effect_key]
+
+        async def get(self, effect_key):
+            return self.effects[effect_key]
+
+    ledger = ReplayLTXLedger()
+    ctx = ToolContext(
+        adapter=adapter,
+        pipeline={"clip": {"timeout_ms": 100}, "video": {"reconciliation_poll_seconds": 0}},
+        run={"organization_slug": "acme"},
+        run_id="run-ls-replay",
+        effect_ledger=ledger,
+        durable=True,
+    )
+
+    artifact = await generate_clip_tool(
+        ctx,
+        item_id="item-1",
+        tier="ltx",
+        seconds=8,
+        attempt=1,
+        reference_image_uri="https://cdn.r2.com/face.png",
+        audio_uri="https://cdn.r2.com/voice.wav",
+        stage="talking_head",
+    )
+
+    assert artifact.uri == "https://cdn.replicate.com/latentsync_final.mp4"
+    assert len(create_calls) == 1
+    assert create_calls[0]["model"] == "bytedance/latentsync"
+    assert create_calls[0]["input"]["video"] == "https://cdn.replicate.com/ltx_cached.mp4"
+
+
+async def test_durable_latentsync_write_timeout_reconciles_via_webhook_without_third_post(monkeypatch):
+    """WriteTimeout no LatentSync reconcilia por webhook/polling sem emitir novo POST."""
+    monkeypatch.setenv("ORCH_ENABLE_PAID_ADAPTERS", "true")
+    monkeypatch.setenv("ORCH_PUBLIC_API_BASE_URL", "https://orchestrator.example")
+    monkeypatch.setenv("ORCH_WEBHOOK_CORRELATION_SECRET", "correlation-secret")
+
+    create_calls: list[dict] = []
+
+    async def async_create(*, model, input, **params):
+        create_calls.append({"model": model, "input": input, "params": params})
+        if model == "lightricks/ltx-2.3-fast":
+            return SimpleNamespace(id="pred-ltx-ok", status="succeeded", output="https://cdn.replicate.com/ltx.mp4", error=None)
+        if model == "bytedance/latentsync":
+            if len([c for c in create_calls if c["model"] == "bytedance/latentsync"]) == 1:
+                raise httpx.ConnectError("pre-send failure")
+            raise httpx.WriteTimeout("")
+        raise ValueError(f"unexpected model {model}")
+
+    async def async_get(prediction_id):
+        if prediction_id == "pred-ltx-ok":
+            return SimpleNamespace(id="pred-ltx-ok", status="succeeded", output="https://cdn.replicate.com/ltx.mp4", error=None)
+        if prediction_id == "pred-ls-webhook":
+            return SimpleNamespace(id="pred-ls-webhook", status="succeeded", output="https://cdn.replicate.com/ls-reconciled.mp4", error=None)
+        raise ValueError(f"unknown prediction {prediction_id}")
+
+    predictions = SimpleNamespace(
+        async_create=async_create,
+        async_get=async_get,
+        async_cancel=lambda _id: None,
+    )
+
+    adapter = ReplicateVideoAdapter(
+        tiers=[{"name": "ltx", "model": "lightricks/ltx-2.3-fast", "cost_per_second": 0.01}],
+        prediction_client=SimpleNamespace(
+            models=SimpleNamespace(predictions=predictions),
+            predictions=predictions,
+        ),
+        clip={"resolution": "720p", "aspect_ratio": "9:16", "fps": 24},
+        latentsync={
+            "enabled": True,
+            "model": "bytedance/latentsync",
+            "resolution": "720p",
+            "max_retries": 3,
+        },
+        backoff_base=0,
+        allow_mock_fallback=False,
+    )
+
+    class WebhookLedger:
+        def __init__(self):
+            self.effects: dict[str, SimpleNamespace] = {}
+            self.reservations: list[dict] = []
+
+        async def reserve(self, effect_key, **kwargs):
+            self.reservations.append({"effect_key": effect_key, **kwargs})
+            effect = SimpleNamespace(
+                effect_key=effect_key,
+                status="reserved",
+                result=None,
+                created=True,
+                provider_operation_id=None,
+                provider_status=None,
+            )
+            self.effects[effect_key] = effect
+            return effect
+
+        async def bind_provider_operation(self, effect_key, *, provider_operation_id, provider_status):
+            effect = self.effects[effect_key]
+            effect.provider_operation_id = provider_operation_id
+            effect.provider_status = provider_status
+            return effect
+
+        async def update_provider_status(self, effect_key, *, provider_status, error_type=None):
+            effect = self.effects[effect_key]
+            effect.provider_status = provider_status
+            if error_type:
+                effect.error_type = error_type
+            return effect
+
+        async def mark_succeeded(self, effect_key, *, result):
+            effect = self.effects[effect_key]
+            effect.status = "succeeded"
+            effect.result = result
+            return effect
+
+        async def mark_failed(self, effect_key, *, error, release_quota, error_type=None):
+            effect = self.effects[effect_key]
+            effect.status = "failed"
+            effect.error = error
+            effect.error_type = error_type
+            effect.release_quota = release_quota
+            return effect
+
+        async def mark_uncertain(self, effect_key, *, error, error_type=None):
+            effect = self.effects[effect_key]
+            effect.status = "uncertain"
+            effect.error = error
+            effect.error_type = error_type
+            return effect
+
+        async def wait_for_provider_operation(self, effect_key, **_kwargs):
+            effect = self.effects[effect_key]
+            effect.provider_operation_id = "pred-ls-webhook"
+            effect.provider_status = "processing"
+            return effect
+
+        async def get(self, effect_key):
+            return self.effects[effect_key]
+
+    ledger = WebhookLedger()
+    ctx = ToolContext(
+        adapter=adapter,
+        pipeline={"clip": {"timeout_ms": 100}, "video": {"reconciliation_poll_seconds": 0}},
+        run={"organization_slug": "acme"},
+        run_id="run-ls-timeout",
+        effect_ledger=ledger,
+        durable=True,
+    )
+
+    artifact = await generate_clip_tool(
+        ctx,
+        item_id="item-1",
+        tier="ltx",
+        seconds=8,
+        attempt=1,
+        reference_image_uri="https://cdn.r2.com/face.png",
+        audio_uri="https://cdn.r2.com/voice.wav",
+        stage="talking_head",
+    )
+
+    assert artifact.uri == "https://cdn.replicate.com/ls-reconciled.mp4"
+    ls_create_calls = [c for c in create_calls if c["model"] == "bytedance/latentsync"]
+    assert len(ls_create_calls) == 2  # 1 connect error retry + 1 write timeout (no third POST)
+
+
+async def test_durable_latentsync_timeout_cancels_prediction_and_marks_failed(monkeypatch):
+    """Timeout no LatentSync cancela predição no Replicate e marca efeito como falho/incerto."""
+    from orchestrator.tools.video import VideoEffectError
+
+    monkeypatch.setenv("ORCH_ENABLE_PAID_ADAPTERS", "true")
+    monkeypatch.setenv("ORCH_PUBLIC_API_BASE_URL", "https://orchestrator.example")
+    monkeypatch.setenv("ORCH_WEBHOOK_CORRELATION_SECRET", "correlation-secret")
+
+    cancel_calls: list[str] = []
+
+    async def async_create(*, model, input, **params):
+        if model == "lightricks/ltx-2.3-fast":
+            return SimpleNamespace(id="pred-ltx-ok", status="succeeded", output="https://cdn.replicate.com/ltx.mp4", error=None)
+        if model == "bytedance/latentsync":
+            return SimpleNamespace(id="pred-ls-slow", status="starting", output=None, error=None)
+        raise ValueError(f"unexpected model {model}")
+
+    async def async_get(prediction_id):
+        if prediction_id == "pred-ltx-ok":
+            return SimpleNamespace(id="pred-ltx-ok", status="succeeded", output="https://cdn.replicate.com/ltx.mp4", error=None)
+        if prediction_id == "pred-ls-slow":
+            return SimpleNamespace(id="pred-ls-slow", status="processing", output=None, error=None)
+        raise ValueError(f"unknown prediction {prediction_id}")
+
+    async def async_cancel(prediction_id):
+        cancel_calls.append(prediction_id)
+        return SimpleNamespace(id=prediction_id, status="canceled", output=None, error=None)
+
+    predictions = SimpleNamespace(
+        async_create=async_create,
+        async_get=async_get,
+        async_cancel=async_cancel,
+    )
+
+    adapter = ReplicateVideoAdapter(
+        tiers=[{"name": "ltx", "model": "lightricks/ltx-2.3-fast", "cost_per_second": 0.01}],
+        prediction_client=SimpleNamespace(
+            models=SimpleNamespace(predictions=predictions),
+            predictions=predictions,
+        ),
+        clip={"resolution": "720p", "aspect_ratio": "9:16", "fps": 24, "timeout_ms": 1},
+        latentsync={
+            "enabled": True,
+            "model": "bytedance/latentsync",
+            "resolution": "720p",
+            "max_retries": 3,
+        },
+        backoff_base=0,
+        allow_mock_fallback=False,
+    )
+
+    class MultiEffectLedger:
+        def __init__(self):
+            self.effects: dict[str, SimpleNamespace] = {}
+
+        async def reserve(self, effect_key, **kwargs):
+            effect = SimpleNamespace(
+                effect_key=effect_key,
+                status="reserved",
+                result=None,
+                created=True,
+                provider_operation_id=None,
+                provider_status=None,
+            )
+            self.effects[effect_key] = effect
+            return effect
+
+        async def bind_provider_operation(self, effect_key, *, provider_operation_id, provider_status):
+            effect = self.effects[effect_key]
+            effect.provider_operation_id = provider_operation_id
+            effect.provider_status = provider_status
+            return effect
+
+        async def update_provider_status(self, effect_key, *, provider_status, error_type=None):
+            effect = self.effects[effect_key]
+            effect.provider_status = provider_status
+            if error_type:
+                effect.error_type = error_type
+            return effect
+
+        async def mark_succeeded(self, effect_key, *, result):
+            effect = self.effects[effect_key]
+            effect.status = "succeeded"
+            effect.result = result
+            return effect
+
+        async def mark_failed(self, effect_key, *, error, release_quota, error_type=None):
+            effect = self.effects[effect_key]
+            effect.status = "failed"
+            effect.error = error
+            effect.error_type = error_type
+            effect.release_quota = release_quota
+            return effect
+
+        async def mark_uncertain(self, effect_key, *, error, error_type=None):
+            effect = self.effects[effect_key]
+            effect.status = "uncertain"
+            effect.error = error
+            effect.error_type = error_type
+            return effect
+
+        async def wait_for_provider_operation(self, effect_key, **_kwargs):
+            return self.effects[effect_key]
+
+        async def get(self, effect_key):
+            return self.effects[effect_key]
+
+    ledger = MultiEffectLedger()
+    ctx = ToolContext(
+        adapter=adapter,
+        pipeline={"clip": {"timeout_ms": 1}, "video": {"reconciliation_poll_seconds": 0}},
+        run={"organization_slug": "acme"},
+        run_id="run-ls-slow",
+        effect_ledger=ledger,
+        durable=True,
+    )
+
+    with pytest.raises(VideoEffectError) as exc_info:
+        await generate_clip_tool(
+            ctx,
+            item_id="item-1",
+            tier="ltx",
+            seconds=8,
+            attempt=1,
+            reference_image_uri="https://cdn.r2.com/face.png",
+            audio_uri="https://cdn.r2.com/voice.wav",
+            stage="talking_head",
+        )
+
+    assert exc_info.value.code == "prediction_canceled"
+    assert exc_info.value.effect_key.startswith("latentsync:run-ls-slow:item-1:talking_head:1:")
+    assert cancel_calls == ["pred-ls-slow"]
+
+
+async def test_durable_latentsync_provider_failure_raises_video_effect_error_without_fallback(monkeypatch):
+    """Falha definitiva do LatentSync lança VideoEffectError sem fallback silencioso para clipe mudo."""
+    from orchestrator.tools.video import VideoEffectError
+
+    monkeypatch.setenv("ORCH_ENABLE_PAID_ADAPTERS", "true")
+    monkeypatch.setenv("ORCH_PUBLIC_API_BASE_URL", "https://orchestrator.example")
+    monkeypatch.setenv("ORCH_WEBHOOK_CORRELATION_SECRET", "correlation-secret")
+
+    async def async_create(*, model, input, **params):
+        if model == "lightricks/ltx-2.3-fast":
+            return SimpleNamespace(id="pred-ltx-ok", status="succeeded", output="https://cdn.replicate.com/ltx.mp4", error=None)
+        if model == "bytedance/latentsync":
+            return SimpleNamespace(id="pred-ls-failed", status="starting", output=None, error=None)
+        raise ValueError(f"unexpected model {model}")
+
+    async def async_get(prediction_id):
+        if prediction_id == "pred-ltx-ok":
+            return SimpleNamespace(id="pred-ltx-ok", status="succeeded", output="https://cdn.replicate.com/ltx.mp4", error=None)
+        if prediction_id == "pred-ls-failed":
+            return SimpleNamespace(id="pred-ls-failed", status="failed", output=None, error="CUDA out of memory")
+        raise ValueError(f"unknown prediction {prediction_id}")
+
+    predictions = SimpleNamespace(
+        async_create=async_create,
+        async_get=async_get,
+        async_cancel=lambda _id: None,
+    )
+
+    adapter = ReplicateVideoAdapter(
+        tiers=[{"name": "ltx", "model": "lightricks/ltx-2.3-fast", "cost_per_second": 0.01}],
+        prediction_client=SimpleNamespace(
+            models=SimpleNamespace(predictions=predictions),
+            predictions=predictions,
+        ),
+        clip={"resolution": "720p", "aspect_ratio": "9:16", "fps": 24},
+        latentsync={
+            "enabled": True,
+            "model": "bytedance/latentsync",
+            "resolution": "720p",
+            "max_retries": 3,
+        },
+        backoff_base=0,
+        allow_mock_fallback=False,
+    )
+
+    class MultiEffectLedger:
+        def __init__(self):
+            self.effects: dict[str, SimpleNamespace] = {}
+
+        async def reserve(self, effect_key, **kwargs):
+            effect = SimpleNamespace(
+                effect_key=effect_key,
+                status="reserved",
+                result=None,
+                created=True,
+                provider_operation_id=None,
+                provider_status=None,
+            )
+            self.effects[effect_key] = effect
+            return effect
+
+        async def bind_provider_operation(self, effect_key, *, provider_operation_id, provider_status):
+            effect = self.effects[effect_key]
+            effect.provider_operation_id = provider_operation_id
+            effect.provider_status = provider_status
+            return effect
+
+        async def update_provider_status(self, effect_key, *, provider_status, error_type=None):
+            effect = self.effects[effect_key]
+            effect.provider_status = provider_status
+            return effect
+
+        async def mark_succeeded(self, effect_key, *, result):
+            effect = self.effects[effect_key]
+            effect.status = "succeeded"
+            effect.result = result
+            return effect
+
+        async def mark_failed(self, effect_key, *, error, release_quota, error_type=None):
+            effect = self.effects[effect_key]
+            effect.status = "failed"
+            effect.error = error
+            effect.error_type = error_type
+            effect.release_quota = release_quota
+            return effect
+
+        async def mark_uncertain(self, effect_key, *, error, error_type=None):
+            effect = self.effects[effect_key]
+            effect.status = "uncertain"
+            return effect
+
+        async def wait_for_provider_operation(self, effect_key, **_kwargs):
+            return self.effects[effect_key]
+
+        async def get(self, effect_key):
+            return self.effects[effect_key]
+
+    ledger = MultiEffectLedger()
+    ctx = ToolContext(
+        adapter=adapter,
+        pipeline={"clip": {"timeout_ms": 100}, "video": {"reconciliation_poll_seconds": 0}},
+        run={"organization_slug": "acme"},
+        run_id="run-ls-fail",
+        effect_ledger=ledger,
+        durable=True,
+    )
+
+    with pytest.raises(VideoEffectError) as exc_info:
+        await generate_clip_tool(
+            ctx,
+            item_id="item-1",
+            tier="ltx",
+            seconds=8,
+            attempt=1,
+            reference_image_uri="https://cdn.r2.com/face.png",
+            audio_uri="https://cdn.r2.com/voice.wav",
+            stage="talking_head",
+        )
+
+    assert exc_info.value.code == "prediction_failed"
+    assert exc_info.value.uncertain is False
+    assert exc_info.value.effect_key.startswith("latentsync:run-ls-fail:item-1:talking_head:1:")
+
+
+async def test_durable_latentsync_required_raises_video_effect_error_if_audio_missing(monkeypatch):
+    monkeypatch.setenv("ORCH_ENABLE_PAID_ADAPTERS", "true")
+
+    adapter = ReplicateVideoAdapter(
+        tiers=[{"name": "ltx", "model": "lightricks/ltx-2.3-fast", "cost_per_second": 0.01}],
+        prediction_client=SimpleNamespace(
+            models=SimpleNamespace(predictions=SimpleNamespace(async_create=lambda **_: None)),
+            predictions=SimpleNamespace(async_create=lambda **_: None, async_get=lambda _: None, async_cancel=lambda _: None),
+        ),
+        clip={"resolution": "720p"},
+        latentsync={"enabled": True, "required": True},
+        allow_mock_fallback=False,
+    )
+
+    class DummyLedger:
+        async def get(self, effect_key):
+            return None
+        async def reserve(self, **kwargs):
+            return SimpleNamespace(status="reserved")
+        async def mark_failed(self, *args, **kwargs):
+            pass
+
+    ctx = ToolContext(
+        adapter=adapter,
+        pipeline={"clip": {"timeout_ms": 100}},
+        run={"organization_slug": "acme"},
+        run_id="run-ls-req",
+        effect_ledger=DummyLedger(),
+        durable=True,
+    )
+
+    with pytest.raises(VideoEffectError) as exc_info:
+        await generate_clip_tool(
+            ctx,
+            item_id="item-1",
+            tier="ltx",
+            seconds=8,
+            attempt=1,
+            reference_image_uri="https://cdn.r2.com/face.png",
+            audio_uri=None,
+            stage="talking_head",
+        )
+
+    assert exc_info.value.error_type == "LatentSyncRequiredError"
+    assert exc_info.value.code == "latentsync_audio_missing"
+
+
+async def test_durable_latentsync_required_raises_video_effect_error_if_latentsync_disabled(monkeypatch):
+    monkeypatch.setenv("ORCH_ENABLE_PAID_ADAPTERS", "true")
+
+    adapter = ReplicateVideoAdapter(
+        tiers=[{"name": "ltx", "model": "lightricks/ltx-2.3-fast", "cost_per_second": 0.01}],
+        prediction_client=SimpleNamespace(
+            models=SimpleNamespace(predictions=SimpleNamespace(async_create=lambda **_: None)),
+            predictions=SimpleNamespace(async_create=lambda **_: None, async_get=lambda _: None, async_cancel=lambda _: None),
+        ),
+        clip={"resolution": "720p"},
+        latentsync={"enabled": False, "required": True},
+        allow_mock_fallback=False,
+    )
+
+    class DummyLedger:
+        async def get(self, effect_key):
+            return None
+        async def reserve(self, **kwargs):
+            return SimpleNamespace(status="reserved")
+        async def mark_failed(self, *args, **kwargs):
+            pass
+
+    ctx = ToolContext(
+        adapter=adapter,
+        pipeline={"clip": {"timeout_ms": 100}},
+        run={"organization_slug": "acme"},
+        run_id="run-ls-req-dis",
+        effect_ledger=DummyLedger(),
+        durable=True,
+    )
+
+    with pytest.raises(VideoEffectError) as exc_info:
+        await generate_clip_tool(
+            ctx,
+            item_id="item-1",
+            tier="ltx",
+            seconds=8,
+            attempt=1,
+            reference_image_uri="https://cdn.r2.com/face.png",
+            audio_uri="https://cdn.r2.com/audio.wav",
+            stage="talking_head",
+        )
+
+    assert exc_info.value.error_type == "LatentSyncRequiredError"
+    assert exc_info.value.code == "latentsync_disabled"
+
+
+async def test_durable_latentsync_persists_base_video_to_storage_before_completing_effect(monkeypatch, tmp_path):
+    monkeypatch.setenv("ORCH_ENABLE_PAID_ADAPTERS", "true")
+    monkeypatch.setenv("ORCH_PUBLIC_API_BASE_URL", "https://orchestrator.example")
+    monkeypatch.setenv("ORCH_WEBHOOK_CORRELATION_SECRET", "correlation-secret")
+    monkeypatch.setenv("ORCH_ORGANIZATION_SLUG", "acme")
+
+    mp4_b64 = "data:video/mp4;base64," + base64.b64encode(b"\x00mp4video").decode()
+
+    class FakeReplicateClient:
+        def __init__(self):
+            self.predictions = self
+            self.models = SimpleNamespace(predictions=self)
+
+        async def async_create(self, **kwargs):
+            return SimpleNamespace(id="pred-123", status="succeeded", output=mp4_b64)
+
+        async def async_get(self, pred_id):
+            return SimpleNamespace(id=pred_id, status="succeeded", output=mp4_b64)
+
+    adapter = ReplicateVideoAdapter(
+        tiers=[{"name": "ltx", "model": "lightricks/ltx-2.3-fast", "cost_per_second": 0.01}],
+        prediction_client=FakeReplicateClient(),
+        clip={"resolution": "720p"},
+        latentsync={"enabled": True, "required": True, "model": "bytedance/latentsync"},
+        allow_mock_fallback=False,
+    )
+
+    from orchestrator.storage.db import ArtifactDB
+    db = ArtifactDB(tmp_path / "artifacts.sqlite")
+    db.setup()
+
+    class MultiEffectLedger:
+        def __init__(self):
+            self.effects: dict[str, SimpleNamespace] = {}
+            self.reservations: list[dict] = []
+
+        async def reserve(self, effect_key, **kwargs):
+            self.reservations.append({"effect_key": effect_key, **kwargs})
+            effect = SimpleNamespace(
+                effect_key=effect_key,
+                status="reserved",
+                result=None,
+                created=True,
+                provider_operation_id=None,
+                provider_status=None,
+            )
+            self.effects[effect_key] = effect
+            return effect
+
+        async def bind_provider_operation(self, effect_key, *, provider_operation_id, provider_status):
+            effect = self.effects[effect_key]
+            effect.provider_operation_id = provider_operation_id
+            effect.provider_status = provider_status
+            return effect
+
+        async def update_provider_status(self, effect_key, *, provider_status, error_type=None):
+            effect = self.effects[effect_key]
+            effect.provider_status = provider_status
+            if error_type:
+                effect.error_type = error_type
+            return effect
+
+        async def mark_succeeded(self, effect_key, *, result):
+            effect = self.effects[effect_key]
+            effect.status = "succeeded"
+            effect.result = result
+            return effect
+
+        async def mark_failed(self, effect_key, *, error, release_quota, error_type=None):
+            effect = self.effects[effect_key]
+            effect.status = "failed"
+            effect.error = error
+            effect.error_type = error_type
+            effect.release_quota = release_quota
+            return effect
+
+    ledger = MultiEffectLedger()
+
+    ctx = ToolContext(
+        adapter=adapter,
+        pipeline={"clip": {"timeout_ms": 1000}},
+        run={"organization_slug": "acme"},
+        run_id="run-storage-test",
+        effect_ledger=ledger,
+        durable=True,
+        videos_root=tmp_path,
+        artifact_db=db,
+    )
+
+    artifact = await generate_clip_tool(
+        ctx,
+        item_id="item-1",
+        tier="ltx",
+        seconds=5,
+        attempt=1,
+        reference_image_uri="https://cdn.r2.com/face.png",
+        audio_uri="https://cdn.r2.com/audio.wav",
+        stage="talking_head",
+    )
+
+    # 1. Returned artifact must have canonical storage URI and canonical base_clip_uri
+    assert artifact.uri == "/videos/run-storage-test/items/item-1/clip-1.mp4"
+    assert artifact.meta["base_clip_uri"] == "/videos/run-storage-test/items/item-1/base-clip-1.mp4"
+
+    # 2. Files must exist on disk
+    assert (tmp_path / "run-storage-test/items/item-1/base-clip-1.mp4").is_file()
+    assert (tmp_path / "run-storage-test/items/item-1/clip-1.mp4").is_file()
+
+    # 3. ArtifactDB must have both records
+    rows = await db.by_run("run-storage-test")
+    assert len(rows) == 2
+    kinds = {r.kind: r for r in rows}
+    assert "base_clip" in kinds
+    assert "clip" in kinds
+    assert kinds["base_clip"].storage_key == "run-storage-test/items/item-1/base-clip-1.mp4"
+    assert kinds["clip"].storage_key == "run-storage-test/items/item-1/clip-1.mp4"
+
+    # 4. Effect ledger entries must store the CANONICAL artifacts, not raw remote URLs
+    video_effect = next(e for k, e in ledger.effects.items() if k.startswith("video:run-storage-test"))
+    assert video_effect.status == "succeeded"
+    assert video_effect.result["artifact"]["uri"] == "/videos/run-storage-test/items/item-1/base-clip-1.mp4"
+    assert video_effect.result["artifact"]["meta"]["source_uri"] == mp4_b64
+
+    ls_effect = next(e for k, e in ledger.effects.items() if k.startswith("latentsync:run-storage-test"))
+    assert ls_effect.status == "succeeded"
+    assert ls_effect.result["artifact"]["uri"] == "/videos/run-storage-test/items/item-1/clip-1.mp4"
+    assert ls_effect.result["artifact"]["meta"]["base_clip_uri"] == "/videos/run-storage-test/items/item-1/base-clip-1.mp4"
+
+
+async def test_durable_latentsync_replay_resolves_signed_url_instead_of_expired_source_uri(monkeypatch):
+    monkeypatch.setenv("ORCH_ENABLE_PAID_ADAPTERS", "true")
+    monkeypatch.setenv("ORCH_PUBLIC_API_BASE_URL", "https://orchestrator.example")
+    monkeypatch.setenv("ORCH_WEBHOOK_CORRELATION_SECRET", "correlation-secret")
+    monkeypatch.setenv("ORCH_ORGANIZATION_SLUG", "acme")
+
+    latentsync_submitted_video_url = None
+
+    async def async_create(**kwargs):
+        nonlocal latentsync_submitted_video_url
+        input_data = kwargs.get("input") or {}
+        latentsync_submitted_video_url = input_data.get("video")
+        return SimpleNamespace(id="pred-ls-fresh", status="succeeded", output="https://cdn.replicate.com/ls_out.mp4")
+
+    async def async_get(pred_id):
+        return SimpleNamespace(id=pred_id, status="succeeded", output="https://cdn.replicate.com/ls_out.mp4")
+
+    class FakeClient:
+        def __init__(self):
+            self.predictions = self
+            self.models = SimpleNamespace(predictions=self)
+            self.async_create = async_create
+            self.async_get = async_get
+
+    adapter = ReplicateVideoAdapter(
+        tiers=[{"name": "ltx", "model": "lightricks/ltx-2.3-fast", "cost_per_second": 0.01}],
+        prediction_client=FakeClient(),
+        clip={"resolution": "720p"},
+        latentsync={"enabled": True, "required": True, "model": "bytedance/latentsync"},
+        allow_mock_fallback=False,
+    )
+
+    class ReplayLedger:
+        def __init__(self):
+            self.effects = {
+                "video:run-replay:item-1:talking_head:1:c63c377317ed22291929a666d65a9f784f4885ad24d139fdb63b509244c2b50f": SimpleNamespace(
+                    status="succeeded",
+                    result={
+                        "artifact": {
+                            "kind": "base_clip",
+                            "uri": "r2://my-bucket/run-replay/items/item-1/base-clip-1.mp4",
+                            "meta": {
+                                "source_uri": "https://replicate.delivery/expired_1h_ago.mp4",
+                                "storage_key": "run-replay/items/item-1/base-clip-1.mp4",
+                                "storage_backend": "r2",
+                            },
+                        }
+                    },
+                )
+            }
+
+        async def reserve(self, effect_key, **kwargs):
+            if effect_key in self.effects:
+                return self.effects[effect_key]
+            eff = SimpleNamespace(
+                effect_key=effect_key,
+                status="reserved",
+                result=None,
+                created=True,
+                provider_operation_id=None,
+                provider_status=None,
+            )
+            self.effects[effect_key] = eff
+            return eff
+
+        async def bind_provider_operation(self, effect_key, *, provider_operation_id, provider_status):
+            eff = self.effects[effect_key]
+            eff.provider_operation_id = provider_operation_id
+            eff.provider_status = provider_status
+            return eff
+
+        async def update_provider_status(self, effect_key, *, provider_status, error_type=None):
+            eff = self.effects[effect_key]
+            eff.provider_status = provider_status
+            return eff
+
+        async def mark_succeeded(self, effect_key, *, result):
+            eff = self.effects[effect_key]
+            eff.status = "succeeded"
+            eff.result = result
+            return eff
+
+        async def mark_failed(self, effect_key, *, error, release_quota, error_type=None):
+            eff = self.effects[effect_key]
+            eff.status = "failed"
+            return eff
+
+    class FakeStorageResolver:
+        async def get_signed_url(self, key: str) -> str:
+            return f"https://r2.signed.com/{key}?signature=valid_signature_now"
+
+    ctx = ToolContext(
+        adapter=adapter,
+        pipeline={"clip": {"timeout_ms": 1000}},
+        run={"organization_slug": "acme"},
+        run_id="run-replay",
+        effect_ledger=ReplayLedger(),
+        durable=True,
+        storage_resolver=FakeStorageResolver(),
+    )
+
+    artifact = await generate_clip_tool(
+        ctx,
+        item_id="item-1",
+        tier="ltx",
+        seconds=5,
+        attempt=1,
+        reference_image_uri="https://cdn.r2.com/face.png",
+        audio_uri="https://cdn.r2.com/audio.wav",
+        stage="talking_head",
+    )
+
+    # LatentSync MUST have received the fresh signed URL, NOT the expired replicate.delivery URL
+    assert latentsync_submitted_video_url == "https://r2.signed.com/run-replay/items/item-1/base-clip-1.mp4?signature=valid_signature_now"
+    assert artifact.meta["base_clip_uri"] == "r2://my-bucket/run-replay/items/item-1/base-clip-1.mp4"
+
+
+

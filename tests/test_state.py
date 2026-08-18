@@ -6,7 +6,6 @@ from orchestrator.graph.state import (
     Artifact,
     BatchState,
     Item,
-    JudgeVerdict,
     QCResult,
     new_item,
 )
@@ -46,24 +45,9 @@ def test_qcresult_fields():
     assert "hands" in qc.reasons
 
 
-def test_judge_verdict_from_response_derives_passed_above_threshold():
-    v = JudgeVerdict.from_response(score=0.91, verdict=None, threshold=0.8)
-    assert v.score == 0.91
-    assert v.passed is True
-    assert v.verdict == "pass"
-
-
-def test_judge_verdict_from_response_below_threshold():
-    v = JudgeVerdict.from_response(score=0.5, verdict=None, threshold=0.8)
-    assert v.passed is False
-    assert v.verdict == "fail"
-
-
-def test_judge_verdict_explicit_verdict_overrides_threshold():
-    # Se o gateway devolve verdict explícito, ele manda (mesmo contra o threshold).
-    v = JudgeVerdict.from_response(score=0.5, verdict="pass", threshold=0.8)
-    assert v.passed is True
-    assert v.verdict == "pass"
+def test_judge_verdict_not_in_graph_state():
+    import orchestrator.graph.state as state_mod
+    assert not hasattr(state_mod, "JudgeVerdict")
 
 
 def test_batchstate_has_expected_keys_and_reducers():

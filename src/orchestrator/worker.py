@@ -31,6 +31,7 @@ from orchestrator.db import (
 )
 from orchestrator.nodes.stages import apply_review_creator_updates
 from orchestrator.registry import ROLES
+from orchestrator.runtime_contract import RuntimeContractError
 from orchestrator.storage.factory import build_media_storage
 from orchestrator.storage.resolve import resolve_signed_uris
 
@@ -46,6 +47,8 @@ _AMBIGUOUS_POST_SEND_ERRORS = (
 
 def _job_failure_is_retryable(exc: BaseException) -> bool:
     """Evita repetir efeitos pagos quando a falha é permanente ou pós-envio."""
+    if isinstance(exc, RuntimeContractError):
+        return False
     if isinstance(exc, _AMBIGUOUS_POST_SEND_ERRORS):
         return False
     status = None

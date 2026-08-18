@@ -235,7 +235,11 @@ def build_openai_image_vercel_adapter(pipeline: dict[str, Any]) -> "OpenAIImageA
     base_url = os.environ.get(
         "AI_GATEWAY_OPENAI_BASE_URL", _VERCEL_GATEWAY_OPENAI_BASE_URL
     )
-    model = os.environ.get("AI_GATEWAY_OPENAI_MODEL", _VERCEL_GATEWAY_IMAGE_MODEL)
+    model = (
+        os.environ.get("AI_GATEWAY_OPENAI_MODEL")
+        or (pipeline.get("image", {}).get("model") if isinstance(pipeline.get("image"), dict) else None)
+        or _VERCEL_GATEWAY_IMAGE_MODEL
+    )
     # GPT Image 2 pode levar 60-120 s (cold start); 180 s é mais seguro.
     # Sobrescrevível via AI_GATEWAY_IMAGE_TIMEOUT (segundos, float).
     timeout = float(os.environ.get("AI_GATEWAY_IMAGE_TIMEOUT", "180"))

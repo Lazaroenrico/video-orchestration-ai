@@ -26,15 +26,15 @@ novas entregas usam uma página própria em `docs/progress/changes/`.
 ## Últimas 10 entregas
 
 - [Contratos de prompt dos agents LangChain](progress/changes/2026-08-14-langchain-agent-prompt-contracts.md) — separação trusted/untrusted, ToolStrategy terminal e prompts v3 idênticos nos três perfis.
+- [LatentSync obrigatório e storage do vídeo-base](progress/changes/2026-08-15-latentsync-required-e-base-clip-storage.md) — validação estrita de `latentsync.required` e persistência do vídeo base LTX no storage canônico.
+- [LatentSync durável, idempotente e reconciliável](progress/changes/2026-08-15-latentsync-duravel-idempotente.md) — 2 estágios (LTX + LatentSync) com reservas duráveis, reconciliação de WriteTimeout e cancelamento no provider.
+- [Proteção da geração de imagem paga com effects](progress/changes/2026-08-15-proteger-geracao-imagem-paga-effects.md) — idempotência, quota `openai_image_units`, kill switch obrigatório e classificação de falhas de transporte no `PostgresEffectLedger`.
+- [Persistência e validação do runtime contract dos runs](progress/changes/2026-08-15-runtime-contract-runs.md) — persistência de fingerprint canônico sem segredos, bloqueio de resume incompatível antes de chamadas pagas e preservação de consultas legacy.
+- [Isolamento do GatewayJudge no módulo de evaluation](progress/changes/2026-08-15-isolar-gatewayjudge-module-evaluation.md) — GatewayJudge e cassette tooling isolados em orchestrator.evaluation, JudgePort removido dos adapters de produção.
 - [Runtime de linguagem nativo LangChain](progress/changes/2026-08-14-langchain-native-runtime.md) — composição central de dependências, models/agents nativos, mock determinístico e vídeo sem `agent_takes` novo.
 - [Integração LatentSync 2-Estágios no Talking Head](progress/changes/2026-08-07-latentsync-talking-head.md) — LTX gera vídeo base em 720p e LatentSync aplica lip-sync com a voz ElevenLabs (3 retries, sem fallback silencioso).
 - [Prediction Replicate durável e falha parcial por item](progress/changes/2026-08-04-replicate-prediction-duravel.md) — criação/polling/webhook reconciliam timeout ambíguo sem POST duplicado nem encerrar os demais itens.
 - [Compatibilidade de layout mono na montagem FFmpeg](progress/changes/2026-08-04-ffmpeg-layout-mono.md) — runtime Bookworm monta locução mono a 48 kHz e testa o FFmpeg da própria imagem antes do deploy.
-- [Finalização de voz compatível com o contrato ElevenLabs](progress/changes/2026-08-04-elevenlabs-finalizacao-voice-description.md) — descrição server-owned válida elimina o 422 antes da criação da voz permanente.
-- [Quotas pagas no ambiente local](progress/changes/2026-08-03-dev-local-quotas-pagas.md) — wrapper configura limites no PostgreSQL local sem risco de usar o Neon do host.
-- [Reorganização do histórico de progresso](progress/changes/2026-08-03-reorganizacao-historico-progresso.md) — painel curto, legado mensal íntegro e contrato documental testado.
-- [Integração completa ElevenLabs Voice Design](progress/archive/2026-08.md#correção--integração-completa-elevenlabs-voice-design-2026-08-03) — design, seleção e finalização de voz entraram no fluxo V2 durável.
-- [Vídeo final com locução e montagem FFmpeg](progress/archive/2026-07.md#correção--vídeo-final-com-locução-elevenlabs-e-montagem-ffmpeg-2026-07-29) — finais passaram a concatenar clips e incluir áudio validado.
 
 ## Índice do histórico
 

@@ -196,13 +196,22 @@ def _terminal_submission(stage: str, inputs: dict[str, Any]) -> dict[str, Any]:
 class MockAdapter:
     """Serve aos papéis mock (llm/image/voice/video/assembly) no v1."""
 
-    def __init__(self, tiers: list[dict[str, Any]], latency: float = 0.0) -> None:
+    def __init__(
+        self,
+        tiers: list[dict[str, Any]],
+        latency: float = 0.0,
+        latentsync: Optional[dict[str, Any]] = None,
+    ) -> None:
         self.tiers = {t["name"]: t for t in tiers}
         self.latency = latency
         self._semaphores = {
             name: asyncio.Semaphore(int(t.get("max_concurrency", 8)))
             for name, t in self.tiers.items()
         }
+        latentsync = latentsync or {}
+        self.latentsync_required = bool(latentsync.get("required", False))
+        self.latentsync_enabled = bool(latentsync.get("enabled", True))
+        self.latentsync_cost_per_second = float(latentsync.get("cost_per_second", 0.003))
 
     async def _tick(self) -> None:
         if self.latency:
@@ -427,7 +436,11 @@ class MockAdapter:
         system_prompt: Optional[str] = None,
         reference_image_uri: Optional[str] = None,
         audio_uri: Optional[str] = None,
+        stage: Optional[str] = None,
+        **kwargs: Any,
     ) -> Artifact:
+        if self.latentsync_required and stage != "product_demo" and not audio_uri:
+            raise RuntimeError("LatentSync is required for talking head but audio_uri is missing")
         spec = self.tiers[tier]  # KeyError em tier desconhecido (contratual)
         async with self._semaphores[tier]:
             await self._tick()
@@ -451,6 +464,10 @@ class MockAdapter:
             if audio_uri:
                 meta["latentsync_applied"] = True
                 meta["latentsync_model"] = "mock_latentsync"
+                meta["base_clip_uri"] = _mp4_data_uri("clip_base", item_id, attempt, sfx)
+                ls_cost = round(self.latentsync_cost_per_second * seconds, 4)
+                meta["latentsync_cost_usd"] = ls_cost
+                meta["cost_usd"] = round(cost + ls_cost, 4)
             return Artifact(
                 kind="clip",
                 uri=_mp4_data_uri("clip", item_id, attempt, sfx),

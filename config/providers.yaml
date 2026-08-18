@@ -9,7 +9,6 @@ adapters:
   qc: integrity_qc              # checa mídia real e bloqueia mock/fallback antes da montagem
   assembly: ffmpeg_assembly     # concatena os 2 clips e muxa a locução; custo zero
   upscale: passthrough_upscale  # upscale do vídeo final (não da imagem); no-op até plugar upscaler de vídeo real
-  judge: gateway
 
 # Onde os bytes de mídia pousam (D30). Exige R2_ACCOUNT_ID, R2_ACCESS_KEY_ID,
 # R2_SECRET_ACCESS_KEY e R2_BUCKET — sem elas o boot falha alto, de propósito.

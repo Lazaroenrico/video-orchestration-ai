@@ -656,7 +656,11 @@ async def node_roster(state: dict[str, Any], config: RunnableConfig) -> dict[str
             catalog_stage="roster",
             tool_name="build_creator",
             tool_fn=build_creator_tool,
-            index=i, system_prompt=profile_prompt, voice_profile=profile,
+            index=i,
+            system_prompt=profile_prompt,
+            voice_profile=profile,
+            media_root=media_root,
+            **_persistence(config, storage_key="media_storage"),
         )
         if creative_profile:
             creator = {**creator, **creative_profile, "id": creative_profile["id"]}

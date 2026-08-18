@@ -340,6 +340,7 @@ def runner_command(
 
 
 DEFAULT_DEV_QUOTAS = {
+    "openai_image_units": 50,
     "elevenlabs_voice_design_chars": 100000,
     "elevenlabs_voice_slots": 50,
     "elevenlabs_tts_chars": 200000,
