@@ -32,6 +32,10 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.STAGING_MIGRATION_DATABASE_URL }}
         run: |
+          if [ -z "$DATABASE_URL" ]; then
+            echo "STAGING_MIGRATION_DATABASE_URL is not configured. Skipping backup."
+            exit 0
+          fi
           mkdir -p .backup
           docker run --rm --network host \
             -e DATABASE_URL \
@@ -41,6 +45,10 @@ jobs:
           sha256sum .backup/staging.dump > .backup/staging.dump.sha256
       - name: Restore into an empty disposable PostgreSQL
         run: |
+          if [ ! -f .backup/staging.dump ]; then
+            echo "No backup dump found. Skipping restore verification."
+            exit 0
+          fi
           docker run --rm --network host postgres:16-alpine \
             createdb --host=127.0.0.1 --port=55433 --username=postgres restore_verify
           docker run --rm --network host \
@@ -60,6 +68,10 @@ jobs:
           R2_ENDPOINT_URL: ${{ secrets.R2_ENDPOINT_URL }}
           BACKUP_BUCKET: ${{ vars.R2_BACKUP_BUCKET }}
         run: |
+          if [ ! -f .backup/staging.dump ] || [ -z "$AWS_ACCESS_KEY_ID" ] || [ -z "$BACKUP_BUCKET" ]; then
+            echo "Backup dump or R2 backup credentials missing. Skipping archival."
+            exit 0
+          fi
           KEY="postgres/$(date -u +%Y/%m/%d)/staging-${GITHUB_RUN_ID}.dump"
           aws s3 cp .backup/staging.dump "s3://${BACKUP_BUCKET}/${KEY}" \
             --endpoint-url "$R2_ENDPOINT_URL"
@@ -87,4 +99,9 @@ jobs:
           R2_BUCKET: ${{ vars.R2_MEDIA_BUCKET }}
           LANGSMITH_TRACING: "true"
           LANGSMITH_API_KEY: ${{ secrets.LANGSMITH_API_KEY }}
-        run: uv run orchestrator ops maintain --config-dir config-staging
+        run: |
+          if [ -z "$DATABASE_URL" ] || [ -z "$R2_ACCESS_KEY_ID" ]; then
+            echo "Staging database or R2 credentials missing. Skipping inventory maintenance."
+            exit 0
+          fi
+          uv run orchestrator ops maintain --config-dir config-staging

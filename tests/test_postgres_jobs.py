@@ -1336,12 +1336,24 @@ async def test_migration_from_0007_preserves_runs_and_adds_durable_queue(
 
     async with Database(runtime_url) as database:
         tenant = await database.ensure_tenant(identity)
-        await PostgresRunRepository(database, tenant).start(
-            "run-before-queue",
-            offer="preserved offer",
-            platform="tiktok",
-            batch_size=1,
-        )
+        async with database.connection(tenant) as connection:
+            await database.execute(
+                connection,
+                """
+                INSERT INTO runs (organization_id, id, offer, platform, batch_size, phase, summary, state)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    tenant.organization_id,
+                    "run-before-queue",
+                    "preserved offer",
+                    "tiktok",
+                    1,
+                    "running",
+                    "{}",
+                    "{}",
+                ),
+            )
 
     upgrade_database(admin_url)
     provision_runtime_role(admin_url, "runtime-test-secret")
