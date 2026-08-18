@@ -1,4 +1,4 @@
-"""OpenAIImageAdapter — gera referência de rosto via GPT Image 2, implementa parcialmente CreatorPort.
+"""OpenAIImageAdapter — gera referência de rosto via GPT Image 2 usando AsyncOpenAI.
 
 ## Contrato HTTP (OpenAI Images API, compatível com Vercel AI Gateway)
 POST ``{base_url}/images/generations``
@@ -34,6 +34,8 @@ import os
 from typing import Any, Optional
 
 import httpx
+import openai
+from openai import AsyncOpenAI
 
 from orchestrator.adapters._retry import with_transport_retry
 from orchestrator.adapters.base import VoiceProfile, image_gender_clause
@@ -89,7 +91,7 @@ def _build_creator_image_prompt(
 
 
 class OpenAIImageAdapter:
-    """Gera referência de rosto de creator via GPT Image 2.
+    """Gera referência de rosto de creator via GPT Image 2 usando AsyncOpenAI.
 
     Parameters
     ----------
@@ -99,8 +101,8 @@ class OpenAIImageAdapter:
         Token de autenticação (``Authorization: Bearer <token>``).
         Se vazio, lê de ``OPENAI_API_KEY``.
     client:
-        ``httpx.AsyncClient`` injetado. Se ``None``, cria um por chamada.
-        Injete nos testes usando ``httpx.AsyncClient(transport=httpx.MockTransport(...))``.
+        ``AsyncOpenAI`` ou ``httpx.AsyncClient`` injetado. Se ``None``, cria um por chamada.
+        Injete nos testes usando ``AsyncOpenAI(...)`` ou ``httpx.AsyncClient(transport=httpx.MockTransport(...))``.
     """
 
     ANGLES = ["front", "3/4", "profile", "smile", "neutral"]
@@ -111,7 +113,7 @@ class OpenAIImageAdapter:
         token: str = "",
         model: str = "gpt-image-2",
         timeout: float = 120.0,
-        client: Optional[httpx.AsyncClient] = None,
+        client: Optional[AsyncOpenAI | httpx.AsyncClient | Any] = None,
         max_retries: int = 3,
         backoff_base: float = 1.0,
     ) -> None:
@@ -119,9 +121,67 @@ class OpenAIImageAdapter:
         self.token = token or os.environ.get("OPENAI_API_KEY", "")
         self.model = model
         self.timeout = timeout
-        self._client = client
         self.max_retries = max_retries
         self.backoff_base = backoff_base
+
+        if client is None:
+            self._client = None
+        elif isinstance(client, AsyncOpenAI) or hasattr(client, "images"):
+            self._client = client
+        elif isinstance(client, httpx.AsyncClient):
+            self._client = AsyncOpenAI(
+                api_key=self.token or "mock-key",
+                base_url=self.base_url,
+                http_client=client,
+                timeout=self.timeout,
+                max_retries=0,
+            )
+        else:
+            self._client = client
+
+    async def _generate_with_client(self, client: Any, prompt: str) -> Any:
+        try:
+            resp = await client.images.generate(
+                model=self.model,
+                prompt=prompt,
+            )
+            return resp.data[0]
+        except openai.APIStatusError as exc:
+            error_body = ""
+            if exc.response is not None and exc.response.text:
+                error_body = exc.response.text[:2000]
+            elif exc.body is not None:
+                error_body = str(exc.body)[:2000]
+            url = str(exc.request.url) if exc.request else f"{self.base_url}/images/generations"
+            _log.error(
+                "GPT Image 2 falhou: status=%s model=%s url=%s body=%s",
+                exc.status_code,
+                self.model,
+                url,
+                error_body,
+            )
+            add_trace_metadata(
+                image_error_status=exc.status_code,
+                image_error_body=error_body,
+                image_model=self.model,
+            )
+            raise
+        except httpx.HTTPStatusError as exc:
+            error_body = exc.response.text[:2000] if exc.response is not None else ""
+            url = str(exc.request.url) if exc.request else f"{self.base_url}/images/generations"
+            _log.error(
+                "GPT Image 2 falhou: status=%s model=%s url=%s body=%s",
+                exc.response.status_code,
+                self.model,
+                url,
+                error_body,
+            )
+            add_trace_metadata(
+                image_error_status=exc.response.status_code,
+                image_error_body=error_body,
+                image_model=self.model,
+            )
+            raise
 
     @traced(
         "adapter.openai_image.generate_face", run_type="tool", step=3, provider="openai"
@@ -139,10 +199,6 @@ class OpenAIImageAdapter:
 
         Retorna ``{"primary": <url ou data URI>, "angles": [...]}``.
         """
-        headers = {
-            "Authorization": f"Bearer {self.token}",
-            "Content-Type": "application/json",
-        }
         prompt = _build_creator_image_prompt(
             index, system_prompt=system_prompt, voice_profile=voice_profile
         )
@@ -150,65 +206,41 @@ class OpenAIImageAdapter:
         # redigido só com LANGSMITH_REDACT_PROMPTS). É o que responde "qual prompt
         # gerou esta imagem" no LangSmith.
         add_trace_metadata(image_prompt=prompt, image_model=self.model)
-        body = {
-            "model": self.model,
-            "prompt": prompt,
-        }
 
-        async def _call() -> dict[str, Any]:
+        async def _call() -> Any:
             if self._client is not None:
-                resp = await self._client.post(
-                    f"{self.base_url}/images/generations",
-                    headers=headers,
-                    json=body,
-                )
+                return await self._generate_with_client(self._client, prompt)
             else:
-                async with httpx.AsyncClient(timeout=self.timeout) as client:
-                    resp = await client.post(
-                        f"{self.base_url}/images/generations",
-                        headers=headers,
-                        json=body,
+                async with httpx.AsyncClient(timeout=self.timeout) as http_client:
+                    client = AsyncOpenAI(
+                        api_key=self.token or "mock-key",
+                        base_url=self.base_url,
+                        http_client=http_client,
+                        timeout=self.timeout,
+                        max_retries=0,
                     )
+                    return await self._generate_with_client(client, prompt)
 
-            # Tracing/log dedicado da falha: o corpo da resposta do gateway é onde o
-            # 400 explica a causa real (param não suportado, moderação, etc.). Sem isto,
-            # raise_for_status() levanta um erro opaco sem o corpo. Em 4xx o corpo é JSON
-            # curto (não há b64_json), então logá-lo não despeja base64 no terminal.
-            if not resp.is_success:
-                error_body = resp.text[:2000]
-                _log.error(
-                    "GPT Image 2 falhou: status=%s model=%s url=%s body=%s",
-                    resp.status_code,
-                    self.model,
-                    str(resp.url),
-                    error_body,
-                )
-                add_trace_metadata(
-                    image_error_status=resp.status_code,
-                    image_error_body=error_body,
-                    image_model=self.model,
-                )
-
-            _raise_for_status_verbose(resp, label="openai_image")
-            data: dict[str, Any] = resp.json()
-            return data["data"][0]
-
-        item: dict[str, Any] = await with_transport_retry(
+        item: Any = await with_transport_retry(
             _call,
             max_retries=self.max_retries,
             backoff_base=self.backoff_base,
             label="openai_image.generate_face",
         )
 
+        url = getattr(item, "url", None) or (item.get("url") if isinstance(item, dict) else None)
+        b64_json = getattr(item, "b64_json", None) or (item.get("b64_json") if isinstance(item, dict) else None)
+
         # OpenAI direto devolve uma URL; GPT Image / Vercel Gateway devolve base64.
-        if item.get("url"):
-            primary = item["url"]
-        elif item.get("b64_json"):
-            primary = f"data:image/png;base64,{item['b64_json']}"
+        if url:
+            primary = url
+        elif b64_json:
+            primary = f"data:image/png;base64,{b64_json}"
         else:
+            present_keys = list(getattr(item, "__dict__", {}).keys()) if hasattr(item, "__dict__") else (list(item.keys()) if isinstance(item, dict) else [])
             raise RuntimeError(
                 "Image response contained neither 'url' nor 'b64_json'. "
-                f"Keys present: {sorted(item)}"
+                f"Keys present: {sorted(present_keys)}"
             )
 
         return {

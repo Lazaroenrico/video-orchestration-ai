@@ -25,6 +25,7 @@ novas entregas usam uma página própria em `docs/progress/changes/`.
 
 ## Últimas 10 entregas
 
+- [Migração do adapter de imagem para AsyncOpenAI](progress/changes/2026-08-17-migrar-adapter-imagem-asyncopenai.md) — transição para AsyncOpenAI com client injetável, compatibilidade Vercel Gateway e retries determinísticos.
 - [Centralização de deployments LangChain em LanguageModelFactory](progress/changes/2026-08-17-centralizar-deployments-langchain-factory.md) — factory centralizada com `init_chat_model`, paridade de credenciais/URLs/retries e delegação em `LanguageRuntime`.
 - [Classificação de aliases, adapters e integrações legadas](progress/changes/2026-08-17-classificacao-aliases-e-integracoes.md) — inventário de 19 itens classificados em `supported`, `compatibility` e `dead` com plano de rollback para subsidiar a issue #16.
 - [Caracterização de paridade do SDK ElevenLabs e decisão arquitetural](progress/changes/2026-08-17-caracterizacao-paridade-sdk-elevenlabs.md) — matriz de paridade executável e decisão HITL de manter REST artesanal seguro e sem dependências extras.
@@ -34,7 +35,6 @@ novas entregas usam uma página própria em `docs/progress/changes/`.
 - [Persistência e validação do runtime contract dos runs](progress/changes/2026-08-15-runtime-contract-runs.md) — persistência de fingerprint canônico sem segredos, bloqueio de resume incompatível antes de chamadas pagas e preservação de consultas legacy.
 - [Isolamento do GatewayJudge no módulo de evaluation](progress/changes/2026-08-15-isolar-gatewayjudge-module-evaluation.md) — GatewayJudge e cassette tooling isolados em orchestrator.evaluation, JudgePort removido dos adapters de produção.
 - [Runtime de linguagem nativo LangChain](progress/changes/2026-08-14-langchain-native-runtime.md) — composição central de dependências, models/agents nativos, mock determinístico e vídeo sem `agent_takes` novo.
-- [Integração LatentSync 2-Estágios no Talking Head](progress/changes/2026-08-07-latentsync-talking-head.md) — LTX gera vídeo base em 720p e LatentSync aplica lip-sync com a voz ElevenLabs (3 retries, sem fallback silencioso).
 
 ## Índice do histórico
 

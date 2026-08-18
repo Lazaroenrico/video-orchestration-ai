@@ -55,12 +55,17 @@ def _is_retryable(exc: BaseException) -> bool:
     ``ReadTimeout`` NÃO é retentável: a operação pode já ter iniciado.
     ``ReplicateError`` só é retentável quando ``status == 429`` (throttle);
     ``HTTPStatusError`` também só é retentável quando a resposta é ``429``.
+    ``APIStatusError`` (OpenAI) só é retentável quando ``status_code == 429``.
     Outros status propagam.
     """
     if isinstance(exc, _PRE_SEND_TRANSPORT_ERRORS):
         return True
+    if hasattr(exc, "__cause__") and isinstance(exc.__cause__, _PRE_SEND_TRANSPORT_ERRORS):
+        return True
     if isinstance(exc, httpx.HTTPStatusError):
         return exc.response.status_code == 429
+    if getattr(exc, "status_code", None) == 429:
+        return True
     if isinstance(exc, ReplicateError):
         return getattr(exc, "status", None) == 429
     return False
