@@ -21,8 +21,8 @@ from orchestrator.creative_contracts import (
 from orchestrator.graph.state import Artifact, Item, QCResult
 from orchestrator.tracing import traced
 
-_HOOK_STYLES = ["problem", "curiosity", "bold_claim", "emotional", "social_proof"]
 _QC_SUSPECTS = ["hands", "eyes", "lip_sync", "lighting", "skin_texture"]
+
 
 
 def _unit(*parts: Any) -> float:
@@ -120,81 +120,8 @@ def _mp4_data_uri(*seed_parts: Any) -> str:
     return "data:video/mp4;base64," + _MP4_PLAYABLE_B64 + "#" + tag
 
 
-def _terminal_submission(stage: str, inputs: dict[str, Any]) -> dict[str, Any]:
-    """Build deterministic creative-v2 tool arguments for offline agent runs."""
-    campaign = inputs.get("campaign")
-    campaign = campaign if isinstance(campaign, dict) else {}
-    if stage == "concepts":
-        count = int(inputs.get("n") or campaign.get("batch_size") or 1)
-        offer = str(campaign.get("offer") or inputs.get("offer") or "the offer")
-        audience = str(campaign.get("audience") or "the audience")
-        return {
-            "proposals": [
-                {
-                    "hook": f"{offer}: angle {index + 1} for {audience}",
-                    "angle": f"Deterministic test angle {index + 1}",
-                    "audience_problem": f"A relevant problem for {audience}",
-                    "product_mechanism": f"The supplied mechanism for {offer}",
-                    "evidence_basis": "cold_test",
-                    "format": "direct-to-camera",
-                    "hook_style": _HOOK_STYLES[index % len(_HOOK_STYLES)],
-                }
-                for index in range(count)
-            ]
-        }
-    if stage == "scripts":
-        concept = inputs.get("concept")
-        concept = concept if isinstance(concept, dict) else {}
-        hook = str(concept.get("hook") or "I changed one part of my routine.")
-        return {
-            "draft": {
-                "spoken_beats": [
-                    {"section": "hook", "text": hook, "seconds": 3},
-                    {
-                        "section": "body",
-                        "text": "Here is how the approved product fits the routine.",
-                        "seconds": 8,
-                    },
-                    {"section": "cta", "text": "See the approved offer.", "seconds": 3},
-                ],
-                "visual_beats": [
-                    "Creator addresses camera",
-                    "Approved product demonstration",
-                ],
-                "on_screen_text": [hook[:80]],
-                "call_to_action": "See the approved offer.",
-                "estimated_duration": 14,
-            }
-        }
-    if stage == "creator_profiles":
-        concept_ids = [str(value) for value in inputs.get("concept_ids") or []]
-        return {
-            "creators": [
-                {
-                    "archetype": "Warm routine guide",
-                    "visual_brief": "Adult creator in a bright, realistic home setting.",
-                    "voice_brief": "Warm, clear, conversational delivery.",
-                    "performance_style": "Calm, practical, and credible.",
-                    "exclusions": ["medical authority", "guaranteed outcomes"],
-                },
-                {
-                    "archetype": "Direct product tester",
-                    "visual_brief": "Adult creator at a clean vanity with the real product.",
-                    "voice_brief": "Direct, energetic, natural delivery.",
-                    "performance_style": "Concise demonstration with visible product handling.",
-                    "exclusions": ["medical authority", "guaranteed outcomes"],
-                },
-            ],
-            "assignments": [
-                {"concept_id": concept_id, "creator_index": index % 2}
-                for index, concept_id in enumerate(concept_ids)
-            ],
-        }
-    raise ValueError(f"unsupported terminal mock stage: {stage}")
-
-
 class MockAdapter:
-    """Serve aos papéis mock (llm/image/voice/video/assembly) no v1."""
+    """Serve aos papéis mock de domínio/mídia (creator/voice/video/qc/assembly/upscale)."""
 
     def __init__(
         self,
@@ -217,82 +144,10 @@ class MockAdapter:
         if self.latency:
             await asyncio.sleep(self.latency)
 
-    # --- Step 1: conceitos ---
-    @traced("adapter.mock.generate_concepts", run_type="chain", step=1, provider="mock")
-    async def generate_concepts(
-        self,
-        offer: str,
-        n: int,
-        seed: str,
-        bias: Optional[list[str]] = None,
-        revision: Optional[str] = None,
-        persona: Optional[str] = None,
-    ) -> list[dict[str, Any]]:
-        await self._tick()
-        # bias = hooks vencedores do ciclo anterior (Step 10 -> 1). Uma fração dos
-        # conceitos é puxada para esses estilos, mantendo determinismo e spread.
-        bias = [b for b in (bias or []) if b in _HOOK_STYLES]
-        bias_strength = 0.6
-        # revision (Fase 7): quando o agent pede refino, a diretiva entra no hash para
-        # produzir um output distinto e determinístico. None/"" mantém a saída base
-        # byte-idêntica ao modo tool (o part de revisão nem entra no hash).
-        concepts: list[dict[str, Any]] = []
-        for i in range(n):
-            persona_part = (f"persona:{persona}",) if persona else ()
-            if revision:
-                style_parts: tuple[Any, ...] = (seed, offer, *persona_part, f"rev:{revision}", i)
-                tag_key = "|".join(str(part) for part in style_parts)
-            else:
-                style_parts = (seed, offer, *persona_part, i)
-                tag_key = "|".join(str(part) for part in style_parts)
-            style = _HOOK_STYLES[int(_unit(*style_parts) * len(_HOOK_STYLES))]
-            if bias and _unit("bias", seed, offer, i) < bias_strength:
-                style = bias[0]
-            tag = hashlib.sha256(tag_key.encode()).hexdigest()[:8]
-            concepts.append(
-                {
-                    "id": f"concept-{tag}",
-                    "offer": offer,
-                    "hook": f"hook[{style}]-{tag}",
-                    "angle": style,
-                    "hook_style": style,
-                    "format": ["talking_head", "demo", "reaction"][i % 3],
-                }
-            )
-        return concepts
-
-    # --- Step 2: scripts ---
-    @traced("adapter.mock.write_script", run_type="chain", step=2, provider="mock")
-    async def write_script(
-        self,
-        concept: dict[str, Any],
-        creator_ref: str,
-        platform: str,
-        revision: Optional[str] = None,
-        persona: Optional[str] = None,
-    ) -> str:
-        await self._tick()
-        hook = concept.get("hook", "hook")
-        pacing = "fast" if platform.lower() == "tiktok" else "medium"
-        script = (
-            f"HOOK: {hook} Se você não conhece precisa ver isso.\n"
-            f"BODY: ({platform} / pacing={pacing}) creator={creator_ref} fala sobre "
-            f"{concept.get('offer', 'o produto')} com resultados reais comprovados no dia a dia.\n"
-            f"CTA: confere o link e garante o seu hoje mesmo."
-        )
-        if persona:
-            tag = hashlib.sha256(persona.encode()).hexdigest()[:8]
-            script += f"\nPERSONA_CONTEXT[{tag}]: {persona}"
-        # revision (Fase 7): refino do agent anexa uma linha determinística; None mantém
-        # o script base inalterado (backward-compatible com o modo tool).
-        if revision:
-            tag = hashlib.sha256(f"{hook}|{revision}".encode()).hexdigest()[:8]
-            script += f"\nREVISED[{tag}]: {revision}"
-        return script
-
     # --- Step 3: creator reutilizável ---
     @traced("adapter.mock.build_creator", run_type="tool", step=3, provider="mock")
     async def build_creator(
+
         self,
         index: int,
         system_prompt: Optional[str] = None,
