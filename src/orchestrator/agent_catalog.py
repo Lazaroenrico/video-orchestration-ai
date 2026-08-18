@@ -6,13 +6,26 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from orchestrator.tools.registry import TOOL_REGISTRY, get_tool_spec, tool_specs_for_stage
+from orchestrator.tools.registry import get_tool_spec
 
 _EXECUTORS = {"tool", "agent"}
-# Stages que podem rodar em modo agent. ``video`` entrou no D33 (agent escolhe a diretiva
-# de refino da take; tier/attempt seguem server-authoritative). roster/assembly/upscale
-# continuam fora até terem contrato de artefato testado.
 _AGENT_STAGES = {"concepts", "scripts", "creator_profiles"}
+_STAGE_DEFAULT_MATERIALIZERS = {
+    "concepts": "generate_concepts",
+    "scripts": "write_script",
+    "creator_profiles": "design_creator_roster",
+}
+_LEGACY_NON_CREATIVE_STAGES = {
+    "roster",
+    "video",
+    "qc",
+    "voiceover",
+    "assembly",
+    "upscale",
+    "voice_spec",
+    "voice_candidates",
+    "finalize_voices",
+}
 
 
 def is_agent_stage_allowed(stage: str) -> bool:
@@ -33,15 +46,21 @@ def agent_stage_not_allowed_message() -> str:
 class StageExecutionSpec:
     stage: str
     executor: str
-    tools: tuple[str, ...]
+    materializer: str = ""
     target_model: str | None = None
-    target_agent: str | None = None
     system_prompt_path: str | None = None
     system_prompt: str | None = None
     prompt_version: str | None = None
     prompt_hash: str | None = None
     schema_version: str | None = None
     agent_enabled: bool = False
+    tools: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not self.materializer and self.tools:
+            object.__setattr__(self, "materializer", self.tools[0])
+        elif self.materializer and not self.tools:
+            object.__setattr__(self, "tools", (self.materializer,))
 
 
 @dataclass(frozen=True)
@@ -59,9 +78,8 @@ class AgentCatalog:
             "stages": {
                 spec.stage: {
                     "executor": spec.executor,
-                    "tools": list(spec.tools),
+                    "materializer": spec.materializer,
                     "target_model": spec.target_model,
-                    "target_agent": spec.target_agent,
                     "has_system_prompt": bool(spec.system_prompt and spec.system_prompt.strip()),
                     "prompt_version": spec.prompt_version,
                     "prompt_hash": spec.prompt_hash,
@@ -74,14 +92,13 @@ class AgentCatalog:
 
 
 def default_agent_catalog() -> AgentCatalog:
-    stages = sorted({spec.stage for spec in TOOL_REGISTRY})
     specs = tuple(
         StageExecutionSpec(
             stage=stage,
             executor="tool",
-            tools=tuple(spec.name for spec in tool_specs_for_stage(stage)),
+            materializer=mat,
         )
-        for stage in stages
+        for stage, mat in sorted(_STAGE_DEFAULT_MATERIALIZERS.items())
     )
     return AgentCatalog(stages=specs)
 
@@ -128,6 +145,12 @@ def build_agent_catalog(
     for stage, override in stages_raw.items():
         stage_name = str(stage)
         if stage_name not in by_stage:
+            if stage_name in _LEGACY_NON_CREATIVE_STAGES:
+                if isinstance(override, dict):
+                    executor = str(override.get("executor", "tool"))
+                    if executor == "agent":
+                        raise ValueError(f"agents.yaml: {agent_stage_not_allowed_message()}")
+                    continue
             raise ValueError(f"agents.yaml: unknown stage {stage_name!r}")
         if not isinstance(override, dict):
             raise ValueError(f"agents.yaml: stage {stage_name!r} must be a mapping")
@@ -137,20 +160,39 @@ def build_agent_catalog(
         if executor not in _EXECUTORS:
             raise ValueError(f"agents.yaml: stage {stage_name!r} has invalid executor {executor!r}")
 
-        raw_tools = override.get("tools", base.tools)
-        if not isinstance(raw_tools, list | tuple) or not raw_tools:
-            raise ValueError(f"agents.yaml: stage {stage_name!r} tools must be a non-empty list")
-        tools = tuple(str(tool) for tool in raw_tools)
-        for tool in tools:
+        materializer = override.get("materializer")
+        if materializer is not None:
+            if not isinstance(materializer, str) or not materializer.strip():
+                raise ValueError(
+                    f"agents.yaml: stage {stage_name!r} materializer must be a non-empty string"
+                )
             try:
-                tool_spec = get_tool_spec(tool)
+                tool_spec = get_tool_spec(materializer)
             except KeyError as exc:
-                raise ValueError(f"agents.yaml: unknown tool {tool!r}") from exc
+                raise ValueError(f"agents.yaml: unknown tool {materializer!r}") from exc
             if tool_spec.stage != stage_name:
                 raise ValueError(
-                    f"agents.yaml: tool {tool!r} belongs to stage {tool_spec.stage!r}, "
+                    f"agents.yaml: tool {materializer!r} belongs to stage {tool_spec.stage!r}, "
                     f"not {stage_name!r}"
                 )
+        elif "tools" in override:
+            raw_tools = override.get("tools")
+            if not isinstance(raw_tools, list | tuple) or not raw_tools:
+                raise ValueError(f"agents.yaml: stage {stage_name!r} tools must be a non-empty list")
+            tools = tuple(str(tool) for tool in raw_tools)
+            for tool in tools:
+                try:
+                    tool_spec = get_tool_spec(tool)
+                except KeyError as exc:
+                    raise ValueError(f"agents.yaml: unknown tool {tool!r}") from exc
+                if tool_spec.stage != stage_name:
+                    raise ValueError(
+                        f"agents.yaml: tool {tool!r} belongs to stage {tool_spec.stage!r}, "
+                        f"not {stage_name!r}"
+                    )
+            materializer = tools[0]
+        else:
+            materializer = base.materializer
 
         agent_enabled = bool(override.get("agent_enabled", base.agent_enabled))
         if executor == "agent" and not agent_enabled:
@@ -179,9 +221,8 @@ def build_agent_catalog(
         by_stage[stage_name] = StageExecutionSpec(
             stage=stage_name,
             executor=executor,
-            tools=tools,
+            materializer=materializer,
             target_model=override.get("target_model", base.target_model),
-            target_agent=override.get("target_agent", base.target_agent),
             system_prompt_path=system_prompt_path,
             system_prompt=system_prompt,
             prompt_version=override.get("prompt_version"),

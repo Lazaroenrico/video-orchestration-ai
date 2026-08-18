@@ -2,49 +2,22 @@
 stages:
   concepts:
     executor: tool
-    tools: [generate_concepts]
-    target_agent: concept-agent
+    materializer: generate_concepts
     system_prompt_path: prompts/agents/concepts.md
     prompt_version: concepts-v2
     schema_version: creative-v2
     agent_enabled: false
   scripts:
     executor: tool
-    tools: [write_script]
-    target_agent: script-agent
+    materializer: write_script
     system_prompt_path: prompts/agents/scripts.md
     prompt_version: scripts-v2
     schema_version: creative-v2
     agent_enabled: false
   creator_profiles:
     executor: tool
-    tools: [design_creator_roster]
-    target_agent: creator-agent
+    materializer: design_creator_roster
     system_prompt_path: prompts/agents/creators.md
     prompt_version: creators-v2
     schema_version: creative-v2
-    agent_enabled: false
-  roster:
-    executor: tool
-    tools: [build_creator]
-    agent_enabled: false
-  video:
-    executor: tool
-    tools: [generate_clip]
-    agent_enabled: false
-  qc:
-    executor: tool
-    tools: [qc_check]
-    agent_enabled: false
-  voiceover:
-    executor: tool
-    tools: [synthesize_voiceover]
-    agent_enabled: false
-  assembly:
-    executor: tool
-    tools: [assemble_video]
-    agent_enabled: false
-  upscale:
-    executor: tool
-    tools: [upscale_video]
     agent_enabled: false

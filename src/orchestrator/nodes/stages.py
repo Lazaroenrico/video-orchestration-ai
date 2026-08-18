@@ -31,7 +31,7 @@ from orchestrator.creative_contracts import (
 )
 from orchestrator.graph.state import Artifact, FailureDetail, Item
 from orchestrator.nodes.base import as_item, get_pipeline
-from orchestrator.stage_executor import StageExecutionError, execute_stage_tool
+from orchestrator.stage_executor import execute_stage_tool
 from orchestrator.storage.base import is_downloadable
 from orchestrator.storage.resolve import resolve_signed_uris
 from orchestrator.storage.retention import (
@@ -650,12 +650,8 @@ async def node_roster(state: dict[str, Any], config: RunnableConfig) -> dict[str
             if isinstance(value, str) and value.strip()
         ) or _prompt_with_persona(state.get("persona"), run_cfg.get("creator_prompt"))
         profile = assign_voice_profile(profile_prompt, None, index=i)
-        creator = await execute_stage_tool(
-            config,
+        creator = await build_creator_tool(
             tool_ctx,
-            catalog_stage="roster",
-            tool_name="build_creator",
-            tool_fn=build_creator_tool,
             index=i,
             system_prompt=profile_prompt,
             voice_profile=profile,
@@ -752,20 +748,12 @@ async def node_voice_candidates(
                 )
             reroll_count += 1
 
-        voice_spec = await execute_stage_tool(
-            config,
+        voice_spec = await derive_creator_voice_spec_tool(
             tool_ctx,
-            catalog_stage="voice_spec",
-            tool_name="derive_creator_voice_spec",
-            tool_fn=derive_creator_voice_spec_tool,
             profile=creator_dict,
         )
-        voice_batch = await execute_stage_tool(
-            config,
+        voice_batch = await design_creator_voice_tool(
             tool_ctx,
-            catalog_stage="voice_candidates",
-            tool_name="design_creator_voice",
-            tool_fn=design_creator_voice_tool,
             spec=voice_spec,
             creator_id=creator_id,
             reroll_count=reroll_count,
@@ -1086,12 +1074,8 @@ async def node_finalize_voices(state: dict[str, Any], config: RunnableConfig) ->
         if not isinstance(batch, dict):
             raise ValueError(f"creator {creator_id or 'unknown'} has no voice design batch")
 
-        finalized = await execute_stage_tool(
-            config,
+        finalized = await finalize_creator_voice_tool(
             tool_ctx,
-            catalog_stage="finalize_voices",
-            tool_name="finalize_creator_voice",
-            tool_fn=finalize_creator_voice_tool,
             candidate_id=candidate_id,
             batch=batch,
             creator_id=creator_id,
@@ -1291,13 +1275,12 @@ def make_gen_node(tier: str):
             attempt=item.attempts,
         )
         try:
-            clip = await execute_stage_tool(
-                config,
+            clip = await generate_clip_tool(
                 tool_ctx,
-                catalog_stage="video",
-                tool_name="generate_clip",
-                tool_fn=generate_clip_tool,
-                item_id=item.id, tier=tier, seconds=seconds, attempt=item.attempts,
+                item_id=item.id,
+                tier=tier,
+                seconds=seconds,
+                attempt=item.attempts,
                 system_prompt=_video_prompt(
                     item, run_cfg.get("video_prompt"), stage="talking-head"
                 ),
@@ -1356,12 +1339,8 @@ async def node_product_demo(state: Any, config: RunnableConfig) -> dict[str, Any
         tier=product_demo_tier,
     )
     try:
-        demo = await execute_stage_tool(
-            config,
+        demo = await generate_clip_tool(
             tool_ctx,
-            catalog_stage="video",
-            tool_name="generate_clip",
-            tool_fn=generate_clip_tool,
             item_id=f"{item.id}:demo",
             tier=product_demo_tier,
             seconds=seconds,
@@ -1402,12 +1381,8 @@ async def node_qc(state: Any, config: RunnableConfig) -> dict[str, Any]:
     tool_ctx = tool_context_from_config(config)
     pipeline = get_pipeline(config)
     fail_rate = float(pipeline.get("qc", {}).get("fail_rate", 0.34))
-    qc = await execute_stage_tool(
-        config,
+    qc = await qc_check_tool(
         tool_ctx,
-        catalog_stage="qc",
-        tool_name="qc_check",
-        tool_fn=qc_check_tool,
         item=item,
         fail_rate=fail_rate,
     )
@@ -1465,18 +1440,12 @@ async def node_voiceover(state: Any, config: RunnableConfig) -> dict[str, Any]:
         characters=len(text),
     )
     try:
-        art = await execute_stage_tool(
-            config,
+        art = await synthesize_voiceover_tool(
             tool_ctx,
-            catalog_stage="voiceover",
-            tool_name="synthesize_voiceover",
-            tool_fn=synthesize_voiceover_tool,
             voice_ref=voice_ref,
             text=text,
             item_id=item.id,
         )
-    except StageExecutionError:
-        raise
     except Exception as exc:  # noqa: BLE001 - paid TTS failure must be explicit
         add_trace_metadata(
             step="voiceover",
@@ -1564,15 +1533,12 @@ async def node_assembly(state: Any, config: RunnableConfig) -> dict[str, Any]:
         assembly_item = _resolve_local_assembly_paths(
             Item.model_validate(assembly_payload)
         )
-        art = await execute_stage_tool(
-            config,
-            tool_ctx, item=assembly_item, platform=platform, system_prompt=system_prompt,
-            catalog_stage="assembly",
-            tool_name="assemble_video",
-            tool_fn=assemble_video_tool,
+        art = await assemble_video_tool(
+            tool_ctx,
+            item=assembly_item,
+            platform=platform,
+            system_prompt=system_prompt,
         )
-    except StageExecutionError:  # erro de config, não falha do assembler → estoura alto
-        raise
     except Exception as exc:  # noqa: BLE001 — assembly best-effort; falha vira erro no item
         art = None
         reason = str(exc)
@@ -1634,16 +1600,10 @@ async def node_upscale(state: Any, config: RunnableConfig) -> dict[str, Any]:
     tool_ctx = tool_context_from_config(config)
     add_trace_metadata(step=8, stage="upscale", item_id=item.id)
     try:
-        upscaled_uri = await execute_stage_tool(
-            config,
+        upscaled_uri = await upscale_video_tool(
             tool_ctx,
-            catalog_stage="upscale",
-            tool_name="upscale_video",
-            tool_fn=upscale_video_tool,
             media_uri=item.assembled.uri,
         )
-    except StageExecutionError:  # erro de config, não falha do upscaler → estoura alto
-        raise
     except Exception as exc:  # noqa: BLE001 — upscale best-effort; preserva o montado
         add_trace_metadata(step=8, stage="upscale_failed", item_id=item.id, error=str(exc))
         return {}

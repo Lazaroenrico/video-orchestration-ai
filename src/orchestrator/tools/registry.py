@@ -2,8 +2,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from importlib import import_module
-from typing import Any
 
 
 @dataclass(frozen=True)
@@ -12,11 +10,6 @@ class ToolSpec:
     description: str
     role: str
     stage: str
-    function_path: str = ""
-    target_model: str | None = None
-    target_agent: str | None = None
-    agent_enabled: bool = False
-    capabilities: tuple[str, ...] = ()
     terminal_submission: bool = False
 
 
@@ -26,8 +19,6 @@ TOOL_REGISTRY: tuple[ToolSpec, ...] = (
         description="Generate a batch of UGC concepts for an offer.",
         role="llm",
         stage="concepts",
-        function_path="orchestrator.tools.concepts.generate_concepts_tool",
-        capabilities=("llm", "batch_generation", "concept_generation"),
         terminal_submission=True,
     ),
     ToolSpec(
@@ -35,8 +26,6 @@ TOOL_REGISTRY: tuple[ToolSpec, ...] = (
         description="Write a platform-calibrated script for one concept.",
         role="llm",
         stage="scripts",
-        function_path="orchestrator.tools.scripts.write_script_tool",
-        capabilities=("llm", "copywriting", "script_generation"),
         terminal_submission=True,
     ),
     ToolSpec(
@@ -44,81 +33,7 @@ TOOL_REGISTRY: tuple[ToolSpec, ...] = (
         description="Submit exactly two creator profiles and assign every concept.",
         role="llm",
         stage="creator_profiles",
-        function_path="orchestrator.tools.creator_profiles.design_creator_roster_tool",
-        capabilities=("llm", "creator_strategy", "casting"),
         terminal_submission=True,
-    ),
-    ToolSpec(
-        name="build_creator",
-        description="Build one reusable creator identity with image and voice metadata.",
-        role="creator",
-        stage="roster",
-        function_path="orchestrator.tools.creators.build_creator_tool",
-        capabilities=("creator_identity", "image_generation", "voice_generation"),
-    ),
-    ToolSpec(
-        name="derive_creator_voice_spec",
-        description="Derive a typed CreatorVoiceSpec from creator profile and campaign.",
-        role="llm",
-        stage="voice_spec",
-        function_path="orchestrator.tools.creators.derive_creator_voice_spec_tool",
-        capabilities=("voice_spec", "creative_direction"),
-    ),
-    ToolSpec(
-        name="design_creator_voice",
-        description="Generate 3 voice candidates using ElevenLabs Voice Design.",
-        role="creator",
-        stage="voice_candidates",
-        function_path="orchestrator.tools.creators.design_creator_voice_tool",
-        capabilities=("voice_design", "voice_generation"),
-    ),
-    ToolSpec(
-        name="finalize_creator_voice",
-        description="Create permanent voice in ElevenLabs for the chosen candidate.",
-        role="creator",
-        stage="finalize_voices",
-        function_path="orchestrator.tools.creators.finalize_creator_voice_tool",
-        capabilities=("voice_creation", "voice_management"),
-    ),
-    ToolSpec(
-        name="generate_clip",
-        description="Generate a silent video clip for an item and tier.",
-        role="video",
-        stage="video",
-        function_path="orchestrator.tools.video.generate_clip_tool",
-        capabilities=("video_generation", "artifact_generation"),
-    ),
-    ToolSpec(
-        name="qc_check",
-        description="Evaluate an item and return a structured QC result.",
-        role="qc",
-        stage="qc",
-        function_path="orchestrator.tools.qc.qc_check_tool",
-        capabilities=("quality_control", "structured_evaluation"),
-    ),
-    ToolSpec(
-        name="synthesize_voiceover",
-        description="Synthesize the approved full script with the approved creator voice.",
-        role="creator",
-        stage="voiceover",
-        function_path="orchestrator.tools.assembly.synthesize_voiceover_tool",
-        capabilities=("text_to_speech", "artifact_generation"),
-    ),
-    ToolSpec(
-        name="assemble_video",
-        description="Assemble approved item material into the final video artifact.",
-        role="assembly",
-        stage="assembly",
-        function_path="orchestrator.tools.assembly.assemble_video_tool",
-        capabilities=("video_assembly", "artifact_generation"),
-    ),
-    ToolSpec(
-        name="upscale_video",
-        description="Upscale the final assembled video URI.",
-        role="upscale",
-        stage="upscale",
-        function_path="orchestrator.tools.assembly.upscale_video_tool",
-        capabilities=("video_upscale", "artifact_enhancement"),
     ),
 )
 
@@ -132,11 +47,3 @@ def get_tool_spec(name: str) -> ToolSpec:
 
 def tool_specs_for_stage(stage: str) -> tuple[ToolSpec, ...]:
     return tuple(spec for spec in TOOL_REGISTRY if spec.stage == stage)
-
-
-def resolve_tool_function(spec: ToolSpec) -> Any:
-    if not spec.function_path:
-        raise ValueError(f"{spec.name} does not declare function_path")
-    module_name, function_name = spec.function_path.rsplit(".", 1)
-    module = import_module(module_name)
-    return getattr(module, function_name)
