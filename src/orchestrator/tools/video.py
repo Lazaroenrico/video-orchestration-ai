@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import inspect
 import json
 import mimetypes
 import os
@@ -665,14 +666,29 @@ async def generate_clip_tool(
             stage=stage,
         )
     else:
-        clip = await ctx.adapter.generate_clip(
-            item_id=item_id,
-            tier=tier,
-            seconds=seconds,
-            attempt=attempt,
-            system_prompt=prompt,
-            reference_image_uri=reference_image_uri,
-            audio_uri=audio_uri,
-            stage=stage,
-        )
+        gen_fn = ctx.adapter.generate_clip
+        call_kwargs: dict[str, Any] = {
+            "item_id": item_id,
+            "tier": tier,
+            "seconds": seconds,
+            "attempt": attempt,
+            "system_prompt": prompt,
+            "reference_image_uri": reference_image_uri,
+            "audio_uri": audio_uri,
+        }
+        try:
+            sig = inspect.signature(gen_fn)
+            if "stage" in sig.parameters:
+                call_kwargs["stage"] = stage
+        except (ValueError, TypeError):
+            pass
+
+        try:
+            clip = await gen_fn(**call_kwargs)
+        except TypeError as exc:
+            if "stage" in call_kwargs and ("stage" in str(exc) or "unexpected keyword" in str(exc)):
+                call_kwargs.pop("stage", None)
+                clip = await gen_fn(**call_kwargs)
+            else:
+                raise
     return require_artifact(clip, tool_name="generate_clip_tool")
