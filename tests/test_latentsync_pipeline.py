@@ -133,13 +133,13 @@ async def test_generate_clip_with_prediction_client_chains_latentsync():
 
     created: list[dict[str, Any]] = []
 
-    async def async_create(*, model, input, **params):
-        created.append({"model": model, "input": input, "params": params})
+    async def async_create(*, model=None, version=None, input=None, **params):
+        created.append({"model": model, "version": version, "input": input, "params": params})
         if model == "lightricks/ltx-2.3-fast":
             return SimpleNamespace(id="pred-ltx-10", status="succeeded", output="https://cdn.replicate.com/ltx10.mp4", error=None)
-        if model == "bytedance/latentsync":
+        if model == "bytedance/latentsync" or version == "637ce1919f807ca20da3a448ddc2743535d2853649574cd52a933120e9b9e293":
             return SimpleNamespace(id="pred-ls-10", status="succeeded", output="https://cdn.replicate.com/ls10.mp4", error=None)
-        raise ValueError(f"unknown model {model}")
+        raise ValueError(f"unknown model/version {model}/{version}")
 
     async def async_get(prediction_id):
         if prediction_id == "pred-ltx-10":
@@ -181,7 +181,7 @@ async def test_generate_clip_with_prediction_client_chains_latentsync():
     assert artifact.meta["prediction_id"] == "pred-ls-10"
     assert len(created) == 2
     assert created[0]["model"] == "lightricks/ltx-2.3-fast"
-    assert created[1]["model"] == "bytedance/latentsync"
+    assert created[1]["version"] == "637ce1919f807ca20da3a448ddc2743535d2853649574cd52a933120e9b9e293"
     assert created[1]["input"]["video"] == "https://cdn.replicate.com/ltx10.mp4"
     assert created[1]["input"]["audio"] == "https://cdn.r2.com/elevenlabs_narration.wav"
     assert artifact.meta["base_clip_uri"] == "https://cdn.replicate.com/ltx10.mp4"

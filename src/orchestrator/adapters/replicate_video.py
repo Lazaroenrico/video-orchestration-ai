@@ -114,6 +114,7 @@ class ReplicateVideoAdapter:
         self.max_retries = max_retries
         self.backoff_base = backoff_base
         self.allow_mock_fallback = allow_mock_fallback
+        self._model_version_cache: dict[str, str] = {}
 
     @traced("adapter.replicate_video.generate_clip", run_type="tool", step="video", provider="replicate")
     async def generate_clip(
@@ -224,7 +225,6 @@ class ReplicateVideoAdapter:
             latentsync_inp = {
                 "video": uri,
                 "audio": audio_uri,
-                "resolution": self.latentsync_resolution,
             }
             latentsync_output = await with_idempotent_retry(
                 lambda: self._throttled_run(self.latentsync_model, input=latentsync_inp),
@@ -392,10 +392,10 @@ class ReplicateVideoAdapter:
         webhook_url: Optional[str] = None,
     ) -> VideoPrediction:
         """Create LatentSync prediction once, retrying only failures proven to happen before sending."""
+        del resolution  # LatentSync Cog schema does not accept resolution
         inp: dict[str, Any] = {
             "video": video_uri,
             "audio": audio_uri,
-            "resolution": resolution or self.latentsync_resolution,
         }
         params: dict[str, Any] = {"wait": False}
         if webhook_url:
@@ -403,15 +403,56 @@ class ReplicateVideoAdapter:
                 webhook=webhook_url,
                 webhook_events_filter=["start", "completed"],
             )
-        prediction = await with_transport_retry(
-            lambda: self._throttled_prediction_call(
-                lambda: self._prediction_client.models.predictions.async_create(
+
+        version_id: Optional[str] = None
+        if ":" in self.latentsync_model:
+            _owner, version_id = self.latentsync_model.split(":", 1)
+        elif self.latentsync_model in self._model_version_cache:
+            version_id = self._model_version_cache[self.latentsync_model]
+        elif self.latentsync_model == "bytedance/latentsync":
+            version_id = "637ce1919f807ca20da3a448ddc2743535d2853649574cd52a933120e9b9e293"
+            self._model_version_cache[self.latentsync_model] = version_id
+        else:
+            if hasattr(self._prediction_client, "models") and hasattr(
+                self._prediction_client.models, "async_get"
+            ):
+                try:
+                    model_obj = await self._throttled_prediction_call(
+                        lambda: self._prediction_client.models.async_get(self.latentsync_model)
+                    )
+                    resolved_ver = getattr(
+                        getattr(model_obj, "latest_version", None), "id", None
+                    ) or getattr(model_obj, "latest_version", None)
+                    if resolved_ver:
+                        version_id = str(resolved_ver)
+                        self._model_version_cache[self.latentsync_model] = version_id
+                except Exception:
+                    version_id = None
+
+        async def _create() -> Any:
+            if version_id:
+                return await self._prediction_client.predictions.async_create(
+                    version=version_id,
+                    input=inp,
+                    **params,
+                )
+            if hasattr(self._prediction_client, "models") and hasattr(
+                self._prediction_client.models, "predictions"
+            ) and hasattr(self._prediction_client.models.predictions, "async_create"):
+                return await self._prediction_client.models.predictions.async_create(
                     model=self.latentsync_model,
                     input=inp,
                     **params,
                 )
-            ),
-            max_retries=self.max_retries,
+            return await self._prediction_client.predictions.async_create(
+                model=self.latentsync_model,
+                input=inp,
+                **params,
+            )
+
+        prediction = await with_transport_retry(
+            lambda: self._throttled_prediction_call(_create),
+            max_retries=max(self.max_retries, 5),
             backoff_base=self.backoff_base,
             label="replicate.latentsync.create",
         )

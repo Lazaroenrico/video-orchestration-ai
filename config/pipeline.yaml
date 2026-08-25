@@ -22,7 +22,7 @@ tiers:
 
 clip:
   duration_seconds: 8
-  resolution: "720p"
+  resolution: "1080p"
   aspect_ratio: "9:16"
   fps: 24
   draft: true              # validação E2E de menor custo
@@ -32,7 +32,7 @@ clip:
 
 latentsync:
   enabled: true
-  model: "bytedance/latentsync"
+  model: "bytedance/latentsync:637ce1919f807ca20da3a448ddc2743535d2853649574cd52a933120e9b9e293"
   resolution: "720p"
   max_retries: 3
   required: true
