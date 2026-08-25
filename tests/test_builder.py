@@ -67,6 +67,16 @@ def test_item_graph_has_expected_nodes(pipeline_cfg):
     assert "distribution" not in nodes
 
 
+def test_item_graph_uses_configured_custom_tier_metadata(pipeline_cfg):
+    custom = {**pipeline_cfg, "tiers": [{"name": "pruna"}]}
+
+    app = build_item_graph(custom)
+    nodes = set(app.get_graph().nodes)
+
+    assert "pruna" in nodes
+    assert {"ltx", "kling", "seedance"}.isdisjoint(nodes)
+
+
 def test_top_graph_has_expected_nodes(pipeline_cfg):
     app = build_graph(pipeline_cfg)
     nodes = set(app.get_graph().nodes)

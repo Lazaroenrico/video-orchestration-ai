@@ -25,16 +25,16 @@ novas entregas usam uma página própria em `docs/progress/changes/`.
 
 ## Últimas 10 entregas
 
+- [Correções pós-revisão da refatoração estrutural](progress/changes/2026-08-25-refactor-review-fixes.md) — topologia runtime cobre tiers customizados de ponta a ponta, contratos de dict/gênero foram corrigidos e o storage R2 ficou seguro entre loops e cancelamentos.
+- [Divisão do web/server.py em módulos](progress/changes/2026-08-25-server-split.md) — server.py de 2.253 para 625 linhas: events, run_executor, RunRegistry injetável e rotas por domínio, com gate dual-mode e payloads preservados.
+- [Quebra de ciclos de camadas e vazamentos de adapters](progress/changes/2026-08-25-layering-adapters.md) — ArtifactRecord em módulo neutro, migrações sem grafo, accessors explícitos no CompositeAdapter e fallback mock injetado.
+- [Runtime mode centralizado](progress/changes/2026-08-25-runtime-mode.md) — runtime_mode.py substitui leituras espalhadas de DATABASE_URL/ORCH_ENABLE_PAID_ADAPTERS e throttle ganha reset para testes.
+- [Topologia única dos nodes do grafo](progress/changes/2026-08-25-node-topology.md) — graph/topology.py passa a ser a fonte canônica; progress.py e web derivam suas visões dela, com validador anti-divergência.
+- [Config base + overlay](progress/changes/2026-08-25-config-overlay.md) — config-base/ compartilhado elimina a triplicação (18 cópias de prompts); perfis viram overlays mínimos com prova de equivalência byte-a-byte.
+- [Primitivas comuns](progress/changes/2026-08-25-common-primitives.md) — orchestrator/common/ unifica to_plain, wav_data_uri, status terminais e inferência de gênero que estavam duplicados em até 4 pontos.
 - [Correção de CI (FFmpeg, migração 0007 e guards operacionais)](progress/changes/2026-08-18-ci-fixes-ffmpeg-migration.md) — instalação de FFmpeg no host de teste, inserção retrocompatível no teste de migração 0007 e guards de secrets em staging.
 - [Contratos de prompt dos agents LangChain](progress/changes/2026-08-14-langchain-agent-prompt-contracts.md) — separação trusted/untrusted, ToolStrategy terminal e prompts v3 idênticos nos três perfis.
 - [LatentSync obrigatório e storage do vídeo-base](progress/changes/2026-08-15-latentsync-required-e-base-clip-storage.md) — validação estrita de `latentsync.required` e persistência do vídeo base LTX no storage canônico.
-- [LatentSync durável, idempotente e reconciliável](progress/changes/2026-08-15-latentsync-duravel-idempotente.md) — 2 estágios (LTX + LatentSync) com reservas duráveis, reconciliação de WriteTimeout e cancelamento no provider.
-- [Proteção da geração de imagem paga com effects](progress/changes/2026-08-15-proteger-geracao-imagem-paga-effects.md) — idempotência, quota `openai_image_units`, kill switch obrigatório e classificação de falhas de transporte no `PostgresEffectLedger`.
-- [Persistência e validação do runtime contract dos runs](progress/changes/2026-08-15-runtime-contract-runs.md) — persistência de fingerprint canônico sem segredos, bloqueio de resume incompatível antes de chamadas pagas e preservação de consultas legacy.
-- [Isolamento do GatewayJudge no módulo de evaluation](progress/changes/2026-08-15-isolar-gatewayjudge-module-evaluation.md) — GatewayJudge e cassette tooling isolados em orchestrator.evaluation, JudgePort removido dos adapters de produção.
-- [Runtime de linguagem nativo LangChain](progress/changes/2026-08-14-langchain-native-runtime.md) — composição central de dependências, models/agents nativos, mock determinístico e vídeo sem `agent_takes` novo.
-- [Integração LatentSync 2-Estágios no Talking Head](progress/changes/2026-08-07-latentsync-talking-head.md) — LTX gera vídeo base em 720p e LatentSync aplica lip-sync com a voz ElevenLabs (3 retries, sem fallback silencioso).
-- [Prediction Replicate durável e falha parcial por item](progress/changes/2026-08-04-replicate-prediction-duravel.md) — criação/polling/webhook reconciliam timeout ambíguo sem POST duplicado nem encerrar os demais itens.
 
 ## Índice do histórico
 

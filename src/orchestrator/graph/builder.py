@@ -7,6 +7,7 @@
   -> voice_candidates -> review (único gate) -> finalize_voices -> [fan-out via Send]
   -> process_item (invoca o subgrafo) -> feedback.
 """
+
 from __future__ import annotations
 
 from typing import Any, Optional
@@ -21,6 +22,7 @@ from orchestrator.graph.routing import (
     route_after_voiceover,
 )
 from orchestrator.graph.state import BatchState, Item, new_item
+from orchestrator.graph.topology import DEFAULT_TIERS, topology_for_tiers
 from orchestrator.nodes.base import as_item, tier_names
 from orchestrator.nodes.stages import (
     make_gen_node,
@@ -83,6 +85,9 @@ def build_item_graph(pipeline: dict[str, Any]):
     sg.add_edge("assembly", "upscale")
     sg.add_edge("upscale", END)
     sg.add_edge("drop", END)
+    _validate_against_topology(
+        item_nodes={n for n in sg.nodes if not n.startswith("__")}, tiers=tns
+    )
     return sg.compile()
 
 
@@ -95,7 +100,9 @@ def make_qc_route_node(tns: list[str], max_attempts: int):
         updated_item = as_item(state).model_copy(update=update)
         destination = route_after_qc(updated_item, max_attempts, tns)
         add_trace_metadata(
-            step=7, stage="qc_route", item_id=updated_item.id,
+            step=7,
+            stage="qc_route",
+            item_id=updated_item.id,
             destination=destination,
         )
         return Command(update=update, goto=destination)
@@ -140,9 +147,7 @@ def _sub_config(config: dict[str, Any]) -> dict[str, Any]:
     metadata) e remove apenas as chaves de checkpoint do LangGraph."""
     cfg = config.get("configurable", {})
     sub: dict[str, Any] = {
-        "configurable": {
-            k: v for k, v in cfg.items() if k not in _CHECKPOINT_CONFIGURABLE_KEYS
-        },
+        "configurable": {k: v for k, v in cfg.items() if k not in _CHECKPOINT_CONFIGURABLE_KEYS},
         "recursion_limit": config.get("recursion_limit", 50),
     }
     for key in _PROPAGATED_TOP_KEYS:
@@ -161,8 +166,11 @@ def make_process_item_node(item_app: Any):
         result = await item_app.ainvoke(state, _sub_config(config))
         item = as_item(result)
         add_trace_metadata(
-            step=6, stage="process_item_done", item_id=item.id,
-            cost_usd=item.cost_usd, dropped=item.dropped,
+            step=6,
+            stage="process_item_done",
+            item_id=item.id,
+            cost_usd=item.cost_usd,
+            dropped=item.dropped,
             assembled=bool(item.assembled),
         )
         return {
@@ -185,9 +193,7 @@ def make_fan_out_node():
             for assignment in state.get("creator_assignments") or []
         }
         creators_by_id = {
-            str(creator.get("id")): creator
-            for creator in roster
-            if creator.get("id") is not None
+            str(creator.get("id")): creator for creator in roster if creator.get("id") is not None
         }
         add_trace_metadata(step=6, stage="fan_out", items=len(concepts), roster_size=len(roster))
         sends: list[Send] = []
@@ -272,4 +278,22 @@ def build_graph(pipeline: dict[str, Any], checkpointer: Optional[Any] = None):
     g.add_conditional_edges("finalize_voices", make_fan_out_node(), ["process_item"])
     g.add_edge("process_item", "feedback")
     g.add_edge("feedback", END)
+    tns = tier_names(pipeline)
+    _validate_against_topology(
+        {n for n in g.nodes if not n.startswith("__")},
+        {n for n in item_app.get_graph().nodes if not n.startswith("__")},
+        tns,
+    )
     return g.compile(checkpointer=checkpointer)
+
+
+def _validate_against_topology(
+    batch_nodes: set[str] | None = None,
+    item_nodes: set[str] | None = None,
+    tiers: list[str] | tuple[str, ...] = (),
+) -> None:
+    """Falha rápido se os registros do grafo divergirem da topologia canônica."""
+    topology_for_tiers(tiers or DEFAULT_TIERS).validate_registrations(
+        batch_nodes=batch_nodes,
+        item_nodes=item_nodes,
+    )

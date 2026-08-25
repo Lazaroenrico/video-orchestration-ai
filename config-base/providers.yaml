@@ -1,0 +1,4 @@
+# Nada é compartilhado aqui de propósito: o mapa papel->adapter e o backend de
+# storage definem o ambiente (live/mock/staging) e vivem integralmente no
+# providers.yaml de cada perfil. Este arquivo existe só para documentar isso;
+# o merge sobre um documento vazio é um no-op.

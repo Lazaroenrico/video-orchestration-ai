@@ -4,11 +4,10 @@ Agrupados em um módulo por concisão; cada função abaixo corresponde a um pas
 Context.md (marcado nos comentários). Top-graph opera sobre ``BatchState``; o
 subgrafo per-item opera sobre ``Item``.
 """
+
 from __future__ import annotations
 
 import asyncio
-import base64
-import hashlib
 import logging
 import re
 from datetime import datetime, timezone
@@ -22,6 +21,7 @@ from langgraph.types import interrupt
 import orchestrator.feedback_store as _feedback_store
 from orchestrator import media_store, stream_bus
 from orchestrator.adapters.base import RenderedMedia, VoiceProfile, assign_voice_profile
+from orchestrator.common.media import wav_data_uri as _wav_data_uri
 from orchestrator.config import default_media_path, default_videos_path
 from orchestrator.creative_contracts import (
     CampaignInput,
@@ -82,8 +82,13 @@ async def _report_creative_progress(
         if "without a parent run id" not in str(exc):
             raise
 
+
 async def _build_voice_preview(
-    adapter: Any, creator: dict[str, Any], *, run_id: str, media_root: Any,
+    adapter: Any,
+    creator: dict[str, Any],
+    *,
+    run_id: str,
+    media_root: Any,
 ) -> str | None:
     """Resolve um ``voice_preview_uri`` audível para o creator, quando possível.
 
@@ -114,7 +119,10 @@ async def _build_voice_preview(
         audio = await synth(voice_ref)
     except Exception as exc:  # noqa: BLE001 — preview é best-effort
         _log.error(
-            "voice preview falhou (%s): %s: %s", creator.get("id"), type(exc).__name__, exc,
+            "voice preview falhou (%s): %s: %s",
+            creator.get("id"),
+            type(exc).__name__,
+            exc,
         )
         return None
 
@@ -122,30 +130,6 @@ async def _build_voice_preview(
     dest_dir = Path(media_root) / run_id / creator_id
     web_prefix = f"/media/{run_id}/{creator_id}"
     return await media_store.persist_bytes(audio, dest_dir, "voice_preview", web_prefix=web_prefix)
-
-
-def _wav_data_uri(*seed_parts: Any) -> str:
-    """WAV PCM 8-bit mono minúsculo e determinístico para preview offline."""
-    sample_rate = 4000
-    n_samples = 400
-    digest = hashlib.sha256("|".join(str(p) for p in seed_parts).encode()).digest()
-    samples = bytes(digest[i % len(digest)] for i in range(n_samples))
-    data_size = len(samples)
-    header = (
-        b"RIFF"
-        + (36 + data_size).to_bytes(4, "little")
-        + b"WAVEfmt "
-        + (16).to_bytes(4, "little")
-        + (1).to_bytes(2, "little")
-        + (1).to_bytes(2, "little")
-        + sample_rate.to_bytes(4, "little")
-        + sample_rate.to_bytes(4, "little")
-        + (1).to_bytes(2, "little")
-        + (8).to_bytes(2, "little")
-        + b"data"
-        + data_size.to_bytes(4, "little")
-    )
-    return "data:audio/wav;base64," + base64.b64encode(header + samples).decode()
 
 
 def _creator_index(creator: dict[str, Any]) -> int:
@@ -166,7 +150,11 @@ def _creator_voice_profile(creator: dict[str, Any]) -> VoiceProfile | None:
 
 
 async def reroll_creator_voice(
-    adapter: Any, creator: dict[str, Any], *, run_id: str, media_root: Any,
+    adapter: Any,
+    creator: dict[str, Any],
+    *,
+    run_id: str,
+    media_root: Any,
 ) -> dict[str, Any]:
     """Regenera só os metadados de voz do creator, preservando a imagem.
 
@@ -201,7 +189,9 @@ async def reroll_creator_voice(
             "voice": voice_ref,
             "voice_source_uri": None,
             "voice_preview_uri": _wav_data_uri(
-                run_id, creator.get("id"), reroll_count,
+                run_id,
+                creator.get("id"),
+                reroll_count,
                 profile.preset if profile is not None else "",
             ),
         }
@@ -231,23 +221,23 @@ async def reroll_creator_voice(
 
     next_creator["voice_reroll_count"] = reroll_count
     next_creator["voice_preview_uri"] = await _build_voice_preview(
-        adapter, next_creator, run_id=run_id, media_root=media_root,
+        adapter,
+        next_creator,
+        run_id=run_id,
+        media_root=media_root,
     ) or next_creator.get("voice_preview_uri")
     return next_creator
 
 
 def apply_roster_updates(
-    roster: list[dict[str, Any]], updates: list[dict[str, Any]] | None,
+    roster: list[dict[str, Any]],
+    updates: list[dict[str, Any]] | None,
 ) -> list[dict[str, Any]]:
     """Mescla updates vindos do approval resume no roster atual do grafo."""
     if not updates:
         return roster
 
-    by_id = {
-        str(update.get("id")): update
-        for update in updates
-        if update.get("id") is not None
-    }
+    by_id = {str(update.get("id")): update for update in updates if update.get("id") is not None}
     merged: list[dict[str, Any]] = []
     for creator in roster:
         creator_id = str(creator.get("id") or "")
@@ -278,50 +268,56 @@ def apply_roster_updates(
     return merged
 
 
-_REVIEW_CONCEPT_FIELDS = frozenset({
-    "id",
-    "offer",
-    "hook",
-    "angle",
-    "audience_problem",
-    "product_mechanism",
-    "evidence_basis",
-    "format",
-    "hook_style",
-    "script",
-    "script_draft",
-})
+_REVIEW_CONCEPT_FIELDS = frozenset(
+    {
+        "id",
+        "offer",
+        "hook",
+        "angle",
+        "audience_problem",
+        "product_mechanism",
+        "evidence_basis",
+        "format",
+        "hook_style",
+        "script",
+        "script_draft",
+    }
+)
 _EDITABLE_CONCEPT_FIELDS = _REVIEW_CONCEPT_FIELDS - {
     "id",
     "offer",
     "script_draft",
 }
-_REVIEW_CREATOR_FIELDS = frozenset({
-    "id",
-    "archetype",
-    "visual_brief",
-    "voice_brief",
-    "performance_style",
-    "exclusions",
-    "image_uri",
-    "voice_ref",
-    "voice_preview_uri",
-    "selected_voice_candidate_id",
-    "image",
-    "voice",
-    "angles",
-    "run_id",
-    "offer",
-    "status",
-})
-_EDITABLE_CREATOR_FIELDS = frozenset({
-    "archetype",
-    "visual_brief",
-    "voice_brief",
-    "performance_style",
-    "exclusions",
-    "selected_voice_candidate_id",
-})
+_REVIEW_CREATOR_FIELDS = frozenset(
+    {
+        "id",
+        "archetype",
+        "visual_brief",
+        "voice_brief",
+        "performance_style",
+        "exclusions",
+        "image_uri",
+        "voice_ref",
+        "voice_preview_uri",
+        "selected_voice_candidate_id",
+        "image",
+        "voice",
+        "angles",
+        "run_id",
+        "offer",
+        "status",
+    }
+)
+_EDITABLE_CREATOR_FIELDS = frozenset(
+    {
+        "archetype",
+        "visual_brief",
+        "voice_brief",
+        "performance_style",
+        "exclusions",
+        "selected_voice_candidate_id",
+    }
+)
 
 
 def apply_review_concept_updates(
@@ -342,10 +338,7 @@ def apply_review_concept_updates(
     for update in updates:
         unknown = set(update) - _REVIEW_CONCEPT_FIELDS
         if unknown:
-            raise ValueError(
-                "unsupported concept review fields: "
-                + ", ".join(sorted(unknown))
-            )
+            raise ValueError("unsupported concept review fields: " + ", ".join(sorted(unknown)))
         by_id[str(update["id"])] = update
 
     return [
@@ -380,10 +373,7 @@ def apply_review_creator_updates(
     for update in updates:
         unknown = set(update) - _REVIEW_CREATOR_FIELDS
         if unknown:
-            raise ValueError(
-                "unsupported creator review fields: "
-                + ", ".join(sorted(unknown))
-            )
+            raise ValueError("unsupported creator review fields: " + ", ".join(sorted(unknown)))
         by_id[str(update["id"])] = update
 
     reviewed: list[dict[str, Any]] = []
@@ -391,15 +381,10 @@ def apply_review_creator_updates(
         update = by_id[str(creator["id"])]
         merged = {
             **creator,
-            **{
-                key: value
-                for key, value in update.items()
-                if key in _EDITABLE_CREATOR_FIELDS
-            },
+            **{key: value for key, value in update.items() if key in _EDITABLE_CREATOR_FIELDS},
         }
-        brief_changed = (
-            "voice_brief" in update
-            and update["voice_brief"] != creator.get("voice_brief")
+        brief_changed = "voice_brief" in update and update["voice_brief"] != creator.get(
+            "voice_brief"
         )
         if brief_changed:
             previous_candidates = list(creator.get("voice_candidates") or [])
@@ -442,9 +427,7 @@ def validate_voice_selections(roster: list[dict[str, Any]]) -> None:
         }
         if not selected_id or selected_id not in candidate_ids:
             creator_id = str(creator.get("id") or "unknown")
-            raise ValueError(
-                f"select one voice candidate belonging to creator {creator_id}"
-            )
+            raise ValueError(f"select one voice candidate belonging to creator {creator_id}")
 
 
 def _normalize_seed_creator(creator: dict[str, Any]) -> dict[str, Any] | None:
@@ -458,11 +441,7 @@ def _normalize_seed_creator(creator: dict[str, Any]) -> dict[str, Any] | None:
         or creator.get("upscaled_base")
         or creator.get("image_source_uri")
     )
-    voice_ref = (
-        creator.get("voice_id")
-        or creator.get("voice_ref")
-        or creator.get("voice")
-    )
+    voice_ref = creator.get("voice_id") or creator.get("voice_ref") or creator.get("voice")
     voice_preview_uri = (
         creator.get("voice_preview_uri")
         or creator.get("voice_preview")
@@ -495,9 +474,15 @@ def _ensure_seed_reference_image(creator: dict[str, Any], media_root: Path) -> N
     ref = creator.get("image_source_uri")
     if isinstance(ref, str) and is_downloadable(ref):
         return
-    for candidate in (creator.get("image_source_uri"), creator.get("upscaled_base"),
-                      creator.get("image_uri"), creator.get("image")):
-        data_uri = media_store.data_uri_from_media_path(candidate, media_root) if candidate else None
+    for candidate in (
+        creator.get("image_source_uri"),
+        creator.get("upscaled_base"),
+        creator.get("image_uri"),
+        creator.get("image"),
+    ):
+        data_uri = (
+            media_store.data_uri_from_media_path(candidate, media_root) if candidate else None
+        )
         if data_uri is not None:
             creator["image_source_uri"] = data_uri
             return
@@ -582,17 +567,13 @@ def _campaign_input(
         offer=str(state_config.get("offer") or "demo offer"),
         audience=str(run_config.get("audience") or "General adult audience"),
         facts_restrictions=run_config.get("facts_restrictions"),
-        creator_direction=run_config.get("creator_direction")
-        or run_config.get("creator_prompt"),
-        video_direction=run_config.get("video_direction")
-        or run_config.get("video_prompt"),
+        creator_direction=run_config.get("creator_direction") or run_config.get("creator_prompt"),
+        video_direction=run_config.get("video_direction") or run_config.get("video_prompt"),
         platform=run_config.get("platform", "tiktok"),
         objective=run_config.get("objective", "conversion"),
         batch_size=int(
             state_config.get("batch_size")
-            or config["configurable"].get("pipeline", {}).get("batch", {}).get(
-                "default_size", 12
-            )
+            or config["configurable"].get("pipeline", {}).get("batch", {}).get("default_size", 12)
         ),
         performance=run_config.get("performance"),
     )
@@ -633,10 +614,12 @@ async def node_roster(state: dict[str, Any], config: RunnableConfig) -> dict[str
     preview_progress_lock = asyncio.Lock()
 
     async def _build(i: int) -> dict[str, Any]:
-        stream_bus.emit_token({
-            "type": "creator_start",
-            "creator_id": f"creator-{i}",
-        })
+        stream_bus.emit_token(
+            {
+                "type": "creator_start",
+                "creator_id": f"creator-{i}",
+            }
+        )
         # Perfil concreto por índice: garante paridade imagem↔voz e variedade de
         # gênero no roster mesmo quando o briefing não cita gênero.
         creative_profile = profiles[i] if i < len(profiles) else {}
@@ -668,23 +651,30 @@ async def node_roster(state: dict[str, Any], config: RunnableConfig) -> dict[str
         # Baixa e persiste os bytes (imagem/voz) e reescreve as URIs para caminhos
         # locais servíveis. No-op para mock:// / voice_id (sem rede, sem disco).
         creator = await media_store.persist_creator_media(
-            creator, run_id=run_id, media_root=media_root,
+            creator,
+            run_id=run_id,
+            media_root=media_root,
             **_persistence(config, storage_key="media_storage"),
         )
         creator["voice_preview_uri"] = await _build_voice_preview(
-            tool_ctx.adapter, creator, run_id=run_id, media_root=media_root,
+            tool_ctx.adapter,
+            creator,
+            run_id=run_id,
+            media_root=media_root,
         )
         # Emite assim que cada creator fica pronto, com a mídia real (imagem + voz),
         # para feedback imediato na UI. No-op fora do contexto de streaming web.
-        stream_bus.emit_token({
-            "type": "creator_ready",
-            "creator": {
-                "id": creator.get("id"),
-                "image": creator.get("upscaled_base"),
-                "voice": creator.get("voice_id"),
-                "voice_preview_uri": creator.get("voice_preview_uri"),
-            },
-        })
+        stream_bus.emit_token(
+            {
+                "type": "creator_ready",
+                "creator": {
+                    "id": creator.get("id"),
+                    "image": creator.get("upscaled_base"),
+                    "voice": creator.get("voice_id"),
+                    "voice_preview_uri": creator.get("voice_preview_uri"),
+                },
+            }
+        )
         nonlocal preview_completed
         async with preview_progress_lock:
             preview_completed += 1
@@ -747,9 +737,7 @@ async def node_voice_candidates(
         reroll_count = int(creator_dict.get("voice_reroll_count") or 0)
         if is_voice_reroll:
             if reroll_count >= max_rerolls:
-                raise ValueError(
-                    f"voice reroll limit reached for creator {creator_id}"
-                )
+                raise ValueError(f"voice reroll limit reached for creator {creator_id}")
             reroll_count += 1
 
         voice_spec = await execute_stage_tool(
@@ -813,14 +801,14 @@ async def node_voice_candidates(
             creator_dict["selected_voice_candidate_id"] = None
         elif (
             candidates
-            and pipeline.get("voice", {}).get("selection_without_review", "first")
-            == "first"
+            and pipeline.get("voice", {}).get("selection_without_review", "first") == "first"
         ):
             creator_dict["selected_voice_candidate_id"] = candidates[0]["candidate_id"]
         if candidates:
             creator_dict["voice_preview_uri"] = candidates[0]["preview"]["uri"]
         updated_roster.append(creator_dict)
     return {"roster": updated_roster, "total_cost_usd": design_cost}
+
 
 @traced("node.approval", run_type="chain", step=3)
 async def node_approval(state: dict[str, Any], config: RunnableConfig) -> dict[str, Any]:
@@ -851,6 +839,7 @@ async def node_approval(state: dict[str, Any], config: RunnableConfig) -> dict[s
     else:
         approved = set(approved_list)
     return {"roster": [c for c in roster if c.get("id") in approved]}
+
 
 @traced("node.concepts", run_type="chain", step=1)
 async def node_concepts(state: dict[str, Any], config: RunnableConfig) -> dict[str, Any]:
@@ -903,9 +892,7 @@ async def node_scripts(state: dict[str, Any], config: RunnableConfig) -> dict[st
     concepts = state.get("concepts") or []
     completed = 0
     progress_lock = asyncio.Lock()
-    script_concurrency = max(
-        1, int((pipeline.get("batch") or {}).get("max_concurrency", 8))
-    )
+    script_concurrency = max(1, int((pipeline.get("batch") or {}).get("max_concurrency", 8)))
     script_semaphore = asyncio.Semaphore(script_concurrency)
     add_trace_metadata(step=2, stage="scripts", batch_size=len(concepts), platform=platform)
 
@@ -917,7 +904,9 @@ async def node_scripts(state: dict[str, Any], config: RunnableConfig) -> dict[st
                 catalog_stage="scripts",
                 tool_name="write_script",
                 tool_fn=write_script_tool,
-                concept=concept, creator_ref="creator", platform=platform,
+                concept=concept,
+                creator_ref="creator",
+                platform=platform,
                 campaign=campaign.model_dump(mode="json"),
                 revision_feedback=(state.get("revision_request") or {}).get("feedback"),
                 return_contract=True,
@@ -979,13 +968,9 @@ async def node_creator_profiles(
     if not isinstance(result, CreatorRoster):
         result = CreatorRoster.model_validate(result)
     return {
-        "creator_profiles": [
-            profile.model_dump(mode="json")
-            for profile in result.creators
-        ],
+        "creator_profiles": [profile.model_dump(mode="json") for profile in result.creators],
         "creator_assignments": [
-            assignment.model_dump(mode="json")
-            for assignment in result.assignments
+            assignment.model_dump(mode="json") for assignment in result.assignments
         ],
     }
 
@@ -996,13 +981,16 @@ async def node_review(state: dict[str, Any], config: RunnableConfig) -> dict[str
     run_cfg = config["configurable"].get("run", {})
     if not run_cfg.get("review_plan", False):
         return {"review_approved": True, "revision_request": {}}
-    decision = interrupt(
-        {
-            "type": "review_creative_plan",
-            "concepts": state.get("concepts") or [],
-            "creators": state.get("roster") or [],
-        }
-    ) or {}
+    decision = (
+        interrupt(
+            {
+                "type": "review_creative_plan",
+                "concepts": state.get("concepts") or [],
+                "creators": state.get("roster") or [],
+            }
+        )
+        or {}
+    )
     action = decision.get("action", "approve")
     if action == "regenerate":
         target = decision.get("target")
@@ -1079,9 +1067,7 @@ async def node_finalize_voices(state: dict[str, Any], config: RunnableConfig) ->
             None,
         )
         if selected is None:
-            raise ValueError(
-                f"creator {creator_id or 'unknown'} has no selected voice candidate"
-            )
+            raise ValueError(f"creator {creator_id or 'unknown'} has no selected voice candidate")
         batch = creator_dict.get("voice_design_batch")
         if not isinstance(batch, dict):
             raise ValueError(f"creator {creator_id or 'unknown'} has no voice design batch")
@@ -1107,9 +1093,7 @@ async def node_finalize_voices(state: dict[str, Any], config: RunnableConfig) ->
 
         preview = selected.get("preview")
         preview_uri = (
-            preview.get("uri")
-            if isinstance(preview, dict)
-            else getattr(preview, "uri", None)
+            preview.get("uri") if isinstance(preview, dict) else getattr(preview, "uri", None)
         )
         if not preview_uri:
             raise ValueError(f"creator {creator_id or 'unknown'} has no voice preview URI")
@@ -1125,9 +1109,7 @@ async def node_finalize_voices(state: dict[str, Any], config: RunnableConfig) ->
             finalized.get("design_model") or batch.get("design_model") or ""
         )
         creator_dict["voice_tts_model"] = str(finalized.get("tts_model") or "")
-        creator_dict["voice_design_hash"] = str(
-            batch.get("description_hash") or ""
-        )
+        creator_dict["voice_design_hash"] = str(batch.get("description_hash") or "")
         creator_dict["voice_status"] = "selected"
         updated_roster.append(creator_dict)
 
@@ -1136,9 +1118,7 @@ async def node_finalize_voices(state: dict[str, Any], config: RunnableConfig) ->
         for assignment in state.get("creator_assignments") or []
         if isinstance(assignment, dict)
     } or {str(creator.get("id") or "") for creator in roster}
-    finalized_by_id = {
-        str(creator.get("id") or ""): creator for creator in updated_roster
-    }
+    finalized_by_id = {str(creator.get("id") or ""): creator for creator in updated_roster}
     missing = sorted(
         creator_id
         for creator_id in required_creator_ids
@@ -1277,6 +1257,7 @@ def _video_failure_update(
         "failure": failure,
     }
 
+
 def make_gen_node(tier: str):
     """Fabrica o node de geração de talking-head (Step 4) para um tier."""
 
@@ -1287,7 +1268,10 @@ def make_gen_node(tier: str):
         run_cfg = config["configurable"].get("run", {})
         seconds = int(pipeline.get("clip", {}).get("duration_seconds", 8))
         add_trace_metadata(
-            step=4, stage="talking_head", item_id=item.id, tier=tier,
+            step=4,
+            stage="talking_head",
+            item_id=item.id,
+            tier=tier,
             attempt=item.attempts,
         )
         try:
@@ -1297,7 +1281,10 @@ def make_gen_node(tier: str):
                 catalog_stage="video",
                 tool_name="generate_clip",
                 tool_fn=generate_clip_tool,
-                item_id=item.id, tier=tier, seconds=seconds, attempt=item.attempts,
+                item_id=item.id,
+                tier=tier,
+                seconds=seconds,
+                attempt=item.attempts,
                 system_prompt=_video_prompt(
                     item, run_cfg.get("video_prompt"), stage="talking-head"
                 ),
@@ -1311,7 +1298,9 @@ def make_gen_node(tier: str):
         # Surfaça se o clip veio do provider real ou de fallback mock,
         # + o modelo e a URI de saída — responde "está gerando o vídeo mesmo?".
         add_trace_metadata(
-            step=4, stage="talking_head_done", item_id=item.id,
+            step=4,
+            stage="talking_head_done",
+            item_id=item.id,
             video_provider=clip.meta.get("provider"),
             video_model=clip.meta.get("model"),
             video_uri=clip.uri,
@@ -1323,7 +1312,9 @@ def make_gen_node(tier: str):
         videos_root = default_videos_path()
         updated = item.model_copy(update={"clips": item.clips + [clip]})
         persisted = await media_store.persist_item_media(
-            updated, run_id=run_id, videos_root=videos_root,
+            updated,
+            run_id=run_id,
+            videos_root=videos_root,
             **_persistence(config, storage_key="videos_storage"),
         )
         return {
@@ -1374,7 +1365,9 @@ async def node_product_demo(state: Any, config: RunnableConfig) -> dict[str, Any
         return _video_failure_update(item, exc, stage="product_demo")
     takes_cost = float(demo.meta.get("cost_usd", 0.0))
     add_trace_metadata(
-        step=5, stage="product_demo_done", item_id=item.id,
+        step=5,
+        stage="product_demo_done",
+        item_id=item.id,
         video_provider=demo.meta.get("provider"),
         video_model=demo.meta.get("model"),
         video_uri=demo.uri,
@@ -1386,7 +1379,9 @@ async def node_product_demo(state: Any, config: RunnableConfig) -> dict[str, Any
     videos_root = default_videos_path()
     updated = item.model_copy(update={"clips": item.clips + [demo]})
     persisted = await media_store.persist_item_media(
-        updated, run_id=run_id, videos_root=videos_root,
+        updated,
+        run_id=run_id,
+        videos_root=videos_root,
         **_persistence(config, storage_key="videos_storage"),
     )
     return {
@@ -1412,8 +1407,12 @@ async def node_qc(state: Any, config: RunnableConfig) -> dict[str, Any]:
         fail_rate=fail_rate,
     )
     add_trace_metadata(
-        step=7, stage="qc", item_id=item.id, attempt=item.attempts,
-        qc_score=qc.score, qc_passed=qc.passed,
+        step=7,
+        stage="qc",
+        item_id=item.id,
+        attempt=item.attempts,
+        qc_score=qc.score,
+        qc_passed=qc.passed,
     )
     if qc.passed:
         # Destino conhecido: a última take é o entregável, as anteriores foram superadas.
@@ -1490,9 +1489,7 @@ async def node_voiceover(state: Any, config: RunnableConfig) -> dict[str, Any]:
         item.cost_usd + float(art.meta.get("cost_usd", 0.0)),
         6,
     )
-    updated = item.model_copy(
-        update={"voiceover": art, "cost_usd": cost_usd, "error": None}
-    )
+    updated = item.model_copy(update={"voiceover": art, "cost_usd": cost_usd, "error": None})
     persisted = await media_store.persist_item_media(
         updated,
         run_id=config["configurable"].get("thread_id", "run"),
@@ -1511,7 +1508,9 @@ async def _mock_assembled(item: Item, *, platform: str, system_prompt: str) -> A
     from orchestrator.adapters.mock import MockAdapter
 
     mock_art = await MockAdapter(tiers=[]).assemble(
-        item=item, platform=platform, system_prompt=system_prompt,
+        item=item,
+        platform=platform,
+        system_prompt=system_prompt,
     )
     meta = {**mock_art.meta, "provider": "mock", "fallback_reason": "assembly_gateway_rejected"}
     return mock_art.model_copy(update={"meta": meta})
@@ -1561,12 +1560,13 @@ async def node_assembly(state: Any, config: RunnableConfig) -> dict[str, Any]:
             item.model_dump(mode="json"),
             storage=config["configurable"].get("videos_storage"),
         )
-        assembly_item = _resolve_local_assembly_paths(
-            Item.model_validate(assembly_payload)
-        )
+        assembly_item = _resolve_local_assembly_paths(Item.model_validate(assembly_payload))
         art = await execute_stage_tool(
             config,
-            tool_ctx, item=assembly_item, platform=platform, system_prompt=system_prompt,
+            tool_ctx,
+            item=assembly_item,
+            platform=platform,
+            system_prompt=system_prompt,
             catalog_stage="assembly",
             tool_name="assemble_video",
             tool_fn=assemble_video_tool,
@@ -1584,8 +1584,11 @@ async def node_assembly(state: Any, config: RunnableConfig) -> dict[str, Any]:
             return {"assembled": None, "error": f"assembly: {reason}"}
         art = await _mock_assembled(item, platform=platform, system_prompt=system_prompt)
         add_trace_metadata(
-            step=8, stage="assembly_fallback", item_id=item.id,
-            fallback_reason="assembly_gateway_rejected", error=reason,
+            step=8,
+            stage="assembly_fallback",
+            item_id=item.id,
+            fallback_reason="assembly_gateway_rejected",
+            error=reason,
         )
 
     run_id = config["configurable"].get("thread_id", "run")
@@ -1605,11 +1608,11 @@ async def node_assembly(state: Any, config: RunnableConfig) -> dict[str, Any]:
         )
     else:
         canonical_art = art
-    updated = item.model_copy(
-        update={"assembled": canonical_art, "cost_usd": cost_usd}
-    )
+    updated = item.model_copy(update={"assembled": canonical_art, "cost_usd": cost_usd})
     persisted = await media_store.persist_item_media(
-        updated, run_id=run_id, videos_root=videos_root,
+        updated,
+        run_id=run_id,
+        videos_root=videos_root,
         **_persistence(config, storage_key="videos_storage"),
     )
     return {
@@ -1651,14 +1654,18 @@ async def node_upscale(state: Any, config: RunnableConfig) -> dict[str, Any]:
         return {}  # passthrough/no-op: nada a persistir
     # ``upscaled_from`` guarda o vídeo pré-upscale; não reuso ``source_uri`` porque o
     # persist_item_media o sobrescreve com a proveniência de download da nova uri.
-    art = item.assembled.model_copy(update={
-        "uri": upscaled_uri,
-        "meta": {**item.assembled.meta, "upscaled": True, "upscaled_from": item.assembled.uri},
-    })
+    art = item.assembled.model_copy(
+        update={
+            "uri": upscaled_uri,
+            "meta": {**item.assembled.meta, "upscaled": True, "upscaled_from": item.assembled.uri},
+        }
+    )
     run_id = config["configurable"].get("thread_id", "run")
     updated = item.model_copy(update={"assembled": art})
     persisted = await media_store.persist_item_media(
-        updated, run_id=run_id, videos_root=default_videos_path(),
+        updated,
+        run_id=run_id,
+        videos_root=default_videos_path(),
         **_persistence(config, storage_key="videos_storage"),
     )
     add_trace_metadata(step=8, stage="upscale_done", item_id=item.id)

@@ -1,12 +1,7 @@
-# Parâmetros da pipeline. A topologia do grafo é fixa no builder (v2); este arquivo
-# ajusta os "knobs" (tamanho de batch, concorrência, QC, custo/concorrência por tier).
-batch:
-  default_size: 12
-  max_concurrency: 8        # fan-out paralelo no nível do item (RunnableConfig.max_concurrency)
-
+# Perfil live: herda os knobs comuns de ../config-base/pipeline.yaml e sobrepõe o
+# que é exclusivo de produção — QC estrito, roteamento LTX-only, latentsync,
+# montagem real, budget dos agentes criativos e voz ElevenLabs desenhada.
 qc:
-  max_attempts: 3           # tentativas antes de descartar um item (Step 7 regen loop)
-  fail_rate: 0.34           # fração determinística reprovada no mock (exercita o loop)
   required_clip_count: 2    # live: talking-head + product demo precisam existir antes da montagem
 
 video:
@@ -21,13 +16,8 @@ tiers:
     max_concurrency: 2      # o throttle global também serializa voz e vídeo no Replicate
 
 clip:
-  duration_seconds: 8
-  resolution: "1080p"
-  aspect_ratio: "9:16"
   fps: 24
   draft: true              # validação E2E de menor custo
-  camera_motion: static
-  generate_audio: false
   timeout_ms: 900000
 
 latentsync:
@@ -38,20 +28,10 @@ latentsync:
   required: true
   cost_per_second: 0.003
 
-
 assembly:
-  final_duration_seconds: 16
-  narration_target_seconds: 16
-  narration_min_words: 28
-  narration_max_words: null
   audio_speedup_max: 1.10
-  resolution: "1080x1920"
-  fps: 24
   timeout_seconds: 300
   allow_mock_fallback: false # live: falha do FFmpeg surfa o erro no item (com clips + locução)
-
-roster:
-  creators: 2               # quantos creators reutilizáveis no roster (Step 3)
 
 # Budget dos três agents criativos: concepts, scripts e creator_profiles.
 # Cada fase aceita uma única submissão tipada. Vídeo, QC e montagem não usam agent loop.
@@ -66,16 +46,6 @@ agent:
 voice:
   mode: designed
   provider: elevenlabs
-  design_model: eleven_ttv_v3
-  tts_model: eleven_turbo_v2_5
-  language_code: pt-BR
-  candidates_per_creator: 3
-  max_rerolls_per_creator: 2
-  selection_without_review: first
-  prompt_version: voice-match-v1
-  preview_text_version: pt-br-ugc-v1
-  request_timeout_seconds: 120
-  concurrency: 1
   retry:
     max_retries: 3
     backoff_base_seconds: 1

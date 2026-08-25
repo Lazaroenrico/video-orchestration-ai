@@ -943,6 +943,50 @@ async def test_run_state_rehydrates_completed_and_active_pipeline_stages(tmp_pat
     assert state["progress"]["active_stage_ids"] == ["scripts"]
 
 
+async def test_run_state_resolves_custom_tier_from_effective_pipeline(tmp_path, monkeypatch):
+    from orchestrator.config import load_pipeline
+
+    run_id = "runtime-custom-tier"
+    pipeline = {
+        **load_pipeline("config-mock"),
+        "tiers": [
+            {
+                "name": "pruna",
+                "model": "pruna-test",
+                "cost_per_second": 0.01,
+                "max_concurrency": 1,
+            }
+        ],
+    }
+    monkeypatch.setattr(web_server, "load_pipeline", lambda _config_dir: pipeline)
+    web_server._runs[run_id] = {
+        "queues": [],
+        "buffer": [
+            {"type": "run_start", "run_id": run_id, "offer": "serum X", "batch": 1},
+            {
+                "type": "node_start",
+                "node": "pruna",
+                "label": "Talking-Head (pruna)",
+            },
+        ],
+        "done": False,
+    }
+
+    state = await web_server.run_state(
+        run_id,
+        config_dir="config-mock",
+        db=str(tmp_path / "cp.db"),
+    )
+
+    stages = {stage["id"]: stage for stage in state["progress"]["stages"]}
+    assert stages["talking_head"]["status"] == "running"
+    assert state["progress"]["active_stage_ids"] == ["talking_head"]
+    assert any(
+        event["stage_id"] == "talking_head" and event["label"] == "Talking-Head (pruna) started"
+        for event in state["activity"]
+    )
+
+
 async def test_run_state_keeps_parallel_stage_active_until_every_clip_finishes(tmp_path):
     run_id = "runtime-parallel-progress"
     web_server._runs[run_id] = {
@@ -1920,7 +1964,11 @@ async def test_execute_run_rejects_an_unknown_human_gate(monkeypatch, tmp_path):
     async def open_fake_checkpointer(_path):
         yield object()
 
-    monkeypatch.setattr(web_server, "load_pipeline", lambda _path: {"batch": {}})
+    monkeypatch.setattr(
+        web_server,
+        "load_pipeline",
+        lambda _path: {"batch": {}, "tiers": [{"name": "ltx"}]},
+    )
     monkeypatch.setattr(web_server, "load_providers", lambda _path: {})
     monkeypatch.setattr(web_server, "load_agent_catalog", lambda _path: object())
     class FakeDependencies:
@@ -2107,4 +2155,3 @@ async def test_local_run_task_records_runtime_contract(tmp_path):
     assert contract_data["graph_version"] == "v2"
     assert contract_data["schema_version"] == "creative-v2"
     assert len(contract_data["fingerprint"]) == 64
-

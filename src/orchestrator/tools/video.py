@@ -1,4 +1,5 @@
 """Video generation tools."""
+
 from __future__ import annotations
 
 import asyncio
@@ -16,6 +17,9 @@ from typing import Any, Awaitable, Callable, Optional
 import httpx
 from replicate.exceptions import ReplicateError
 
+from orchestrator.common.statuses import (
+    TERMINAL_PREDICTION_STATUSES as _TERMINAL_PREDICTION_STATUSES,
+)
 from orchestrator.graph.state import Artifact
 from orchestrator.replicate_webhook import build_effect_ref
 from orchestrator.tools.base import ToolContext, require_artifact
@@ -30,7 +34,6 @@ _REVISION_TEMPLATE = (
     "Revision directive (refine the take within the brief above; "
     "the brief and its constraints above always win):\n{revision}"
 )
-_TERMINAL_PREDICTION_STATUSES = frozenset({"succeeded", "failed", "canceled"})
 _AMBIGUOUS_CREATE_ERRORS = (
     httpx.ReadError,
     httpx.ReadTimeout,
@@ -489,9 +492,9 @@ async def _resolve_uri_for_provider(
     if ctx.videos_root is not None:
         vpath: Path | None = None
         if uri.startswith("/videos/"):
-            vpath = Path(ctx.videos_root) / uri[len("/videos/"):]
+            vpath = Path(ctx.videos_root) / uri[len("/videos/") :]
         elif uri.startswith("/media/"):
-            vpath = Path(ctx.videos_root) / uri[len("/media/"):]
+            vpath = Path(ctx.videos_root) / uri[len("/media/") :]
         if vpath is not None and vpath.is_file():
             mime = mimetypes.guess_type(vpath.name)[0] or "application/octet-stream"
             payload = base64.b64encode(vpath.read_bytes()).decode("ascii")
@@ -762,7 +765,9 @@ async def generate_clip_tool(
             "seconds": seconds,
             "attempt": attempt,
             "system_prompt": prompt,
-            "reference_image_uri": resolved_ref_image_uri if resolved_ref_image_uri is not None else reference_image_uri,
+            "reference_image_uri": resolved_ref_image_uri
+            if resolved_ref_image_uri is not None
+            else reference_image_uri,
             "audio_uri": resolved_audio_uri if resolved_audio_uri is not None else audio_uri,
         }
         try:

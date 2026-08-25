@@ -1,4 +1,5 @@
 """Orquestração de alto nível: roda/retoma/inspeciona um run do grafo."""
+
 from __future__ import annotations
 
 import re
@@ -18,6 +19,8 @@ from orchestrator.dependencies import RunDependencies
 from orchestrator.graph.builder import build_graph
 from orchestrator.graph.checkpoint import open_checkpointer
 from orchestrator.graph.state import Item
+from orchestrator.graph.topology import PipelineTopology, topology_for_tiers
+from orchestrator.nodes.base import tier_names
 from orchestrator.progress import ProgressEventTranslator
 from orchestrator.registry import ROLES
 from orchestrator.runtime_contract import build_runtime_contract, validate_runtime_contract
@@ -122,7 +125,8 @@ async def run_pipeline(
             init["campaign"] = campaign
         async with open_checkpointer(db_path) as cp:
             app = build_graph(pipeline, checkpointer=cp)
-            out = await _invoke_with_progress(app, init, cfg, event_sink)
+            topology = topology_for_tiers(tier_names(pipeline))
+            out = await _invoke_with_progress(app, init, cfg, event_sink, topology=topology)
         return run_id, out
 
 
@@ -154,8 +158,14 @@ async def run_cycles(
     results: list[tuple[str, dict[str, Any]]] = []
     for i in range(1, cycles + 1):
         rid, out = await run_pipeline(
-            pipeline, providers, db_path=db_path, run_id=f"{prefix}-c{i}",
-            batch=batch, offer=offer, platform=platform, feedback_store=feedback_store,
+            pipeline,
+            providers,
+            db_path=db_path,
+            run_id=f"{prefix}-c{i}",
+            batch=batch,
+            offer=offer,
+            platform=platform,
+            feedback_store=feedback_store,
             agent_catalog=agent_catalog,
         )
         results.append((rid, out))
@@ -191,9 +201,7 @@ async def resume_pipeline(
     async with open_checkpointer(db_path) as cp:
         app = build_graph(pipeline, checkpointer=cp)
         snap = await app.aget_state({"configurable": {"thread_id": run_id}})
-        persisted_contract = (
-            snap.values.get("runtime_contract") if snap and snap.values else None
-        )
+        persisted_contract = snap.values.get("runtime_contract") if snap and snap.values else None
         validate_runtime_contract(current_contract, persisted_contract, is_paid=is_paid)
 
         async with open_artifact_repository(default_artifacts_db_path()) as artifact_repository:
@@ -210,12 +218,9 @@ async def resume_pipeline(
                 durable,
             )
             cfg.update(run_trace_config(run_id, platform=platform))
-            resume_input = (
-                Command(resume=resume_value)
-                if resume_value is not None
-                else None
-            )
-            out = await _invoke_with_progress(app, resume_input, cfg, event_sink)
+            resume_input = Command(resume=resume_value) if resume_value is not None else None
+            topology = topology_for_tiers(tier_names(pipeline))
+            out = await _invoke_with_progress(app, resume_input, cfg, event_sink, topology=topology)
         return run_id, out
 
 
@@ -224,11 +229,15 @@ async def _invoke_with_progress(
     input_value: Any,
     config: dict[str, Any],
     event_sink: Optional[ProgressEventSink],
+    *,
+    topology: PipelineTopology | None = None,
 ) -> dict[str, Any]:
     if event_sink is None:
         return await app.ainvoke(input_value, config)
 
-    translator = ProgressEventTranslator()
+    translator = (
+        ProgressEventTranslator(topology) if topology is not None else ProgressEventTranslator()
+    )
     final_output: dict[str, Any] = {}
     async for event in app.astream_events(input_value, config, version="v2"):
         progress_event = translator.translate(event)
@@ -254,9 +263,7 @@ async def get_interrupt(
     """Devolve o primeiro gate pendente do checkpoint, se existir."""
     async with open_checkpointer(db_path) as cp:
         app = build_graph(pipeline, checkpointer=cp)
-        snapshot = await app.aget_state(
-            {"configurable": {"thread_id": run_id}}
-        )
+        snapshot = await app.aget_state({"configurable": {"thread_id": run_id}})
     if snapshot is None:
         return None
     for task in snapshot.tasks or []:
@@ -285,11 +292,11 @@ def _clean_task_error(err: Any) -> str:
     text = str(err or "").strip()
     if not text:
         return "task falhou"
-    text = text.replace("\\n", "\n")                    # \n literais do repr -> quebra real
-    first = text.split("\n", 1)[0].strip()              # corta o stack multi-linha
+    text = text.replace("\\n", "\n")  # \n literais do repr -> quebra real
+    first = text.split("\n", 1)[0].strip()  # corta o stack multi-linha
     first = re.split(r"\s+at\s+\S+\s*\(", first)[0].strip()  # corta stack inline "   at fn ("
     first = re.sub(r"^[A-Za-z_][\w.]*\((['\"])", "", first)  # tira o "RuntimeError('"
-    first = re.sub(r"(['\"])\)?$", "", first)                # tira o "')" final, se houver
+    first = re.sub(r"(['\"])\)?$", "", first)  # tira o "')" final, se houver
     return first or "task falhou"
 
 
@@ -306,9 +313,7 @@ async def get_pending_items(
     """
     async with open_checkpointer(db_path) as cp:
         app = build_graph(pipeline, checkpointer=cp)
-        snap = await app.aget_state(
-            {"configurable": {"thread_id": run_id}}, subgraphs=True
-        )
+        snap = await app.aget_state({"configurable": {"thread_id": run_id}}, subgraphs=True)
     if snap is None:
         return []
     items: list[Item] = []
@@ -352,11 +357,7 @@ def summarize(out: dict[str, Any]) -> dict[str, Any]:
     results = as_items(out.get("results"))
     approved = [r for r in results if r.assembled is not None and not r.dropped]
     dropped = [r for r in results if r.dropped]
-    in_flight = [
-        r
-        for r in results
-        if r.assembled is None and not r.dropped and r.error is None
-    ]
+    in_flight = [r for r in results if r.assembled is None and not r.dropped and r.error is None]
     tier_cost: dict[str, float] = {}
     stage_cost = {
         "voice_design": 0.0,
@@ -395,13 +396,9 @@ def summarize(out: dict[str, Any]) -> dict[str, Any]:
             tier_cost[t] = round(tier_cost.get(t, 0.0) + full_clip_cost, 4)
             stage_cost["video"] += full_clip_cost
         if r.voiceover is not None:
-            stage_cost["voiceover"] += float(
-                r.voiceover.meta.get("cost_usd", 0.0)
-            )
+            stage_cost["voiceover"] += float(r.voiceover.meta.get("cost_usd", 0.0))
         if r.assembled is not None:
-            stage_cost["assembly"] += float(
-                r.assembled.meta.get("cost_usd", 0.0)
-            )
+            stage_cost["assembly"] += float(r.assembled.meta.get("cost_usd", 0.0))
     return {
         "run_id": out.get("run_id"),
         "produced": len(results),
@@ -414,9 +411,6 @@ def summarize(out: dict[str, Any]) -> dict[str, Any]:
             4,
         ),
         "cost_by_tier": tier_cost,
-        "cost_by_stage": {
-            stage: round(cost, 6)
-            for stage, cost in stage_cost.items()
-        },
+        "cost_by_stage": {stage: round(cost, 6) for stage, cost in stage_cost.items()},
         "winning_styles": (out.get("feedback") or {}).get("winning_styles", []),
     }

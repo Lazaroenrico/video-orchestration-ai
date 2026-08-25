@@ -4,6 +4,7 @@ Saídas **determinísticas** (derivadas de hash dos inputs, sem ``random``) para
 toda a pipeline rode ponta a ponta sem rede e os testes sejam reproduzíveis.
 Custo por tier segue o Context.md (LTX $0.01/s, Kling $0.10/s, Seedance $0.168/s).
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -12,6 +13,7 @@ import hashlib
 from typing import Any, Optional
 
 from orchestrator.adapters.base import VoiceProfile, resolve_voice_profile
+from orchestrator.common.media import wav_data_uri
 from orchestrator.creative_contracts import (
     CreatorVoiceSpec,
     FinalizedVoice,
@@ -32,11 +34,6 @@ def _unit(*parts: Any) -> float:
     return int(digest[:12], 16) / float(1 << 48)
 
 
-def _digest_bytes(*parts: Any) -> bytes:
-    key = "|".join(str(p) for p in parts)
-    return hashlib.sha256(key.encode()).digest()
-
-
 def _svg_data_uri(label: str, *seed_parts: Any) -> str:
     """SVG minúsculo e determinístico, renderável como imagem (sem rede/disco).
 
@@ -55,32 +52,12 @@ def _svg_data_uri(label: str, *seed_parts: Any) -> str:
 
 
 def _wav_data_uri(*seed_parts: Any) -> str:
-    """WAV PCM 8-bit mono minúsculo (~0.1s) e determinístico.
+    """Preview WAV determinístico com o namespace ``voice-preview`` do adapter.
 
-    Cabeçalho RIFF/WAVE válido + amostras derivadas de hash (sem ``random``).
-    Curto o bastante para caber no buffer de replay do SSE.
+    Delega ao primitivo comum preservando os bytes históricos: o prefixo
+    ``voice-preview`` entra como primeiro seed part do hash.
     """
-    sample_rate = 4000
-    n_samples = 400  # ~0.1s @ 4kHz
-    digest = _digest_bytes("voice-preview", *seed_parts)
-    samples = bytes(digest[i % len(digest)] for i in range(n_samples))
-    data_size = len(samples)
-    byte_rate = sample_rate  # mono, 8 bits/sample
-    header = (
-        b"RIFF"
-        + (36 + data_size).to_bytes(4, "little")
-        + b"WAVEfmt "
-        + (16).to_bytes(4, "little")
-        + (1).to_bytes(2, "little")  # PCM
-        + (1).to_bytes(2, "little")  # mono
-        + sample_rate.to_bytes(4, "little")
-        + byte_rate.to_bytes(4, "little")
-        + (1).to_bytes(2, "little")  # block align
-        + (8).to_bytes(2, "little")  # bits per sample
-        + b"data"
-        + data_size.to_bytes(4, "little")
-    )
-    return "data:audio/wav;base64," + base64.b64encode(header + samples).decode()
+    return wav_data_uri("voice-preview", *seed_parts)
 
 
 # mp4 H.264 minúsculo, VÁLIDO e REPRODUZÍVEL (1 frame azul 16x16, faststart:
@@ -120,7 +97,7 @@ def _mp4_data_uri(*seed_parts: Any) -> str:
     return "data:video/mp4;base64," + _MP4_PLAYABLE_B64 + "#" + tag
 
 
-def _terminal_submission(stage: str, inputs: dict[str, Any]) -> dict[str, Any]:
+def terminal_submission(stage: str, inputs: dict[str, Any]) -> dict[str, Any]:
     """Build deterministic creative-v2 tool arguments for offline agent runs."""
     campaign = inputs.get("campaign")
     campaign = campaign if isinstance(campaign, dict) else {}
@@ -193,8 +170,16 @@ def _terminal_submission(stage: str, inputs: dict[str, Any]) -> dict[str, Any]:
     raise ValueError(f"unsupported terminal mock stage: {stage}")
 
 
+# Alias de compatibilidade: código e testes anteriores importam o nome privado.
+_terminal_submission = terminal_submission
+
+
 class MockAdapter:
     """Serve aos papéis mock (llm/image/voice/video/assembly) no v1."""
+
+    # Selo público de dry-run: ferramentas pagas consultam este atributo (direto
+    # ou via ``CompositeAdapter.is_mock``) em vez de farejar nomes de classe.
+    is_mock = True
 
     def __init__(
         self,
@@ -305,18 +290,19 @@ class MockAdapter:
         resolved_voice = resolve_voice_profile(system_prompt, voice_profile)
         voice_seed = sfx
         if resolved_voice is not None:
-            voice_seed += "-" + hashlib.sha256(
-                f"{resolved_voice.preset}|{resolved_voice.prompt}".encode()
-            ).hexdigest()[:8]
+            voice_seed += (
+                "-"
+                + hashlib.sha256(
+                    f"{resolved_voice.preset}|{resolved_voice.prompt}".encode()
+                ).hexdigest()[:8]
+            )
         # A imagem também codifica o preset resolvido: mesmo sem rosto real, o mock
         # mantém paridade imagem↔voz em nível de metadado/determinismo.
         image_preset = resolved_voice.preset if resolved_voice is not None else ""
         creator = {
             "id": f"creator-{index}",
             "angles": ["front", "3/4", "profile", "smile", "neutral"],
-            "upscaled_base": _svg_data_uri(
-                f"C{index}{sfx}", "creator", index, sfx, image_preset
-            ),
+            "upscaled_base": _svg_data_uri(f"C{index}{sfx}", "creator", index, sfx, image_preset),
             "voice_id": f"voice-{index}{voice_seed}",
             "voice_preview_uri": _wav_data_uri(
                 "creator",
@@ -364,9 +350,7 @@ class MockAdapter:
     ) -> VoiceDesignBatch:
         await self._tick()
         spec_obj = (
-            spec
-            if isinstance(spec, CreatorVoiceSpec)
-            else CreatorVoiceSpec.model_validate(spec)
+            spec if isinstance(spec, CreatorVoiceSpec) else CreatorVoiceSpec.model_validate(spec)
         )
         spec_hash = hashlib.sha256(spec_obj.model_dump_json().encode()).hexdigest()[:10]
         candidates: list[VoiceCandidate] = []
@@ -411,9 +395,7 @@ class MockAdapter:
     ) -> FinalizedVoice:
         await self._tick()
         batch_obj = (
-            batch
-            if isinstance(batch, VoiceDesignBatch)
-            else VoiceDesignBatch.model_validate(batch)
+            batch if isinstance(batch, VoiceDesignBatch) else VoiceDesignBatch.model_validate(batch)
         )
         cand = next(
             (c for c in batch_obj.candidates if c.candidate_id == candidate_id),
@@ -432,7 +414,11 @@ class MockAdapter:
     # --- Steps 4/5: vídeo (talking-head / demo) ---
     @traced("adapter.mock.generate_clip", run_type="tool", step="video", provider="mock")
     async def generate_clip(
-        self, item_id: str, tier: str, seconds: int, attempt: int,
+        self,
+        item_id: str,
+        tier: str,
+        seconds: int,
+        attempt: int,
         system_prompt: Optional[str] = None,
         reference_image_uri: Optional[str] = None,
         audio_uri: Optional[str] = None,
@@ -456,9 +442,7 @@ class MockAdapter:
                 "attempt": attempt,
             }
             if system_prompt:
-                meta["prompt_hash"] = hashlib.sha256(
-                    system_prompt.encode()
-                ).hexdigest()
+                meta["prompt_hash"] = hashlib.sha256(system_prompt.encode()).hexdigest()
             if reference_image_uri:
                 meta["has_reference_image"] = True
             if audio_uri:
@@ -535,6 +519,7 @@ class MockAdapter:
         """
         await self._tick()
         return _mp4_data_uri("upscaled", media_uri)
+
 
 def build_mock_adapter(tiers: list[dict[str, Any]], latency: Optional[float] = None) -> MockAdapter:
     return MockAdapter(tiers=tiers, latency=latency or 0.0)

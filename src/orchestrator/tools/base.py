@@ -1,4 +1,5 @@
 """Shared primitives for the thin node -> tool -> adapter layer."""
+
 from __future__ import annotations
 
 import os
@@ -8,6 +9,7 @@ from typing import Any, Awaitable, Callable
 import httpx
 from langchain_core.runnables import RunnableConfig
 
+from orchestrator import runtime_mode
 from orchestrator.graph.state import Artifact, QCResult
 
 
@@ -58,20 +60,20 @@ def direct_elevenlabs_voice_enabled(ctx: ToolContext) -> bool:
 
 
 def is_paid_creator_adapter(ctx: ToolContext) -> bool:
+    """Decide via accessors públicos se o adapter creator cobra por geração.
+
+    Mocks declaram ``is_mock = True``; um ``CompositeAdapter`` expõe
+    ``is_mock``/``get_role``. Nada de farejar nomes de classe nem alcançar
+    estado interno do composite — adapters reais sem ``is_mock`` são pagos.
+    """
     adapter = ctx.adapter
-    if adapter is None:
+    if adapter is None or getattr(adapter, "is_mock", False):
         return False
-    if type(adapter).__name__ in ("MockAdapter", "MockCreatorAdapter") or getattr(adapter, "is_mock", False):
-        return False
-    if hasattr(adapter, "_by_role"):
-        creator_adapter = adapter._by_role.get("creator")
-        if (
-            creator_adapter is None
-            or type(creator_adapter).__name__ in ("MockAdapter", "MockCreatorAdapter")
-            or getattr(creator_adapter, "is_mock", False)
-        ):
+    get_role = getattr(adapter, "get_role", None)
+    if callable(get_role):
+        creator_adapter = get_role("creator")
+        if creator_adapter is None or getattr(creator_adapter, "is_mock", False):
             return False
-        return True
     return True
 
 
@@ -84,10 +86,7 @@ def _definitely_not_billed(exc: BaseException) -> bool:
         (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout),
     ):
         return True
-    return bool(
-        isinstance(exc, httpx.HTTPStatusError)
-        and 400 <= exc.response.status_code < 500
-    )
+    return bool(isinstance(exc, httpx.HTTPStatusError) and 400 <= exc.response.status_code < 500)
 
 
 async def execute_paid_effect(
@@ -103,11 +102,7 @@ async def execute_paid_effect(
     """Run one durable paid effect through quota reservation and replay."""
     if not ctx.durable:
         return await operation()
-    if os.environ.get("ORCH_ENABLE_PAID_ADAPTERS", "").lower() not in {
-        "1",
-        "true",
-        "yes",
-    }:
+    if not runtime_mode.paid_adapters_enabled():
         raise RuntimeError("durable paid adapters require ORCH_ENABLE_PAID_ADAPTERS=true")
     ledger = ctx.effect_ledger
     if ledger is None:

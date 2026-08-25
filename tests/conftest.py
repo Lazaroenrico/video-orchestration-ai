@@ -1,4 +1,5 @@
 """Fixtures compartilhadas dos testes."""
+
 import os
 
 import pytest
@@ -43,7 +44,15 @@ def _force_mock_providers(monkeypatch):
     ):
         monkeypatch.delenv(key, raising=False)
     import orchestrator.db.database as db_mod
+
     db_mod._shared_database = None
+    yield
+    # Isolamento do singleton de throttle Replicate: sem este reset, um teste que
+    # aquecer ``get_replicate_throttle()`` congelaria a config lida das envs
+    # ``REPLICATE_*`` para o resto da sessão, ignorando monkeypatch posteriores.
+    from orchestrator.adapters._throttle import reset_replicate_throttle
+
+    reset_replicate_throttle()
 
 
 def pytest_addoption(parser):
@@ -58,6 +67,7 @@ def pytest_addoption(parser):
 @pytest.fixture
 def live(request) -> bool:
     return bool(request.config.getoption("--live"))
+
 
 TIERS = [
     {

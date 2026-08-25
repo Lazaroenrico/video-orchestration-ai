@@ -53,17 +53,17 @@ def _trusted_constraints(stage: str, inputs: Mapping[str, Any]) -> dict[str, Any
         return constraints
     if stage == "creator_profiles":
         concept_ids = inputs.get("concept_ids")
-        if not isinstance(concept_ids, list) or not concept_ids or not all(
-            isinstance(value, str) and value for value in concept_ids
+        if (
+            not isinstance(concept_ids, list)
+            or not concept_ids
+            or not all(isinstance(value, str) and value for value in concept_ids)
         ):
             raise ValueError("creator_profiles agent requires known concept ids")
         return {"creator_count": 2, "concept_ids": list(concept_ids)}
     raise ValueError(f"native creative agents are not allowed for stage {stage!r}")
 
 
-def serialize_server_execution_constraints(
-    stage: str, inputs: Mapping[str, Any]
-) -> str:
+def serialize_server_execution_constraints(stage: str, inputs: Mapping[str, Any]) -> str:
     constraints = _trusted_constraints(stage, inputs)
     return (
         "SERVER_EXECUTION_CONSTRAINTS (trusted, server-owned JSON):\n"
@@ -72,15 +72,12 @@ def serialize_server_execution_constraints(
     )
 
 
-def serialize_agent_messages(
-    stage: str, inputs: Mapping[str, Any]
-) -> list[BaseMessage]:
+def serialize_agent_messages(stage: str, inputs: Mapping[str, Any]) -> list[BaseMessage]:
     """Return separate trusted-controls and untrusted-data messages."""
     return [
         SystemMessage(content=serialize_server_execution_constraints(stage, inputs)),
         HumanMessage(content=serialize_agent_inputs(dict(inputs))),
     ]
-
 
 
 DEFAULT_GATEWAY_BASE_URL = "https://ai-gateway.vercel.sh/v1"
@@ -345,9 +342,13 @@ class LanguageRuntime:
         assert max_steps is not None
         return max_steps, max_tool_calls
 
-    def agent_for(self, stage: str, *, model: str | None = None, system_prompt: str | None = None) -> Any:
+    def agent_for(
+        self, stage: str, *, model: str | None = None, system_prompt: str | None = None
+    ) -> Any:
         if stage not in _AGENT_STAGES:
-            raise ValueError(f"native creative agents are only supported for: {sorted(_AGENT_STAGES)}")
+            raise ValueError(
+                f"native creative agents are only supported for: {sorted(_AGENT_STAGES)}"
+            )
         resolved_model = self._model_name(model)
         max_steps, max_tool_calls = self._agent_budgets(stage)
         prompt = system_prompt or ""
@@ -355,6 +356,7 @@ class LanguageRuntime:
         if key in self._agents:
             return self._agents[key]
         from langchain.agents import create_agent
+
         try:
             from langchain.agents import ToolStrategy
         except ImportError:  # langchain 1.x exports it from structured_output
@@ -385,9 +387,9 @@ class LanguageRuntime:
     @staticmethod
     def _mock_output(stage: str, inputs: dict[str, Any]) -> BaseModel:
         # Mock agents are still schema-first, but do not invoke a provider or incur cost.
-        from orchestrator.adapters.mock import _terminal_submission
+        from orchestrator.adapters.mock import terminal_submission
 
-        payload = _terminal_submission(stage, inputs)
+        payload = terminal_submission(stage, inputs)
         if stage == "scripts":
             beats = payload["draft"]["spoken_beats"]
             beats[1]["text"] = (
@@ -408,14 +410,14 @@ class LanguageRuntime:
         materialize: Any,
     ) -> Any:
         if stage not in _AGENT_STAGES:
-            raise ValueError(f"native creative agents are only supported for: {sorted(_AGENT_STAGES)}")
+            raise ValueError(
+                f"native creative agents are only supported for: {sorted(_AGENT_STAGES)}"
+            )
         if self.provider == "mock":
             structured = self._mock_output(stage, inputs)
         else:
             agent = self.agent_for(stage, model=model, system_prompt=system_prompt)
-            result = await agent.ainvoke(
-                {"messages": serialize_agent_messages(stage, inputs)}
-            )
+            result = await agent.ainvoke({"messages": serialize_agent_messages(stage, inputs)})
             structured = result.get("structured_response") if isinstance(result, dict) else None
             if structured is None:
                 raise RuntimeError(f"agent for stage {stage!r} did not return structured_response")
@@ -435,8 +437,7 @@ class LanguageRuntime:
         if self.provider == "mock":
             payload = self._mock_output("scripts", kwargs)
             return "\n".join(
-                f"{beat.section.upper()}: {beat.text}"
-                for beat in payload.draft.spoken_beats
+                f"{beat.section.upper()}: {beat.text}" for beat in payload.draft.spoken_beats
             )
         raise RuntimeError("direct script generation is only available for the mock runtime")
 

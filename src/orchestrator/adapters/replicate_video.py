@@ -4,6 +4,7 @@ O caminho live expõe criação, consulta e cancelamento da prediction separadam
 Isso permite persistir o ``prediction_id`` antes do polling e reconciliar respostas
 ambíguas sem repetir uma criação potencialmente cobrada.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -15,7 +16,9 @@ import replicate
 
 from orchestrator.adapters._retry import with_idempotent_retry, with_transport_retry
 from orchestrator.adapters._throttle import AsyncThrottle
-from orchestrator.adapters.mock import MockAdapter
+from orchestrator.common.statuses import (
+    TERMINAL_PREDICTION_STATUSES as _TERMINAL_PREDICTION_STATUSES,
+)
 from orchestrator.graph.state import Artifact, Item
 from orchestrator.tracing import traced
 
@@ -25,7 +28,6 @@ _VIDEO_OUTPUT_KEYS = ("video", "video_url", "output")
 _LTX_MODEL = "lightricks/ltx-2.3-fast"
 _PRUNA_P_VIDEO_MODEL = "prunaai/p-video"
 _SUPPORTED_MODELS = frozenset({_LTX_MODEL, _PRUNA_P_VIDEO_MODEL})
-_TERMINAL_PREDICTION_STATUSES = frozenset({"succeeded", "failed", "canceled"})
 
 
 @dataclass(frozen=True)
@@ -66,6 +68,7 @@ class ReplicateVideoAdapter:
         backoff_base: float = 1.0,
         throttle: Optional[AsyncThrottle] = None,
         allow_mock_fallback: bool = True,
+        mock_clip_generator: Optional[Callable[..., Awaitable[Artifact]]] = None,
     ) -> None:
         self.tiers: dict[str, dict[str, Any]] = {t["name"]: t for t in tiers}
         # ``runner`` remains an injection seam for legacy/offline adapter tests.
@@ -75,7 +78,10 @@ class ReplicateVideoAdapter:
         self._prediction_client = prediction_client or replicate.default_client
         self._throttle = throttle
         latentsync = latentsync or {}
-        self._mock = MockAdapter(tiers=tiers, latentsync=latentsync)
+        # Política de fallback injetada pela composition root (registry): este
+        # módulo pago não conhece o MockAdapter. ``None`` + tier sem modelo real
+        # => erro explícito (mesmo contrato de ``allow_mock_fallback=False``).
+        self._mock_clip_generator = mock_clip_generator
         clip = clip or {}
         self.resolution = str(clip.get("resolution", "1080p"))
         self.aspect_ratio = str(clip.get("aspect_ratio", "9:16"))
@@ -116,7 +122,9 @@ class ReplicateVideoAdapter:
         self.allow_mock_fallback = allow_mock_fallback
         self._model_version_cache: dict[str, str] = {}
 
-    @traced("adapter.replicate_video.generate_clip", run_type="tool", step="video", provider="replicate")
+    @traced(
+        "adapter.replicate_video.generate_clip", run_type="tool", step="video", provider="replicate"
+    )
     async def generate_clip(
         self,
         item_id: str,
@@ -134,17 +142,19 @@ class ReplicateVideoAdapter:
             if not self.latentsync_enabled:
                 raise RuntimeError("LatentSync is required but latentsync is disabled")
             if not audio_uri:
-                raise RuntimeError("LatentSync is required for talking head but audio_uri is missing")
+                raise RuntimeError(
+                    "LatentSync is required for talking head but audio_uri is missing"
+                )
 
         spec = self.tiers[tier]  # KeyError em tier desconhecido (contratual)
         model = spec["model"]
         if model not in _SUPPORTED_MODELS:
-            if not self.allow_mock_fallback:
+            if not self.allow_mock_fallback or self._mock_clip_generator is None:
                 raise RuntimeError(
                     "Replicate video mock fallback disabled for "
                     f"tier={tier!r}; configure a real model adapter before live run"
                 )
-            artifact = await self._mock.generate_clip(
+            artifact = await self._mock_clip_generator(
                 item_id,
                 tier,
                 seconds,
@@ -436,9 +446,11 @@ class ReplicateVideoAdapter:
                     input=inp,
                     **params,
                 )
-            if hasattr(self._prediction_client, "models") and hasattr(
-                self._prediction_client.models, "predictions"
-            ) and hasattr(self._prediction_client.models.predictions, "async_create"):
+            if (
+                hasattr(self._prediction_client, "models")
+                and hasattr(self._prediction_client.models, "predictions")
+                and hasattr(self._prediction_client.models.predictions, "async_create")
+            ):
                 return await self._prediction_client.models.predictions.async_create(
                     model=self.latentsync_model,
                     input=inp,
@@ -517,8 +529,7 @@ class ReplicateVideoAdapter:
                 f"{_PRUNA_P_VIDEO_MODEL!r}; got {self.assembly_model!r}"
             )
         prompt = system_prompt or (
-            f"Create one polished final vertical UGC ad for {platform}. "
-            f"Script: {item.script or ''}"
+            f"Create one polished final vertical UGC ad for {platform}. Script: {item.script or ''}"
         )
         image: Any = item.creator_image_uri
         if not image and item.creator_image_local_path:
@@ -555,9 +566,7 @@ class ReplicateVideoAdapter:
                 "resolution": self.assembly_resolution,
                 "generate_audio": self.assembly_generate_audio,
                 "draft": self.assembly_draft,
-                "cost_usd": round(
-                    self.assembly_cost_per_second * self.assembly_duration, 4
-                ),
+                "cost_usd": round(self.assembly_cost_per_second * self.assembly_duration, 4),
                 "source_clips": len(item.clips or []),
                 "has_reference_image": image is not None,
             },

@@ -33,7 +33,12 @@ Perfis atuais:
 ## Layout
 
 ```
-config*/        pipeline.yaml, providers.yaml, agents.yaml, prompts/, judge.yaml
+config-base/    base compartilhada dos perfis: pipeline.yaml, providers.yaml,
+                agents.yaml, judge.yaml e prompts/agents/*.md comuns; o loader
+                (src/orchestrator/config.py) faz deep-merge base + perfil
+config*/        config/, config-mock/, config-staging/: apenas os overrides de
+                cada ambiente sobre config-base/ (mesmos nomes de arquivo);
+                prompts divergentes por design ficam só no perfil (ex.: persona.md)
 src/orchestrator/
   graph/        state.py, routing.py, builder.py, checkpoint.py
   nodes/        base.py, stages.py  (os stages da pipeline como nodes)

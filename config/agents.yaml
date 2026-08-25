@@ -1,4 +1,6 @@
-# Live profile: only bounded creative work is agent-backed.
+# Live profile: only bounded creative work is agent-backed. O catálogo comum
+# (todos os stages em modo tool) vive em ../config-base/agents.yaml; aqui apenas
+# os três stages criativos sobem para modo agent.
 stages:
   concepts:
     executor: agent
@@ -27,27 +29,3 @@ stages:
     prompt_version: creators-v3
     schema_version: creative-v2
     agent_enabled: true
-  roster:
-    executor: tool
-    tools: [build_creator]
-    agent_enabled: false
-  video:
-    executor: tool
-    tools: [generate_clip]
-    agent_enabled: false
-  qc:
-    executor: tool
-    tools: [qc_check]
-    agent_enabled: false
-  voiceover:
-    executor: tool
-    tools: [synthesize_voiceover]
-    agent_enabled: false
-  assembly:
-    executor: tool
-    tools: [assemble_video]
-    agent_enabled: false
-  upscale:
-    executor: tool
-    tools: [upscale_video]
-    agent_enabled: false

@@ -118,7 +118,7 @@ def test_runtime_contract_does_not_contain_prompt_bodies():
                 }
             }
         },
-        base_dir="config-mock",
+        base_dir="config-base",
     )
 
     contract = build_runtime_contract(_base_pipeline(), _base_providers(), agent_catalog=catalog)
@@ -167,7 +167,7 @@ def test_fingerprint_changes_on_config_or_model_or_prompt_change():
                 }
             }
         },
-        base_dir="config-mock",
+        base_dir="config-base",
     )
     catalog_v2 = build_agent_catalog(
         {
@@ -181,7 +181,7 @@ def test_fingerprint_changes_on_config_or_model_or_prompt_change():
                 }
             }
         },
-        base_dir="config-mock",
+        base_dir="config-base",
     )
     contract_v1 = build_runtime_contract(base_pipe, base_prov, agent_catalog=catalog_v1)
     contract_v2 = build_runtime_contract(base_pipe, base_prov, agent_catalog=catalog_v2)

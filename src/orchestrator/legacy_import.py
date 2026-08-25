@@ -1,4 +1,5 @@
 """Inventário e importação do estado local anterior ao PostgreSQL."""
+
 from __future__ import annotations
 
 import hashlib
@@ -14,6 +15,7 @@ from typing import Any
 from psycopg.types.json import Jsonb
 
 from orchestrator import runner
+from orchestrator.common.plain import to_plain as _plain
 from orchestrator.db import (
     Database,
     PostgresArtifactRepository,
@@ -79,7 +81,9 @@ def _json_object(path: Path) -> dict[str, Any]:
 
 
 def _artifact_path(root: Path, storage_key: str, content_type: str | None) -> Path:
-    families = ("videos", "media") if (content_type or "").startswith("video/") else ("media", "videos")
+    families = (
+        ("videos", "media") if (content_type or "").startswith("video/") else ("media", "videos")
+    )
     for family in families:
         candidate = root / family / storage_key
         if candidate.is_file():
@@ -154,9 +158,7 @@ def scan_legacy(root: str | Path) -> LegacyManifest:
     with sqlite3.connect(runs_path) as connection:
         checkpoints = connection.execute("SELECT count(*) FROM checkpoints").fetchone()[0]
         writes = connection.execute("SELECT count(*) FROM writes").fetchone()[0]
-        runs = connection.execute(
-            "SELECT count(DISTINCT thread_id) FROM checkpoints"
-        ).fetchone()[0]
+        runs = connection.execute("SELECT count(DISTINCT thread_id) FROM checkpoints").fetchone()[0]
 
     with sqlite3.connect(artifacts_path) as connection:
         rows = connection.execute(
@@ -228,14 +230,6 @@ def scan_legacy(root: str | Path) -> LegacyManifest:
     )
 
 
-def _plain(value: Any) -> Any:
-    if isinstance(value, dict):
-        return {str(key): _plain(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_plain(item) for item in value]
-    return value
-
-
 async def _begin_import(
     database: Database,
     tenant: Any,
@@ -254,9 +248,7 @@ async def _begin_import(
         existing = await cursor.fetchone()
         if existing is not None:
             if existing[0] != manifest.checksum:
-                raise LegacyImportDriftError(
-                    f"origem {source_id!r} mudou após o primeiro registro"
-                )
+                raise LegacyImportDriftError(f"origem {source_id!r} mudou após o primeiro registro")
             if existing[1] == "applied":
                 return False
         await connection.execute(
@@ -378,11 +370,7 @@ async def _import_json_stores(
     creator_repository = PostgresCreatorRepository(database, tenant)
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for creator_key, entry in sorted(
-        (
-            (str(key), value)
-            for key, value in creators.items()
-            if isinstance(value, dict)
-        ),
+        ((str(key), value) for key, value in creators.items() if isinstance(value, dict)),
         key=lambda item: item[1].get("_idx", 0),
     ):
         imported = dict(entry)
@@ -401,8 +389,13 @@ async def _import_json_stores(
                 for entry in entries
                 if entry.get("status", "approved") == "approved"
             ],
-            creator_prompt=next((entry.get("creator_prompt") for entry in entries if entry.get("creator_prompt")), None),
-            video_prompt=next((entry.get("video_prompt") for entry in entries if entry.get("video_prompt")), None),
+            creator_prompt=next(
+                (entry.get("creator_prompt") for entry in entries if entry.get("creator_prompt")),
+                None,
+            ),
+            video_prompt=next(
+                (entry.get("video_prompt") for entry in entries if entry.get("video_prompt")), None
+            ),
             offer=next((entry.get("offer") for entry in entries if entry.get("offer")), None),
         )
 
@@ -449,9 +442,7 @@ async def _import_creator_assets(
     imported: dict[tuple[str, str], str] = {}
     source_key = hashlib.sha256(source_id.encode("utf-8")).hexdigest()[:16]
     for asset in manifest.creator_assets:
-        creator_key = hashlib.sha256(
-            asset.creator_key.encode("utf-8")
-        ).hexdigest()[:24]
+        creator_key = hashlib.sha256(asset.creator_key.encode("utf-8")).hexdigest()[:24]
         stored = await storage.put_bytes(
             asset.data,
             key_base=(

@@ -266,7 +266,11 @@ async def test_web_execute_run_injects_agent_catalog(monkeypatch, tmp_path):
         async def aget_state(self, _config):
             return SimpleNamespace(tasks=[], next=(), values={"results": []})
 
-    monkeypatch.setattr(web_server, "load_pipeline", lambda _path: {})
+    monkeypatch.setattr(
+        web_server,
+        "load_pipeline",
+        lambda _path: {"tiers": [{"name": "ltx"}]},
+    )
     monkeypatch.setattr(web_server, "load_providers", lambda _path: {})
     monkeypatch.setattr(web_server, "load_agent_catalog", lambda _path: catalog)
     monkeypatch.setattr(web_server.RunDependencies, "build", lambda *_a, **_k: FakeDependencies())

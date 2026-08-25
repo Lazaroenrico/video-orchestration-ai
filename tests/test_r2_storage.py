@@ -6,7 +6,10 @@ credenciais de R2").
 """
 from __future__ import annotations
 
+import asyncio
 import base64
+import threading
+import time
 
 import httpx
 import pytest
@@ -96,6 +99,59 @@ async def test_put_returns_a_canonical_r2_uri_not_a_signed_url(storage):
 
     assert stored.uri == "r2://ugc/run-1/c0/image.png"
     assert "signed.example" not in stored.uri
+
+
+def test_put_bytes_can_reuse_storage_across_separate_event_loops(storage):
+    async def put(key_base: str) -> None:
+        await asyncio.wait_for(
+            storage.put_bytes(_PNG_BYTES, key_base=key_base, content_type="image/png"),
+            timeout=1.0,
+        )
+
+    asyncio.run(put("run-1/c0/first"))
+    asyncio.run(put("run-1/c0/second"))
+
+
+async def test_cancelled_upload_holds_concurrency_slot_until_worker_finishes(monkeypatch):
+    import orchestrator.storage.r2 as r2_module
+
+    class _BlockingS3(_FakeS3):
+        def __init__(self) -> None:
+            super().__init__()
+            self.started = 0
+            self.release = threading.Event()
+
+        def put_object(self, **kwargs):
+            self.started += 1
+            if self.started == 1:
+                while not self.release.is_set():
+                    time.sleep(0.01)
+            return super().put_object(**kwargs)
+
+    monkeypatch.setattr(r2_module, "_STORAGE_CONCURRENCY", 1)
+    monkeypatch.setattr(r2_module, "_STORAGE_SEMAPHORE", None)
+    monkeypatch.setattr(r2_module, "_STORAGE_SEMAPHORE_LOOP", None)
+    client = _BlockingS3()
+    storage = R2MediaStorage(bucket="ugc", client=client)
+
+    first = asyncio.create_task(
+        storage.put_bytes(_PNG_BYTES, key_base="run-1/c0/first", content_type="image/png")
+    )
+    while client.started == 0:
+        await asyncio.sleep(0)
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+
+    second = asyncio.create_task(
+        storage.put_bytes(_PNG_BYTES, key_base="run-1/c0/second", content_type="image/png")
+    )
+    await asyncio.sleep(0.05)
+    assert client.started == 1
+
+    client.release.set()
+    await asyncio.wait_for(second, timeout=1.0)
+    assert client.started == 2
 
 
 async def test_put_from_url_downloads_then_uploads_the_bytes(storage, s3):

@@ -1,4 +1,5 @@
 """Repositório PostgreSQL de metadados canônicos de artifacts."""
+
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -10,7 +11,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from orchestrator.db.database import Database
 from orchestrator.db.models import Artifact as ArtifactModel
 from orchestrator.db.tenancy import TenantContext
-from orchestrator.storage.db import ArtifactRecord
+from orchestrator.storage.records import ArtifactRecord
 from orchestrator.storage.retention import expires_at_for
 
 
@@ -29,9 +30,7 @@ def _to_record(row: tuple[Any, ...]) -> ArtifactRecord:
         source_uri=row[9],
         retention_class=row[10],
         expires_at=(
-            expires_at.astimezone(timezone.utc).isoformat()
-            if expires_at is not None
-            else None
+            expires_at.astimezone(timezone.utc).isoformat() if expires_at is not None else None
         ),
         meta=row[12],
     )
@@ -105,12 +104,9 @@ class PostgresArtifactRepository:
         return artifact
 
     async def get(self, artifact_id: str) -> Optional[ArtifactRecord]:
-        stmt = (
-            select(*_SELECT_COLUMNS)
-            .where(
-                ArtifactModel.organization_id == self._tenant.organization_id,
-                ArtifactModel.id == artifact_id,
-            )
+        stmt = select(*_SELECT_COLUMNS).where(
+            ArtifactModel.organization_id == self._tenant.organization_id,
+            ArtifactModel.id == artifact_id,
         )
         async with self._database.connection(self._tenant) as connection:
             cursor = await self._database.execute(connection, stmt)
@@ -132,12 +128,9 @@ class PostgresArtifactRepository:
         return [_to_record(row) for row in rows]
 
     async def by_key(self, storage_key: str) -> Optional[ArtifactRecord]:
-        stmt = (
-            select(*_SELECT_COLUMNS)
-            .where(
-                ArtifactModel.organization_id == self._tenant.organization_id,
-                ArtifactModel.storage_key == storage_key,
-            )
+        stmt = select(*_SELECT_COLUMNS).where(
+            ArtifactModel.organization_id == self._tenant.organization_id,
+            ArtifactModel.storage_key == storage_key,
         )
         async with self._database.connection(self._tenant) as connection:
             cursor = await self._database.execute(connection, stmt)
@@ -199,13 +192,9 @@ class PostgresArtifactRepository:
         return [_to_record(row) for row in rows]
 
     async def delete(self, artifact_id: str) -> None:
-        stmt = (
-            delete(ArtifactModel)
-            .where(
-                ArtifactModel.organization_id == self._tenant.organization_id,
-                ArtifactModel.id == artifact_id,
-            )
+        stmt = delete(ArtifactModel).where(
+            ArtifactModel.organization_id == self._tenant.organization_id,
+            ArtifactModel.id == artifact_id,
         )
         async with self._database.connection(self._tenant) as connection:
             await self._database.execute(connection, stmt)
-

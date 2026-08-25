@@ -85,7 +85,15 @@ def default_agent_catalog() -> AgentCatalog:
     return AgentCatalog(stages=specs)
 
 
-def _load_system_prompt(base_dir: Path, rel_path: str | None) -> tuple[str | None, str | None]:
+def _first_existing(candidates: list[Path]) -> Path | None:
+    return next((path for path in candidates if path.exists()), None)
+
+
+def _load_system_prompt(
+    base_dir: Path,
+    rel_path: str | None,
+    fallback_dirs: tuple[Path, ...] = (),
+) -> tuple[str | None, str | None]:
     if rel_path is None:
         return None, None
 
@@ -93,16 +101,22 @@ def _load_system_prompt(base_dir: Path, rel_path: str | None) -> tuple[str | Non
     if prompt_path.is_absolute() or ".." in prompt_path.parts:
         raise ValueError(f"agents.yaml: invalid system_prompt_path {rel_path!r}")
 
-    full_path = base_dir / prompt_path
-    if not full_path.exists():
+    # Perfil primeiro; sem override, cai na base compartilhada (config-base).
+    full_path = _first_existing(
+        [base_dir / prompt_path, *(fb / prompt_path for fb in fallback_dirs)]
+    )
+    if full_path is None:
         raise ValueError(f"agents.yaml: system_prompt_path not found: {rel_path}")
 
     stage_prompt = full_path.read_text(encoding="utf-8").strip()
     if not stage_prompt:
         raise ValueError(f"agents.yaml: empty system prompt at {rel_path}")
 
-    shared_path = base_dir / "prompts" / "agents" / "_shared.md"
-    if shared_path.exists():
+    shared_rel = Path("prompts") / "agents" / "_shared.md"
+    shared_path = _first_existing(
+        [base_dir / shared_rel, *(fb / shared_rel for fb in fallback_dirs)]
+    )
+    if shared_path is not None:
         shared_prompt = shared_path.read_text(encoding="utf-8").strip()
         if shared_prompt:
             return rel_path, f"{shared_prompt}\n\n{stage_prompt}"
@@ -113,6 +127,7 @@ def build_agent_catalog(
     raw: dict[str, Any] | None = None,
     *,
     base_dir: str | Path | None = None,
+    fallback_dirs: tuple[Path, ...] = (),
 ) -> AgentCatalog:
     catalog = default_agent_catalog()
     data = raw or {}
@@ -154,13 +169,11 @@ def build_agent_catalog(
         agent_enabled = bool(override.get("agent_enabled", base.agent_enabled))
         if executor == "agent" and not agent_enabled:
             raise ValueError(
-                f"agents.yaml: stage {stage_name!r} executor: agent "
-                "requires agent_enabled: true"
+                f"agents.yaml: stage {stage_name!r} executor: agent requires agent_enabled: true"
             )
         if agent_enabled and executor != "agent":
             raise ValueError(
-                f"agents.yaml: stage {stage_name!r} agent_enabled: true "
-                "requires executor: agent"
+                f"agents.yaml: stage {stage_name!r} agent_enabled: true requires executor: agent"
             )
         if executor == "agent" and not is_agent_stage_allowed(stage_name):
             raise ValueError(f"agents.yaml: {agent_stage_not_allowed_message()}")
@@ -168,6 +181,7 @@ def build_agent_catalog(
         system_prompt_path, system_prompt = _load_system_prompt(
             prompt_base,
             override.get("system_prompt_path", base.system_prompt_path),
+            fallback_dirs=fallback_dirs,
         )
         prompt_hash = (
             hashlib.sha256(system_prompt.encode()).hexdigest()

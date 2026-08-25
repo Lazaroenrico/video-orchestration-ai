@@ -76,7 +76,9 @@ def test_concepts_constraint_rejects_non_positive_or_non_integer_values(value: o
         serialize_server_execution_constraints("concepts", {"n": value})
 
 
-@pytest.mark.parametrize("name", ["target_duration_seconds", "min_spoken_words", "max_spoken_words"])
+@pytest.mark.parametrize(
+    "name", ["target_duration_seconds", "min_spoken_words", "max_spoken_words"]
+)
 @pytest.mark.parametrize("value", [True, False, 0, -1, 1.5, "3"])
 def test_scripts_constraints_reject_invalid_values(name: str, value: object) -> None:
     from orchestrator.language_runtime import serialize_server_execution_constraints
@@ -99,9 +101,7 @@ def test_creator_agent_output_uses_canonical_two_creator_contract() -> None:
 
     assert agent_output_model("creator_profiles") is CreatorRosterSubmission
     with pytest.raises(ValidationError):
-        agent_output_model("creator_profiles").model_validate(
-            {"creators": [], "assignments": []}
-        )
+        agent_output_model("creator_profiles").model_validate({"creators": [], "assignments": []})
 
 
 def test_agent_script_output_requires_hook_as_first_spoken_beat() -> None:
@@ -149,7 +149,10 @@ def test_materialization_rejects_performance_evidence_without_snapshot() -> None
 @pytest.mark.parametrize("profile", ["config", "config-staging", "config-mock"])
 def test_agent_prompts_have_v3_contracts_and_profiles_are_byte_identical(profile: str) -> None:
     root = Path(__file__).parents[1]
-    prompt_root = root / profile / "prompts" / "agents"
+    # Prompts compartilhados têm fonte única em config-base/; perfis só podem
+    # sobrepô-los com cópia byte-idêntica (rede anti-drift: test_config_overlay.py).
+    prompt_root = root / "config-base" / "prompts" / "agents"
+    profile_prompt_root = root / profile / "prompts" / "agents"
     from orchestrator.config import load_agent_catalog
 
     catalog = load_agent_catalog(profile)
@@ -174,8 +177,11 @@ def test_agent_prompts_have_v3_contracts_and_profiles_are_byte_identical(profile
     ):
         assert forbidden not in prompt_text.lower()
 
-    if profile == "config":
-        for name in ("_shared.md", "concepts.md", "scripts.md", "creators.md"):
-            expected = (prompt_root / name).read_bytes()
-            for sibling in ("config-staging", "config-mock"):
-                assert expected == (root / sibling / "prompts" / "agents" / name).read_bytes()
+    live_catalog = load_agent_catalog("config")
+    for stage in ("concepts", "scripts", "creator_profiles"):
+        assert catalog.stage(stage).prompt_hash == live_catalog.stage(stage).prompt_hash
+
+    for name in ("_shared.md", "concepts.md", "scripts.md", "creators.md"):
+        override_in_profile = profile_prompt_root / name
+        if override_in_profile.exists():
+            assert override_in_profile.read_bytes() == (prompt_root / name).read_bytes()

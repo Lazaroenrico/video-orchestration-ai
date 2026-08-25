@@ -1,8 +1,8 @@
 """Loop de worker durável, independente do backend de wake-up."""
+
 from __future__ import annotations
 
 import asyncio
-import os
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -10,7 +10,8 @@ from typing import Any, Awaitable, Callable
 import httpx
 from replicate.exceptions import ReplicateError
 
-from orchestrator import runner
+from orchestrator import runner, runtime_mode
+from orchestrator.common.plain import to_plain as _plain
 from orchestrator.config import (
     default_db_path,
     default_media_path,
@@ -70,25 +71,13 @@ def _job_error_fields(exc: BaseException) -> tuple[str, str]:
     return (str(exc).strip() or error_type, error_type)
 
 
-def _plain(value: Any) -> Any:
-    if hasattr(value, "model_dump"):
-        return _plain(value.model_dump(mode="json"))
-    if isinstance(value, dict):
-        return {str(key): _plain(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_plain(item) for item in value]
-    return value
-
-
 def _public_gate_payload(interrupt: dict[str, Any]) -> dict[str, Any]:
     """Remove internal creator aliases before persisting a public human gate."""
     payload = _plain(interrupt)
     creators = payload.get("creators")
     if isinstance(creators, list):
         payload["creators"] = [
-            normalize_creator_payload(creator)
-            for creator in creators
-            if isinstance(creator, dict)
+            normalize_creator_payload(creator) for creator in creators if isinstance(creator, dict)
         ]
     return payload
 
@@ -146,11 +135,7 @@ async def _execute_pipeline_job(
     config_dir = run_payload.get("config_dir")
     pipeline = load_pipeline(config_dir)
     providers = load_providers(config_dir)
-    paid_enabled = os.environ.get("ORCH_ENABLE_PAID_ADAPTERS", "").lower() in {
-        "1",
-        "true",
-        "yes",
-    }
+    paid_enabled = runtime_mode.paid_adapters_enabled()
     configured = (providers or {}).get("adapters", {})
     paid_roles = {
         role: configured.get(role, "mock")
@@ -273,10 +258,7 @@ async def _execute_pipeline_job(
             video_prompt=None,
             offer=run_payload.get("offer"),
         )
-    items = [
-        _plain(item)
-        for item in ((persisted_state or output).get("results") or [])
-    ]
+    items = [_plain(item) for item in ((persisted_state or output).get("results") or [])]
     runs = PostgresRunRepository(database, tenant)
     interrupt = await runner.get_interrupt(
         pipeline,
@@ -288,9 +270,7 @@ async def _execute_pipeline_job(
             job.run_id,
             phase="running",
             state=state,
-            summary=_plain(
-                runner.summarize({**(persisted_state or output), "run_id": job.run_id})
-            ),
+            summary=_plain(runner.summarize({**(persisted_state or output), "run_id": job.run_id})),
             items=items,
         )
         await PostgresJobRepository(database, tenant).open_gate(
@@ -303,9 +283,7 @@ async def _execute_pipeline_job(
         job.run_id,
         phase="done",
         state=state,
-        summary=_plain(
-            runner.summarize({**(persisted_state or output), "run_id": job.run_id})
-        ),
+        summary=_plain(runner.summarize({**(persisted_state or output), "run_id": job.run_id})),
         items=items,
     )
     await event_repository.append_event(
@@ -314,10 +292,12 @@ async def _execute_pipeline_job(
         {
             "run_id": job.run_id,
             "summary": _plain(
-                runner.summarize({
-                    **(persisted_state or output),
-                    "run_id": job.run_id,
-                })
+                runner.summarize(
+                    {
+                        **(persisted_state or output),
+                        "run_id": job.run_id,
+                    }
+                )
             ),
         },
     )
@@ -372,12 +352,14 @@ async def _run_worker_once_with_database(
     job = claimed[0]
     executor = execute
     if executor is None:
+
         async def executor(claimed_job: Job) -> None:
             await _execute_pipeline_job(
                 claimed_job,
                 database=database,
                 tenant=tenant,
             )
+
     stop_heartbeat = asyncio.Event()
 
     async def renew_lease() -> None:
