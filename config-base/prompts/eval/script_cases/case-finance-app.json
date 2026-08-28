@@ -1,0 +1,15 @@
+{
+  "id": "case-finance-app",
+  "offer": "App de organização financeira que conecta todas as contas em um lugar, categoriza gastos automaticamente por IA e envia alerta antes de você estourar o orçamento do mês. Primeiro mês grátis.",
+  "platform": "tiktok",
+  "concept": {
+    "id": "concept-bench-3",
+    "hook": "Descobri para onde meu salário estava indo todo mês",
+    "angle": "Print real do app categorizando gastos surpreendentes",
+    "audience_problem": "Fecha o mês sem saber onde o dinheiro foi",
+    "product_mechanism": "Categorização automática por IA com alertas de orçamento",
+    "evidence_basis": "provided_fact",
+    "format": "storytime com screen recording",
+    "hook_style": "confissão"
+  }
+}

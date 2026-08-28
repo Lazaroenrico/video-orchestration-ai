@@ -180,6 +180,7 @@ export interface StartRunBody {
   video_prompt?: string | null;
   approve_creators?: boolean;
   edit_concepts?: boolean;
+  script_model?: string | null;
 }
 
 export interface PerformanceMetric {
@@ -205,6 +206,7 @@ export interface CampaignInput {
   objective?: "conversion" | "awareness" | "consideration";
   batch_size?: number;
   performance?: PerformanceSnapshot | null;
+  script_model?: string | null;
 }
 
 export interface StartRunV2Body {

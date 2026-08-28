@@ -25,6 +25,9 @@ novas entregas usam uma página própria em `docs/progress/changes/`.
 
 ## Últimas 10 entregas
 
+- [Injeção de repositório de artifacts e paridade no benchmark](progress/changes/2026-08-28-artifact-repository-and-benchmark-replay-fixes.md) — `run_pipeline` mantém repositório aberto e injeta no grafo sem criar SQLite indevido; live e replay no benchmark preservam drafts inválidos e `structural_reason` idênticos.
+- [Seleção de modelo por campanha para roteiros (DeepSeek)](progress/changes/2026-08-26-per-campaign-script-model-selection.md) — suporte a `script_model` por campanha com validação server-side contra `allowed_models` no `agents.yaml` e whitelist do DeepSeek V4.
+- [Benchmark isolado de modelos para scripts](progress/changes/2026-08-26-script-model-benchmark.md) — harness opt-in (`--live`) que compara deepseek/gemini/qwen com judge fixo claude-opus-5 via cassette, com custo estimado e razão score/custo.
 - [Correções pós-revisão da refatoração estrutural](progress/changes/2026-08-25-refactor-review-fixes.md) — topologia runtime cobre tiers customizados de ponta a ponta, contratos de dict/gênero foram corrigidos e o storage R2 ficou seguro entre loops e cancelamentos.
 - [Divisão do web/server.py em módulos](progress/changes/2026-08-25-server-split.md) — server.py de 2.253 para 625 linhas: events, run_executor, RunRegistry injetável e rotas por domínio, com gate dual-mode e payloads preservados.
 - [Quebra de ciclos de camadas e vazamentos de adapters](progress/changes/2026-08-25-layering-adapters.md) — ArtifactRecord em módulo neutro, migrações sem grafo, accessors explícitos no CompositeAdapter e fallback mock injetado.
@@ -32,9 +35,6 @@ novas entregas usam uma página própria em `docs/progress/changes/`.
 - [Topologia única dos nodes do grafo](progress/changes/2026-08-25-node-topology.md) — graph/topology.py passa a ser a fonte canônica; progress.py e web derivam suas visões dela, com validador anti-divergência.
 - [Config base + overlay](progress/changes/2026-08-25-config-overlay.md) — config-base/ compartilhado elimina a triplicação (18 cópias de prompts); perfis viram overlays mínimos com prova de equivalência byte-a-byte.
 - [Primitivas comuns](progress/changes/2026-08-25-common-primitives.md) — orchestrator/common/ unifica to_plain, wav_data_uri, status terminais e inferência de gênero que estavam duplicados em até 4 pontos.
-- [Correção de CI (FFmpeg, migração 0007 e guards operacionais)](progress/changes/2026-08-18-ci-fixes-ffmpeg-migration.md) — instalação de FFmpeg no host de teste, inserção retrocompatível no teste de migração 0007 e guards de secrets em staging.
-- [Contratos de prompt dos agents LangChain](progress/changes/2026-08-14-langchain-agent-prompt-contracts.md) — separação trusted/untrusted, ToolStrategy terminal e prompts v3 idênticos nos três perfis.
-- [LatentSync obrigatório e storage do vídeo-base](progress/changes/2026-08-15-latentsync-required-e-base-clip-storage.md) — validação estrita de `latentsync.required` e persistência do vídeo base LTX no storage canônico.
 
 ## Índice do histórico
 

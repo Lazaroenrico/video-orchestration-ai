@@ -95,6 +95,7 @@ async def _execute_run(
     campaign_payload: Optional[dict[str, Any]] = None,
     review_plan: Optional[bool] = None,
     _run_repository: Any = _RUN_REPOSITORY_UNSET,
+    script_model: Optional[str] = None,
 ) -> None:
     """Roda a pipeline completa, emitindo eventos para os subscribers SSE.
 
@@ -119,6 +120,7 @@ async def _execute_run(
                 campaign_payload,
                 review_plan,
                 repository,
+                script_model,
             )
         return
 
@@ -154,6 +156,11 @@ async def _execute_run(
         topology = topology_for_tiers(tier_names(pipeline))
         providers = _server_attr("load_providers")(config_dir)
         agent_catalog = _server_attr("load_agent_catalog")(config_dir)
+        from orchestrator.agent_catalog import apply_script_model_override
+
+        agent_catalog = apply_script_model_override(
+            agent_catalog, campaign_payload, campaign, script_model=script_model
+        )
         contract = build_runtime_contract(pipeline, providers, agent_catalog=agent_catalog)
         run_state["runtime_contract"] = contract.as_dict()
         dependencies = RunDependencies.build(pipeline, providers, agent_catalog=agent_catalog)

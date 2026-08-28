@@ -539,3 +539,58 @@ def test_v2_script_regeneration_applies_allowed_concept_edits() -> None:
 
     assert resolution["concepts"] == [{"id": "concept-1", "script": "Edited"}]
     assert pending["concepts"][0]["script"] == "Original"
+
+
+async def test_start_v2_with_allowed_script_model_enqueues_model(monkeypatch) -> None:
+    queued: list[dict] = []
+
+    class Jobs:
+        async def enqueue_run(self, _run_id, **kwargs):
+            queued.append(kwargs)
+            return SimpleNamespace(
+                job_id=UUID("00000000-0000-0000-0000-000000000021")
+            )
+
+    @asynccontextmanager
+    async def open_jobs():
+        yield Jobs()
+
+    monkeypatch.setenv("DATABASE_URL", "postgresql://unit-test")
+    monkeypatch.setattr(web_server.job_store, "open_repository", open_jobs)
+
+    response = await web_server.start_run_v2(
+        web_server.RunV2Request(
+            campaign={
+                "offer": "Serum X",
+                "audience": "Adults",
+                "batch_size": 2,
+                "platform": "tiktok",
+                "script_model": "deepseek/deepseek-v4-pro",
+            }
+        ),
+        BackgroundTasks(),
+    )
+
+    assert response["job_id"] == "00000000-0000-0000-0000-000000000021"
+    payload = queued[0]["payload"]
+    assert payload["campaign"]["script_model"] == "deepseek/deepseek-v4-pro"
+    assert payload.get("script_model") == "deepseek/deepseek-v4-pro"
+
+
+async def test_start_v2_with_disallowed_script_model_returns_400(monkeypatch) -> None:
+    with pytest.raises(HTTPException) as exc_info:
+        await web_server.start_run_v2(
+            web_server.RunV2Request(
+                campaign={
+                    "offer": "Serum X",
+                    "audience": "Adults",
+                    "batch_size": 2,
+                    "platform": "tiktok",
+                    "script_model": "disallowed/model-v1",
+                }
+            ),
+            BackgroundTasks(),
+        )
+
+    assert exc_info.value.status_code == 400
+    assert "not allowed" in exc_info.value.detail.lower()

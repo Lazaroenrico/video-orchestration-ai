@@ -39,6 +39,7 @@ class CampaignInput(StrictModel):
     objective: Literal["conversion", "awareness", "consideration"] = "conversion"
     batch_size: int = Field(default=6, ge=1, le=48)
     performance: PerformanceSnapshot | None = None
+    script_model: str | None = Field(default=None, max_length=200)
 
 class ConceptSubmission(StrictModel):
     hook: str = Field(min_length=1, max_length=500)
@@ -167,6 +168,36 @@ def materialize_script(
         id=f"{run_id}-script-{_id_suffix(concept_id)}",
         concept_id=concept_id,
     )
+
+
+def validate_script_submission(
+    submission: ScriptSubmission,
+    *,
+    target_duration_seconds: int | None = None,
+    min_spoken_words: int | None = None,
+    max_spoken_words: int | None = None,
+) -> None:
+    """Valida as regras de negócio de narração/duração e contagem de palavras."""
+    spoken_seconds = sum(beat.seconds for beat in submission.spoken_beats)
+    if (
+        target_duration_seconds is not None
+        and max(spoken_seconds, submission.estimated_duration) > target_duration_seconds
+    ):
+        raise ValueError(
+            f"narration exceeds {target_duration_seconds} seconds"
+        )
+    spoken_words = sum(
+        len(beat.text.split()) for beat in submission.spoken_beats
+    )
+    if min_spoken_words is not None and spoken_words < min_spoken_words:
+        raise ValueError(
+            f"narration requires at least {min_spoken_words} spoken words (got {spoken_words})"
+        )
+    if max_spoken_words is not None and spoken_words > max_spoken_words:
+        raise ValueError(
+            f"narration exceeds {max_spoken_words} spoken words (got {spoken_words})"
+        )
+
 
 
 def script_result_from_text(

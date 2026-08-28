@@ -56,6 +56,7 @@ class RunRequest(BaseModel):
     edit_concepts: bool = True
     creator_id: Optional[str] = None
     creator_run_id: Optional[str] = None
+    script_model: Optional[str] = None
 
 
 class RunV2Request(BaseModel):
@@ -75,6 +76,14 @@ async def start_run_v2(
     run_id = f"web-{uuid.uuid4().hex[:8]}"
     db_path = req.db or str(default_db_path())
     effective = effective_config_dir(req.config_dir)
+    if campaign.script_model:
+        catalog = _server_attr("load_agent_catalog")(effective)
+        try:
+            from orchestrator.agent_catalog import apply_script_model_override
+
+            apply_script_model_override(catalog, campaign)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
     payload = {
         "offer": campaign.offer,
         "batch": campaign.batch_size,
@@ -82,6 +91,7 @@ async def start_run_v2(
         "config_dir": effective,
         "db_path": db_path,
         "campaign": campaign.model_dump(mode="json"),
+        "script_model": campaign.script_model,
         "review_plan": True,
     }
     async with job_store.open_repository() as jobs:
@@ -120,6 +130,7 @@ async def start_run_v2(
         None,
         campaign.model_dump(mode="json"),
         True,
+        script_model=campaign.script_model,
     )
     return {"run_id": run_id}
 
@@ -135,6 +146,14 @@ async def start_run(req: RunRequest, background_tasks: BackgroundTasks) -> dict[
     run_id = f"web-{uuid.uuid4().hex[:8]}"
     db_path = req.db or str(default_db_path())
     effective = effective_config_dir(req.config_dir)
+    if req.script_model:
+        catalog = _server_attr("load_agent_catalog")(effective)
+        try:
+            from orchestrator.agent_catalog import apply_script_model_override
+
+            apply_script_model_override(catalog, script_model=req.script_model)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
     # Todo run registra o "último prompt usado" por tipo — independente do gate de
     # aprovação (creators.json só persiste prompts quando o gate roda).
     async with prompt_store.open_repository(default_prompt_store_path()) as prompts:
@@ -160,6 +179,7 @@ async def start_run(req: RunRequest, background_tasks: BackgroundTasks) -> dict[
                     "approve_creators": req.approve_creators,
                     "edit_concepts": req.edit_concepts,
                     "seed_creator": seed_creator,
+                    "script_model": req.script_model,
                 },
             )
             _server_attr("_wake_web_embedded_runner")()
@@ -191,6 +211,7 @@ async def start_run(req: RunRequest, background_tasks: BackgroundTasks) -> dict[
         req.approve_creators,
         req.edit_concepts,
         seed_creator,
+        script_model=req.script_model,
     )
     return {"run_id": run_id}
 

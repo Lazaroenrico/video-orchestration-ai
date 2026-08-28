@@ -149,6 +149,9 @@ async def _execute_pipeline_job(
             f"{paid_roles}"
         )
     agent_catalog = load_agent_catalog(config_dir)
+    from orchestrator.agent_catalog import apply_script_model_override
+
+    agent_catalog = apply_script_model_override(agent_catalog, run_payload)
     effect_ledger = PostgresEffectLedger(database, tenant)
     db_path = Path(run_payload.get("db_path") or default_db_path())
     run_options = {

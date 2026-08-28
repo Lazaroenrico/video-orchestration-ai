@@ -1,0 +1,308 @@
+{
+  "case-finance-app:alibaba/qwen3.8-max:0": {
+    "json": {
+      "choices": [
+        {
+          "message": {
+            "content": "{\"score\":0.95,\"verdict\":\"pass\"}"
+          }
+        }
+      ],
+      "usage": {
+        "input_tokens": 520,
+        "output_tokens": 20,
+        "total_tokens": 540
+      }
+    },
+    "status": 200
+  },
+  "case-finance-app:alibaba/qwen3.8-max:1": {
+    "json": {
+      "choices": [
+        {
+          "message": {
+            "content": "{\"score\":0.92,\"verdict\":\"pass\"}"
+          }
+        }
+      ],
+      "usage": {
+        "input_tokens": 520,
+        "output_tokens": 20,
+        "total_tokens": 540
+      }
+    },
+    "status": 200
+  },
+  "case-finance-app:deepseek/deepseek-v4-pro:0": {
+    "json": {
+      "choices": [
+        {
+          "message": {
+            "content": "{\"score\":0.95,\"verdict\":\"pass\"}"
+          }
+        }
+      ],
+      "usage": {
+        "input_tokens": 520,
+        "output_tokens": 20,
+        "total_tokens": 540
+      }
+    },
+    "status": 200
+  },
+  "case-finance-app:deepseek/deepseek-v4-pro:1": {
+    "json": {
+      "choices": [
+        {
+          "message": {
+            "content": "{\"score\":0.92,\"verdict\":\"pass\"}"
+          }
+        }
+      ],
+      "usage": {
+        "input_tokens": 520,
+        "output_tokens": 20,
+        "total_tokens": 540
+      }
+    },
+    "status": 200
+  },
+  "case-finance-app:google/gemini-3.7-flash:0": {
+    "json": {
+      "choices": [
+        {
+          "message": {
+            "content": "{\"score\":0.92,\"verdict\":\"pass\"}"
+          }
+        }
+      ],
+      "usage": {
+        "input_tokens": 520,
+        "output_tokens": 20,
+        "total_tokens": 540
+      }
+    },
+    "status": 200
+  },
+  "case-finance-app:google/gemini-3.7-flash:1": {
+    "json": {
+      "choices": [
+        {
+          "message": {
+            "content": "{\"score\":0.92,\"verdict\":\"pass\"}"
+          }
+        }
+      ],
+      "usage": {
+        "input_tokens": 520,
+        "output_tokens": 20,
+        "total_tokens": 540
+      }
+    },
+    "status": 200
+  },
+  "case-kitchen-gadget:alibaba/qwen3.8-max:0": {
+    "json": {
+      "choices": [
+        {
+          "message": {
+            "content": "{\"score\": 0.93, \"verdict\": \"pass\"}"
+          }
+        }
+      ],
+      "usage": {
+        "input_tokens": 520,
+        "output_tokens": 20,
+        "total_tokens": 540
+      }
+    },
+    "status": 200
+  },
+  "case-kitchen-gadget:alibaba/qwen3.8-max:1": {
+    "json": {
+      "choices": [
+        {
+          "message": {
+            "content": "{\"score\": 0.9, \"verdict\": \"pass\"}"
+          }
+        }
+      ],
+      "usage": {
+        "input_tokens": 520,
+        "output_tokens": 20,
+        "total_tokens": 540
+      }
+    },
+    "status": 200
+  },
+  "case-kitchen-gadget:deepseek/deepseek-v4-pro:0": {
+    "json": {
+      "choices": [
+        {
+          "message": {
+            "content": "{\"score\": 0.92, \"verdict\": \"pass\"}"
+          }
+        }
+      ],
+      "usage": {
+        "input_tokens": 520,
+        "output_tokens": 20,
+        "total_tokens": 540
+      }
+    },
+    "status": 200
+  },
+  "case-kitchen-gadget:deepseek/deepseek-v4-pro:1": {
+    "json": {
+      "choices": [
+        {
+          "message": {
+            "content": "{\"score\":0.92,\"verdict\":\"pass\"}"
+          }
+        }
+      ],
+      "usage": {
+        "input_tokens": 520,
+        "output_tokens": 20,
+        "total_tokens": 540
+      }
+    },
+    "status": 200
+  },
+  "case-kitchen-gadget:google/gemini-3.7-flash:0": {
+    "json": {
+      "choices": [
+        {
+          "message": {
+            "content": "{\"score\": 0.92, \"verdict\": \"pass\"}"
+          }
+        }
+      ],
+      "usage": {
+        "input_tokens": 520,
+        "output_tokens": 20,
+        "total_tokens": 540
+      }
+    },
+    "status": 200
+  },
+  "case-kitchen-gadget:google/gemini-3.7-flash:1": {
+    "json": {
+      "choices": [
+        {
+          "message": {
+            "content": "{\"score\":0.94,\"verdict\":\"pass\"}"
+          }
+        }
+      ],
+      "usage": {
+        "input_tokens": 520,
+        "output_tokens": 20,
+        "total_tokens": 540
+      }
+    },
+    "status": 200
+  },
+  "case-skincare:alibaba/qwen3.8-max:0": {
+    "json": {
+      "choices": [
+        {
+          "message": {
+            "content": "{\"score\":0.92,\"verdict\":\"pass\"}"
+          }
+        }
+      ],
+      "usage": {
+        "input_tokens": 520,
+        "output_tokens": 20,
+        "total_tokens": 540
+      }
+    },
+    "status": 200
+  },
+  "case-skincare:alibaba/qwen3.8-max:1": {
+    "json": {
+      "choices": [
+        {
+          "message": {
+            "content": "{\"score\":0.92,\"verdict\":\"pass\"}"
+          }
+        }
+      ],
+      "usage": {
+        "input_tokens": 520,
+        "output_tokens": 20,
+        "total_tokens": 540
+      }
+    },
+    "status": 200
+  },
+  "case-skincare:deepseek/deepseek-v4-pro:0": {
+    "json": {
+      "choices": [
+        {
+          "message": {
+            "content": "{\"score\": 0.92, \"verdict\": \"pass\"}"
+          }
+        }
+      ],
+      "usage": {
+        "input_tokens": 520,
+        "output_tokens": 20,
+        "total_tokens": 540
+      }
+    },
+    "status": 200
+  },
+  "case-skincare:deepseek/deepseek-v4-pro:1": {
+    "json": {
+      "choices": [
+        {
+          "message": {
+            "content": "{\"score\":0.87,\"verdict\":\"pass\"}"
+          }
+        }
+      ],
+      "usage": {
+        "input_tokens": 520,
+        "output_tokens": 20,
+        "total_tokens": 540
+      }
+    },
+    "status": 200
+  },
+  "case-skincare:google/gemini-3.7-flash:0": {
+    "json": {
+      "choices": [
+        {
+          "message": {
+            "content": "{\"score\":0.91,\"verdict\":\"pass\"}"
+          }
+        }
+      ],
+      "usage": {
+        "input_tokens": 520,
+        "output_tokens": 20,
+        "total_tokens": 540
+      }
+    },
+    "status": 200
+  },
+  "case-skincare:google/gemini-3.7-flash:1": {
+    "json": {
+      "choices": [
+        {
+          "message": {
+            "content": "{\"score\": 0.92, \"verdict\": \"pass\"}"
+          }
+        }
+      ],
+      "usage": {
+        "input_tokens": 520,
+        "output_tokens": 20,
+        "total_tokens": 540
+      }
+    },
+    "status": 200
+  }
+}

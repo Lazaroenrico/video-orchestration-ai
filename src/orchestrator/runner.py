@@ -11,7 +11,11 @@ from typing import Any, Awaitable, Callable, Optional
 from langgraph.types import Command
 
 import orchestrator.feedback_store as _feedback_store
-from orchestrator.agent_catalog import AgentCatalog, default_agent_catalog
+from orchestrator.agent_catalog import (
+    AgentCatalog,
+    apply_script_model_override,
+    default_agent_catalog,
+)
 from orchestrator.config import (
     default_artifacts_db_path,
 )
@@ -45,7 +49,7 @@ def _build_config(
     effect_ledger: Any | None = None,
     durable: bool = False,
 ) -> dict[str, Any]:
-    catalog = agent_catalog or default_agent_catalog()
+    catalog = apply_script_model_override(agent_catalog or default_agent_catalog(), run_options)
 
     # Storage e DB de artifacts (D30) são resolvidos uma vez por run, como o adapter:
     # construí-los por chamada recriaria o client S3 a cada clip.
@@ -88,6 +92,7 @@ async def run_pipeline(
     durable: bool = False,
 ) -> tuple[str, dict[str, Any]]:
     run_id = run_id or f"run-{uuid.uuid4().hex[:8]}"
+    batch = batch or int(pipeline.get("batch", {}).get("default_size", 6))
     async with open_artifact_repository(default_artifacts_db_path()) as artifact_repository:
         cfg = _build_config(
             pipeline,
@@ -96,10 +101,10 @@ async def run_pipeline(
             platform,
             feedback_store,
             agent_catalog,
-            artifact_repository,
-            run_options,
-            effect_ledger,
-            durable,
+            artifact_repository=artifact_repository,
+            run_options=run_options,
+            effect_ledger=effect_ledger,
+            durable=durable,
         )
         cfg.update(run_trace_config(run_id, offer=offer, platform=platform, batch=batch))
         # Step 10 -> Step 1: lê o feedback do ciclo anterior (se houver) e o injeta no
@@ -110,7 +115,7 @@ async def run_pipeline(
                 prior = await repository.load_latest_feedback()
         prior_styles = (prior or {}).get("winning_styles", [])
         campaign = (run_options or {}).get("campaign")
-        catalog = agent_catalog or default_agent_catalog()
+        catalog = apply_script_model_override(agent_catalog or default_agent_catalog(), run_options)
         contract = build_runtime_contract(pipeline, providers, agent_catalog=catalog)
         init = {
             "run_id": run_id,
@@ -187,7 +192,7 @@ async def resume_pipeline(
     effect_ledger: Any | None = None,
     durable: bool = False,
 ) -> tuple[str, dict[str, Any]]:
-    catalog = agent_catalog or default_agent_catalog()
+    catalog = apply_script_model_override(agent_catalog or default_agent_catalog(), run_options)
     current_contract = build_runtime_contract(pipeline, providers, agent_catalog=catalog)
     configured = (providers or {}).get("adapters", {}) if isinstance(providers, dict) else {}
     if not isinstance(configured, dict):
@@ -211,7 +216,7 @@ async def resume_pipeline(
                 run_id,
                 platform,
                 feedback_store,
-                agent_catalog,
+                catalog,
                 artifact_repository,
                 run_options,
                 effect_ledger,

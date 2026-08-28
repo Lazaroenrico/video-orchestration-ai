@@ -115,6 +115,7 @@ async def test_integrations_reads_provider_adapters(monkeypatch) -> None:
     assert out["stages"] == {"video": "replicate", "llm": "gateway"}
     assert out["agents"]["stages"]["concepts"]["executor"] == "tool"
     assert out["agents"]["stages"]["concepts"]["tools"] == ["generate_concepts"]
+    assert "allowed_models" in out["agents"]["stages"]["scripts"]
 
 
 @pytest.mark.asyncio

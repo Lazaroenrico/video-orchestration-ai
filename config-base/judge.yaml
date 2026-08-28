@@ -25,3 +25,34 @@ response:
   score_path: "output.score"        # número 0..1
   verdict_path: "output.verdict"    # "pass" | "fail" (opcional; senão deriva do score)
   pass_threshold: 0.8
+
+# Benchmark isolado de modelos para o stage de scripts (opt-in via --live).
+# Candidatos = mesma whitelist pretendida para a seleção por campanha.
+# ATENÇÃO: prices_per_mtok em 0.0 é placeholder — preencher com os preços reais do
+# dashboard Vercel antes de usar a coluna de custo do relatório.
+script_model_benchmark:
+  models:
+    - deepseek/deepseek-v4-pro
+    - google/gemini-3.7-flash
+    - alibaba/qwen3.8-max
+  judge_model: anthropic/claude-opus-5   # juiz fixo: o mesmo para todos os candidatos
+  samples_per_case: 2
+  max_output_tokens: 1200
+  cases_dir: prompts/eval/script_cases   # resolve no perfil e depois no config-base
+  prices_per_mtok:                       # USD por milhão de tokens (input/output)
+    deepseek/deepseek-v4-pro: { input: 0.66, output: 1.98 }
+    google/gemini-3.7-flash: { input: 0.75, output: 3.75 }
+    alibaba/qwen3.8-max: { input: 2.0, output: 6.0 }
+    anthropic/claude-opus-5: { input: 5.0, output: 10.0 }
+  judge_gateway:
+    url: "${JUDGE_GATEWAY_URL:-https://ai-gateway.vercel.sh/v1/chat/completions}"
+    method: POST
+    headers:
+      Content-Type: application/json
+      Authorization: "Bearer ${AI_GATEWAY_API_KEY:-}"
+    timeout_seconds: 60
+    response:
+      content_path: "choices.0.message.content"  # conteúdo textual -> parseado como JSON
+      score_path: "score"
+      verdict_path: "verdict"
+      pass_threshold: 0.8

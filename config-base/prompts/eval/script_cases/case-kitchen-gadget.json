@@ -1,0 +1,15 @@
+{
+  "id": "case-kitchen-gadget",
+  "offer": "Cortador de legumes 12 em 1 com lâminas em aço inox — picar cebola sem chorar em 30 segundos, lava na lava-louças e economia espaço na gaveta. Garantia de 2 anos.",
+  "platform": "instagram",
+  "concept": {
+    "id": "concept-bench-2",
+    "hook": "Parei de chorar cortando cebola com um gadget de 40 reais",
+    "angle": "Antes e depois do preparo mostrando velocidade",
+    "audience_problem": "Preparo de refeições consome tempo demais no dia a dia",
+    "product_mechanism": "12 lâminas intercambiáveis que padronizam o corte",
+    "evidence_basis": "cold_test",
+    "format": "speed-run de cozinha",
+    "hook_style": "transformação pessoal"
+  }
+}

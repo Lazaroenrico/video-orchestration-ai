@@ -1,0 +1,15 @@
+{
+  "id": "case-skincare",
+  "offer": "Serum facial de vitamina C com 20% de concentração — promove pele mais uniforme em 4 semanas, vegano e dermatologicamente testado. Preço promocional de lançamento com frete grátis.",
+  "platform": "tiktok",
+  "concept": {
+    "id": "concept-bench-1",
+    "hook": "Sua vitamina C pode estar oxidada antes de você abrir o pote",
+    "angle": "Educação sobre oxidação + demonstração de textura",
+    "audience_problem": "Já gastou caro em skincare que não funciona",
+    "product_mechanism": "Frasco airless que impede a oxidação do princípio ativo",
+    "evidence_basis": "provided_fact",
+    "format": "demonstração em close",
+    "hook_style": "pergunta provocativa"
+  }
+}

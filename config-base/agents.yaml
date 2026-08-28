@@ -19,6 +19,8 @@ stages:
     prompt_version: scripts-v3
     schema_version: creative-v2
     agent_enabled: false
+    allowed_models:
+      - deepseek/deepseek-v4-pro
   creator_profiles:
     executor: tool
     tools: [design_creator_roster]

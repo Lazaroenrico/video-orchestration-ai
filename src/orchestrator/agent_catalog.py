@@ -41,6 +41,7 @@ class StageExecutionSpec:
     prompt_hash: str | None = None
     schema_version: str | None = None
     agent_enabled: bool = False
+    allowed_models: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -66,6 +67,7 @@ class AgentCatalog:
                     "prompt_hash": spec.prompt_hash,
                     "schema_version": spec.schema_version,
                     "agent_enabled": spec.agent_enabled,
+                    "allowed_models": list(spec.allowed_models),
                 }
                 for spec in self.stages
             }
@@ -178,6 +180,20 @@ def build_agent_catalog(
         if executor == "agent" and not is_agent_stage_allowed(stage_name):
             raise ValueError(f"agents.yaml: {agent_stage_not_allowed_message()}")
 
+        raw_allowed = override.get("allowed_models")
+        if raw_allowed is None:
+            allowed_models = base.allowed_models
+        elif isinstance(raw_allowed, list | tuple):
+            if not all(isinstance(m, str) and m.strip() for m in raw_allowed):
+                raise ValueError(
+                    f"agents.yaml: stage {stage_name!r} allowed_models must contain non-empty strings"
+                )
+            allowed_models = tuple(str(m).strip() for m in raw_allowed)
+        else:
+            raise ValueError(
+                f"agents.yaml: stage {stage_name!r} allowed_models must be a list of strings"
+            )
+
         system_prompt_path, system_prompt = _load_system_prompt(
             prompt_base,
             override.get("system_prompt_path", base.system_prompt_path),
@@ -201,6 +217,82 @@ def build_agent_catalog(
             prompt_hash=prompt_hash,
             schema_version=override.get("schema_version"),
             agent_enabled=agent_enabled,
+            allowed_models=allowed_models,
         )
 
     return AgentCatalog(stages=tuple(by_stage[spec.stage] for spec in catalog.stages))
+
+
+def with_stage_model(catalog: AgentCatalog, stage: str, model: str | None) -> AgentCatalog:
+    """Retorna uma nova instância do AgentCatalog com target_model alterado para o stage.
+
+    Se `model` for None ou vazio, retorna o catálogo inalterado.
+    A validação da whitelist é estritamente fail-closed: `model` só é aceito se estiver
+    explicitamente presente em `spec.allowed_models`. Se `allowed_models` for vazio ou
+    não contiver o modelo solicitado, levanta `ValueError`.
+    """
+    if model is None or not str(model).strip():
+        return catalog
+    model_str = str(model).strip()
+    spec = catalog.stage(stage)
+    if model_str not in spec.allowed_models:
+        raise ValueError(
+            f"model {model_str!r} is not allowed for stage {stage!r}; allowed models: {list(spec.allowed_models)}"
+        )
+    import dataclasses
+
+    new_spec = dataclasses.replace(spec, target_model=model_str)
+    new_stages = tuple(new_spec if s.stage == stage else s for s in catalog.stages)
+    return AgentCatalog(stages=new_stages)
+
+
+def extract_script_model(*sources: Any, script_model: str | None = None) -> str | None:
+    """Extrai o identificador de script_model respeitando a precedência canônica.
+
+    Precedência:
+    1. `script_model` explícito (kwarg)
+    2. Fontes posicionais (da esquerda para a direita):
+       - Se str: valor direto
+       - Se dict: top-level `script_model` -> nested `campaign.script_model`
+       - Se objeto com atributo `script_model`: valor do atributo
+    """
+    if script_model is not None and str(script_model).strip():
+        return str(script_model).strip()
+    for source in sources:
+        if source is None:
+            continue
+        if isinstance(source, str) and source.strip():
+            return source.strip()
+        if isinstance(source, dict):
+            top = source.get("script_model")
+            if top is not None and str(top).strip():
+                return str(top).strip()
+            campaign = source.get("campaign")
+            if isinstance(campaign, dict):
+                nested = campaign.get("script_model")
+                if nested is not None and str(nested).strip():
+                    return str(nested).strip()
+            elif hasattr(campaign, "script_model"):
+                nested = getattr(campaign, "script_model", None)
+                if nested is not None and str(nested).strip():
+                    return str(nested).strip()
+        elif hasattr(source, "script_model"):
+            attr = getattr(source, "script_model", None)
+            if attr is not None and str(attr).strip():
+                return str(attr).strip()
+    return None
+
+
+def apply_script_model_override(
+    catalog: AgentCatalog,
+    *sources: Any,
+    script_model: str | None = None,
+) -> AgentCatalog:
+    """Aplica override de script_model extraído das fontes ao catálogo de forma fail-closed.
+
+    Se nenhum modelo for especificado, retorna o catálogo inalterado.
+    Se o modelo extraído não estiver presente em `allowed_models` para o stage 'scripts',
+    levanta `ValueError`.
+    """
+    model = extract_script_model(*sources, script_model=script_model)
+    return with_stage_model(catalog, "scripts", model)

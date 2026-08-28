@@ -110,6 +110,7 @@ class MockChatModel(BaseChatModel):
     """Deterministic, zero-cost chat model used by mock and staging profiles."""
 
     model: str = "mock"
+    max_tokens: int | None = None
 
     @property
     def _llm_type(self) -> str:
@@ -119,6 +120,9 @@ class MockChatModel(BaseChatModel):
         text = "\n".join(str(getattr(message, "content", message)) for message in messages)
         digest = hashlib.sha256(text.encode()).hexdigest()[:12]
         return ChatResult(generations=[ChatGeneration(message=AIMessage(content=f"mock:{digest}"))])
+
+
+MockChatModel.model_rebuild()
 
 
 def _truthy(value: str | None) -> bool:
@@ -227,8 +231,8 @@ class LanguageRuntime:
     def __init__(self, provider: str, settings: Mapping[str, Any] | None = None) -> None:
         self.provider = provider
         self.settings = dict(settings or {})
-        self._models: dict[str, Any] = {}
-        self._agents: dict[tuple[str, str, str, int, int | None], Any] = {}
+        self._models: dict[Any, Any] = {}
+        self._agents: dict[tuple[str, str, str, int, int | None, int | None], Any] = {}
 
     @classmethod
     def from_provider(
@@ -254,16 +258,24 @@ class LanguageRuntime:
             or default
         )
 
-    def model_for(self, stage: str, model: str | None = None) -> Any:
-        key = self._model_name(model)
+    def model_for(
+        self, stage: str, model: str | None = None, max_tokens: int | None = None
+    ) -> Any:
+        model_name = self._model_name(model)
+        if max_tokens is None and model_name in self._models:
+            return self._models[model_name]
+        key = (model_name, max_tokens) if max_tokens is not None else model_name
         if key not in self._models:
-            self._models[key] = self._build_model(self._model_name(model))
+            built = self._build_model(model_name, max_tokens=max_tokens)
+            self._models[key] = built
+            if max_tokens is None:
+                self._models[model_name] = built
         return self._models[key]
 
-    def _build_model(self, model: str) -> Any:
+    def _build_model(self, model: str, max_tokens: int | None = None) -> Any:
         provider = self.provider
         if provider == "mock":
-            return MockChatModel()
+            return MockChatModel(model="mock", max_tokens=max_tokens)
 
         _require_trace_redaction()
         if provider == "vercel_gateway_llm":
@@ -274,25 +286,31 @@ class LanguageRuntime:
                 raise RuntimeError(
                     "AI_GATEWAY_API_KEY or VERCEL_OIDC_TOKEN is required for vercel_gateway_llm"
                 )
-            return ChatOpenAI(
-                model=model,
-                api_key=token,
-                base_url=_gateway_url(os.environ.get("AI_GATEWAY_BASE_URL")),
-                timeout=120,
-                max_retries=3,
-            )
+            kwargs: dict[str, Any] = {
+                "model": model,
+                "api_key": token,
+                "base_url": _gateway_url(os.environ.get("AI_GATEWAY_BASE_URL")),
+                "timeout": 120,
+                "max_retries": 3,
+            }
+            if max_tokens is not None:
+                kwargs["max_tokens"] = max_tokens
+            return ChatOpenAI(**kwargs)
         if provider == "anthropic":
             from langchain_anthropic import ChatAnthropic
 
             token = os.environ.get("ANTHROPIC_API_KEY")
             if not token:
                 raise RuntimeError("ANTHROPIC_API_KEY is required for anthropic")
-            return ChatAnthropic(
-                model=model,
-                api_key=token,
-                timeout=120,
-                max_retries=3,
-            )
+            kwargs: dict[str, Any] = {
+                "model": model,
+                "api_key": token,
+                "timeout": 120,
+                "max_retries": 3,
+            }
+            if max_tokens is not None:
+                kwargs["max_tokens"] = max_tokens
+            return ChatAnthropic(**kwargs)
         if provider == "anthropic_sdk_gateway":
             from langchain_anthropic import ChatAnthropic
 
@@ -301,13 +319,16 @@ class LanguageRuntime:
                 raise RuntimeError(
                     "AI_GATEWAY_API_KEY or VERCEL_OIDC_TOKEN is required for anthropic_sdk_gateway"
                 )
-            return ChatAnthropic(
-                model=model,
-                api_key=token,
-                base_url=_anthropic_gateway_url(os.environ.get("AI_GATEWAY_BASE_URL")),
-                timeout=120,
-                max_retries=4,
-            )
+            kwargs: dict[str, Any] = {
+                "model": model,
+                "api_key": token,
+                "base_url": _anthropic_gateway_url(os.environ.get("AI_GATEWAY_BASE_URL")),
+                "timeout": 120,
+                "max_retries": 4,
+            }
+            if max_tokens is not None:
+                kwargs["max_tokens"] = max_tokens
+            return ChatAnthropic(**kwargs)
         raise KeyError(f"language provider desconhecido: {provider!r}")
 
     def _agent_budgets(self, stage: str) -> tuple[int, int | None]:
@@ -343,7 +364,12 @@ class LanguageRuntime:
         return max_steps, max_tool_calls
 
     def agent_for(
-        self, stage: str, *, model: str | None = None, system_prompt: str | None = None
+        self,
+        stage: str,
+        *,
+        model: str | None = None,
+        system_prompt: str | None = None,
+        max_tokens: int | None = None,
     ) -> Any:
         if stage not in _AGENT_STAGES:
             raise ValueError(
@@ -352,7 +378,7 @@ class LanguageRuntime:
         resolved_model = self._model_name(model)
         max_steps, max_tool_calls = self._agent_budgets(stage)
         prompt = system_prompt or ""
-        key = (stage, resolved_model, prompt, max_steps, max_tool_calls)
+        key = (stage, resolved_model, prompt, max_steps, max_tool_calls, max_tokens)
         if key in self._agents:
             return self._agents[key]
         from langchain.agents import create_agent
@@ -362,7 +388,7 @@ class LanguageRuntime:
         except ImportError:  # langchain 1.x exports it from structured_output
             from langchain.agents.structured_output import ToolStrategy
 
-        chat = self.model_for(stage, resolved_model)
+        chat = self.model_for(stage, resolved_model, max_tokens=max_tokens)
         # This is the sole transport retry policy. Provider clients are configured above;
         # middleware only bounds model/tool turns and never retries an HTTP request.
         from langchain.agents.middleware import ModelCallLimitMiddleware, ToolCallLimitMiddleware

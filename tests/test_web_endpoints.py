@@ -2155,3 +2155,77 @@ async def test_local_run_task_records_runtime_contract(tmp_path):
     assert contract_data["graph_version"] == "v2"
     assert contract_data["schema_version"] == "creative-v2"
     assert len(contract_data["fingerprint"]) == 64
+
+
+async def test_start_run_with_valid_script_model_enqueues_payload(monkeypatch):
+    queued_payloads: list[dict] = []
+
+    class Prompts:
+        async def record_last_used(self, **_values):
+            pass
+
+    class Jobs:
+        async def enqueue_run(self, _run_id, **kwargs):
+            queued_payloads.append(kwargs["payload"])
+            return SimpleNamespace(job_id=UUID("00000000-0000-0000-0000-000000000077"))
+
+    @asynccontextmanager
+    async def open_prompts(_path):
+        yield Prompts()
+
+    @asynccontextmanager
+    async def open_jobs():
+        yield Jobs()
+
+    monkeypatch.setenv("DATABASE_URL", "postgresql://unit-test")
+    monkeypatch.setattr(web_server.prompt_store, "open_repository", open_prompts)
+    monkeypatch.setattr(web_server.job_store, "open_repository", open_jobs)
+
+    response = await web_server.start_run(
+        web_server.RunRequest(
+            offer="serum X",
+            script_model="deepseek/deepseek-v4-pro",
+        ),
+        BackgroundTasks(),
+    )
+
+    assert response["job_id"] == "00000000-0000-0000-0000-000000000077"
+    assert queued_payloads[0]["script_model"] == "deepseek/deepseek-v4-pro"
+
+
+async def test_start_run_with_disallowed_script_model_returns_400():
+    with pytest.raises(HTTPException) as exc_info:
+        await web_server.start_run(
+            web_server.RunRequest(
+                offer="serum X",
+                script_model="not-allowed-model",
+            ),
+            BackgroundTasks(),
+        )
+
+    assert exc_info.value.status_code == 400
+    assert "not allowed" in exc_info.value.detail.lower()
+
+
+async def test_local_execute_run_applies_script_model_override(tmp_path):
+    run_id = "local-run-script-model"
+    web_server._runs[run_id] = {"queues": [], "buffer": [], "done": False}
+    db_path = str(tmp_path / "web_script_model.sqlite")
+
+    task = asyncio.create_task(
+        web_server._execute_run(
+            run_id,
+            offer="vitamin c",
+            batch=1,
+            platform="reels",
+            config_dir="config-mock",
+            db_path=db_path,
+            approve_creators=False,
+            edit_concepts=False,
+            script_model="deepseek/deepseek-v4-pro",
+        )
+    )
+    await asyncio.wait_for(task, timeout=8)
+
+    contract_data = web_server._runs[run_id]["runtime_contract"]
+    assert contract_data["model_ids"]["scripts"] == "deepseek/deepseek-v4-pro"
