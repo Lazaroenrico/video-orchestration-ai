@@ -10,7 +10,11 @@ from __future__ import annotations
 import pytest
 
 from orchestrator.adapters.mock import MockAdapter
-from tests.conftest import TIERS
+
+try:
+    from conftest import TIERS
+except ImportError:
+    from tests.conftest import TIERS
 
 # ---------------------------------------------------------------------------
 # Fixtures

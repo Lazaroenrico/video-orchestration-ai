@@ -55,13 +55,12 @@ async def write_script_tool(
         }
         if persona is not None:
             kwargs["persona"] = persona
-        generated = (
-            await ctx.language_runtime.write_script(**kwargs)
-            if ctx.language_runtime is not None
-            else await ctx.adapter.write_script(**kwargs)
-        )
+        if ctx.language_runtime is None:
+            raise RuntimeError("write_script requires LanguageRuntime in ToolContext")
+        generated = await ctx.language_runtime.write_script(**kwargs)
         script = require_non_empty_string(generated, tool_name="write_script_tool")
         submission = _submission_from_text(script, concept)
+
     else:
         submission = ScriptSubmission.model_validate(draft)
         script = ""

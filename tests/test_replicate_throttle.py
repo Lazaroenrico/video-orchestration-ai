@@ -16,7 +16,6 @@ import pytest
 
 import orchestrator.adapters._throttle as throttle_mod
 from orchestrator.adapters._throttle import AsyncThrottle, get_replicate_throttle
-from orchestrator.adapters.replicate_upscale import ReplicateUpscaleAdapter
 from orchestrator.adapters.replicate_video import ReplicateVideoAdapter
 from orchestrator.adapters.replicate_voice import ReplicateVoiceAdapter
 
@@ -182,17 +181,6 @@ async def test_voice_adapter_routes_runner_through_throttle(monkeypatch):
     adapter = ReplicateVoiceAdapter(runner=runner, throttle=spy)
     result = await adapter.create_voice(0)
     assert result == "https://replicate.delivery/voice.mp3"
-    assert spy.calls == 1
-
-
-async def test_upscale_adapter_routes_runner_through_throttle():
-    async def runner(ref, input):
-        return "https://replicate.delivery/up.png"
-
-    spy = SpyThrottle()
-    adapter = ReplicateUpscaleAdapter(runner=runner, throttle=spy)
-    result = await adapter.upscale("https://img.example/x.png")
-    assert result == "https://replicate.delivery/up.png"
     assert spy.calls == 1
 
 

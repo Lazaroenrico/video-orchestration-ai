@@ -52,13 +52,20 @@ Também foi removida a supressão global do `DeprecationWarning` do LangSmith em
 | --- | --- | --- |
 | `AssertionError: assert ArtifactDB is not sentinel_repo` em teste de injeção de runner | `_build_config` era chamado antes de `open_artifact_repository` com `artifact_repository=None` | Mover `_build_config` para dentro do contexto `open_artifact_repository` passando `artifact_repository` explicitamente |
 | `AssertionError: assert None is not None` no cassette de gerações gravado em live | `_run_async` live gravava `{"draft": generation.draft} if generation.draft else None`, descartando o retorno bruto quando inválido | Salvar `generation.raw_response` no cassette e reavaliar estruturalmente no replay |
+| `KeyError: 'video'` em `test_project_config_dirs_ship_valid_agents_yaml` após sincronizar `main` | A resolução combinou a asserção nova de catálogo restrito aos três stages criativos com o loop legado que ainda exigia `video` no catálogo | Remover somente a expectativa incompatível de `video`; a igualdade exata das três chaves continua provando o contrato reduzido |
+| `KeyError: 'roster'` no teste de expansão de env dos overlays | O teste de infraestrutura ainda usava um stage legado que D52 retirou do catálogo criativo | Exercitar a mesma expansão com o stage suportado `concepts`, preservando a finalidade do teste |
+| `LanguageModelFactory` escolheu o modelo do `.env` em vez do modelo explícito do teste | Uma invocação anterior da CLI carregou `AI_GATEWAY_LLM_MODEL` no processo e a fixture hermética não limpava essa variável | Limpar `AI_GATEWAY_LLM_MODEL` na fixture autouse; testes que precisam do override continuam optando via `monkeypatch` |
+| `TypeError: got multiple values` em `create_model(model=...)` e `resolve_model_name(override=...)` | O descriptor dual class/instance repassava o alias nomeado junto com o argumento posicional interno | Normalizar `model`/`override` antes do dispatch e rejeitar explicitamente apenas duplicidade posição + keyword; duas regressões públicas cobrem os caminhos |
 
 ## Verificação final
 
 - `uv run ruff check src tests` → `All checks passed!`
 - `git diff --check` → limpo sem avisos de whitespace/EOF.
 - `uv run pytest --no-cov tests/test_script_model_benchmark.py tests/test_runtime_contract_resume.py` → 37 passed, 2 skipped.
-- Suíte direcionada completa (270 passed, 2 skipped).
+- Após sincronizar `origin/main`, suíte offline sem módulos dependentes de PostgreSQL → 1.443 passed, 4 skipped.
+- Suíte completa → 1.478 passed, 4 skipped e 116 erros de setup, todos por `Connection refused` no PostgreSQL local documentado.
+- `npm run typecheck` em `front/` → aprovado.
+- `uv sync --frozen --all-extras` → lockfile e ambiente consistentes.
 - `uv run pytest --no-cov tests/test_progress_docs.py` → 5 passed.
 
 ## Pendências ou bloqueios externos

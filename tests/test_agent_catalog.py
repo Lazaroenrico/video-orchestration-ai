@@ -25,9 +25,8 @@ def test_agents_yaml_overrides_declared_stage_and_keeps_other_defaults(tmp_path)
         "stages:\n"
         "  concepts:\n"
         "    executor: agent\n"
-        "    tools: [generate_concepts]\n"
+        "    materializer: generate_concepts\n"
         "    target_model: claude-sonnet-4\n"
-        "    target_agent: concept-agent\n"
         "    agent_enabled: true\n",
         encoding="utf-8",
     )
@@ -37,12 +36,33 @@ def test_agents_yaml_overrides_declared_stage_and_keeps_other_defaults(tmp_path)
     concepts = catalog.stage("concepts")
     scripts = catalog.stage("scripts")
     assert concepts.executor == "agent"
+    assert concepts.materializer == "generate_concepts"
     assert concepts.tools == ("generate_concepts",)
     assert concepts.target_model == "claude-sonnet-4"
-    assert concepts.target_agent == "concept-agent"
     assert concepts.agent_enabled is True
     assert scripts.executor == "tool"
+    assert scripts.materializer == "write_script"
     assert scripts.tools == ("write_script",)
+
+
+def test_agents_yaml_normalizes_legacy_tools_list_to_materializer(tmp_path):
+    from orchestrator.config import load_agent_catalog
+
+    (tmp_path / "agents.yaml").write_text(
+        "stages:\n"
+        "  concepts:\n"
+        "    executor: agent\n"
+        "    tools: [generate_concepts]\n"
+        "    target_agent: concept-agent\n"
+        "    agent_enabled: true\n",
+        encoding="utf-8",
+    )
+
+    catalog = load_agent_catalog(str(tmp_path))
+    concepts = catalog.stage("concepts")
+    assert concepts.executor == "agent"
+    assert concepts.materializer == "generate_concepts"
+    assert concepts.tools == ("generate_concepts",)
 
 
 def test_agents_yaml_null_stages_uses_default_catalog(tmp_path):
@@ -53,6 +73,7 @@ def test_agents_yaml_null_stages_uses_default_catalog(tmp_path):
     catalog = load_agent_catalog(str(tmp_path))
 
     assert catalog.stage("concepts").executor == "tool"
+    assert catalog.stage("concepts").materializer == "generate_concepts"
     assert catalog.stage("concepts").tools == ("generate_concepts",)
 
 
@@ -69,9 +90,8 @@ def test_agent_catalog_serializes_to_stable_mapping(tmp_path):
         "stages:\n"
         "  concepts:\n"
         "    executor: agent\n"
-        "    tools: [generate_concepts]\n"
+        "    materializer: generate_concepts\n"
         "    target_model: claude-sonnet-4\n"
-        "    target_agent: concept-agent\n"
         "    system_prompt_path: prompts/agents/concepts.md\n"
         "    agent_enabled: true\n",
         encoding="utf-8",
@@ -82,9 +102,8 @@ def test_agent_catalog_serializes_to_stable_mapping(tmp_path):
     stage = data["stages"]["concepts"]
     assert stage == {
         "executor": "agent",
-        "tools": ["generate_concepts"],
+        "materializer": "generate_concepts",
         "target_model": "claude-sonnet-4",
-        "target_agent": "concept-agent",
         "has_system_prompt": True,
         "prompt_version": None,
         "prompt_hash": hashlib.sha256(
@@ -96,6 +115,8 @@ def test_agent_catalog_serializes_to_stable_mapping(tmp_path):
     }
     assert "system_prompt" not in stage
     assert "system_prompt_path" not in stage
+    assert "target_agent" not in stage
+    assert "tools" not in stage
 
 
 def test_agents_yaml_resolves_stage_system_prompt_from_files(tmp_path):
@@ -183,10 +204,10 @@ def test_project_config_dirs_ship_valid_agents_yaml(config_dir):
     catalog = load_agent_catalog(config_dir)
 
     # Only the three bounded creative stages receive hidden phase prompts.
-    assert catalog.stage("concepts").tools == ("generate_concepts",)
-    assert catalog.stage("scripts").tools == ("write_script",)
-    assert catalog.stage("creator_profiles").tools == ("design_creator_roster",)
-    assert catalog.stage("video").tools == ("generate_clip",)
+    assert catalog.stage("concepts").materializer == "generate_concepts"
+    assert catalog.stage("scripts").materializer == "write_script"
+    assert catalog.stage("creator_profiles").materializer == "design_creator_roster"
+    assert set(catalog.as_dict()["stages"].keys()) == {"concepts", "scripts", "creator_profiles"}
 
     expected_executor = "agent" if config_dir == "config" else "tool"
     prompt_files = {
@@ -207,13 +228,6 @@ def test_project_config_dirs_ship_valid_agents_yaml(config_dir):
             assert spec.allowed_models == ("deepseek/deepseek-v4-pro",)
         else:
             assert spec.allowed_models == ()
-    for stage in ("video",):
-        spec = catalog.stage(stage)
-        assert spec.system_prompt_path is None
-        assert spec.system_prompt is None
-        assert spec.executor == "tool"
-        assert spec.agent_enabled is False
-        assert spec.allowed_models == ()
 
 
 def test_runner_config_includes_agent_catalog(pipeline_cfg):

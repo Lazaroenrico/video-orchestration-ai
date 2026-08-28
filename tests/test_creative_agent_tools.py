@@ -220,7 +220,8 @@ async def test_agent_tools_require_their_terminal_structured_submissions() -> No
 
 async def test_legacy_tools_forward_persona_and_enforce_server_owned_campaign_fields() -> None:
     ctx = ToolContext(
-        adapter=_LegacyLlm(),
+        adapter=object(),
+        language_runtime=_LegacyLlm(),
         pipeline={},
         run={},
         run_id="run-agent",
@@ -263,7 +264,8 @@ async def test_legacy_tools_forward_persona_and_enforce_server_owned_campaign_fi
 
 async def test_script_tool_requires_a_server_owned_concept_id() -> None:
     ctx = ToolContext(
-        adapter=_LegacyLlm(),
+        adapter=object(),
+        language_runtime=_LegacyLlm(),
         pipeline={},
         run={},
         run_id="run-agent",
@@ -275,4 +277,64 @@ async def test_script_tool_requires_a_server_owned_concept_id() -> None:
             concept={"hook": "Hook"},
             creator_ref="creator",
             platform="tiktok",
+        )
+
+
+async def test_creative_tools_fail_fast_without_language_runtime_in_legacy_mode() -> None:
+    ctx = ToolContext(
+        adapter=object(),
+        language_runtime=None,
+        pipeline={},
+        run={},
+        run_id="run-agent",
+    )
+
+    with pytest.raises(RuntimeError, match="generate_concepts requires LanguageRuntime"):
+        await generate_concepts_tool(
+            ctx,
+            offer="Serum X",
+            n=1,
+            seed="run-agent",
+        )
+
+    with pytest.raises(RuntimeError, match="write_script requires LanguageRuntime"):
+        await write_script_tool(
+            ctx,
+            concept={"id": "concept-1", "hook": "Hook"},
+            creator_ref="creator",
+            platform="tiktok",
+        )
+
+    with pytest.raises(RuntimeError, match="generate_concepts requires LanguageRuntime"):
+        await generate_concepts_tool(
+            ctx,
+            offer="Serum X",
+            n=1,
+            seed="run-agent",
+            persona="creator",
+            campaign={"offer": "Serum X", "audience": "Adults", "batch_size": 1},
+        )
+
+
+
+async def test_write_script_tool_unstructured_text_and_min_words() -> None:
+    class _ShortLlm:
+        async def write_script(self, **_kwargs):
+            return "This is a plain unformatted single line of text with very few words"
+
+    ctx = ToolContext(
+        adapter=object(),
+        language_runtime=_ShortLlm(),
+        pipeline={},
+        run={},
+        run_id="run-agent",
+    )
+
+    with pytest.raises(ValueError, match="narration requires at least 30 spoken words"):
+        await write_script_tool(
+            ctx,
+            concept={"id": "concept-1", "hook": "Hook"},
+            creator_ref="creator",
+            platform="tiktok",
+            min_spoken_words=30,
         )

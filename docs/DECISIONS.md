@@ -125,6 +125,7 @@ Datas absolutas. Apendar novas decisões ao final.
   do anterior). Cada ciclo continua sendo um run inspecionável via `status`/`list`/`resume`.
 
 ### D17 — Resolução de adapter por papel (`CompositeAdapter`)
+*(Substituída em parte por D46 e D47: o papel `llm` pertence exclusivamente ao `LanguageRuntime` e o Judge foi isolado em `orchestrator.evaluation`. `CompositeAdapter` é estritamente domain/media-only: `creator`, `video`, `qc`, `assembly`, `upscale`.)*
 - **Contexto:** o `registry` só resolvia o papel `video` e usava esse adapter único para
   TODOS os métodos. Para misturar adapters reais e mock por papel (ex.: Claude no LLM,
   mock no resto) era preciso rotear por papel.
@@ -140,6 +141,7 @@ Datas absolutas. Apendar novas decisões ao final.
   `test_registry_composite.py` (2).
 
 ### D18 — Adapters reais (Claude LLM + Creator), só as ligações
+*(Substituída no escopo de LLM por D46: `AnthropicLLMAdapter` e `LLMPort` foram substituídos pelo runtime nativo LangChain `LanguageRuntime` / `LanguageModelFactory`.)*
 - **Contexto:** pedido de "rodar com as APIs conectadas"; Steps 8 (montagem) e 9
   (distribuição) não têm API única e seguem mock. O caminho live de LLM será via gateway.
 - **Decisão:** construídos via subagentes Sonnet (Opus coordena — D12), em escopos de
@@ -158,6 +160,7 @@ Datas absolutas. Apendar novas decisões ao final.
   ambiente + flip em `providers.yaml`. Video real (Replicate, D14) já existia.
 
 ### D19 — Vercel AI Gateway só para o LLMPort nesta rodada
+*(Substituída por D46: o tráfego LLM é roteado nativamente pelo `LanguageRuntime` usando `ChatOpenAI`/`ChatAnthropic` através do `LanguageModelFactory`.)*
 - **Contexto:** o LLMPort (Steps 1 e 2) já usa `AnthropicLLMAdapter`; era preciso ativar
   Vercel AI Gateway sem mexer na topologia do grafo nem expandir o escopo para creator,
   video ou judge.
@@ -361,6 +364,7 @@ Datas absolutas. Apendar novas decisões ao final.
 ## 2026-07-14
 
 ### D29 — Migração incremental para agents executions sobre a camada de tools
+*(Substituída no escopo de LLM e agent loops por D46: LangChain nativo em `LanguageRuntime` com `create_agent` + `ToolStrategy`. `CompositeAdapter` é restrito a domain/media-only.)*
 - **Contexto:** o motor atual usa LangGraph como runtime de orquestração, com fan-out,
   conditional edges, interrupts humanos, checkpointer e resume. A base já foi preparada
   com a camada `orchestrator.tools`: nodes chamam tools tipadas, as tools validam shape
@@ -420,6 +424,7 @@ Datas absolutas. Apendar novas decisões ao final.
 ## 2026-07-15
 
 ### D31 — Execução agentic real via adapter LLM gateway-nativo (Fase 7 do D29)
+*(Substituída por D46: o loop agentic customizado foi substituído pelo runtime nativo LangChain `LanguageRuntime`.)*
 - **Contexto:** a Fase 7 do D29 (ADR `docs/ADR-D31-agentic-execution.md`) introduz o loop
   agentic *critique → refine* bounded em `concepts`/`scripts`, com o brain no adapter LLM
   via `AgentPort.run_stage_agent` e `revision` como canal genérico de refino. O backend
@@ -441,6 +446,7 @@ Datas absolutas. Apendar novas decisões ao final.
   `llm: vercel_gateway_llm` passa a resolver o adapter gateway-nativo.
 
 ### D32 — Loop de tool-calling real (substitui o wrapper critique→refine bounded)
+*(Substituída por D46: substituído por `create_agent` + `ToolStrategy` em `LanguageRuntime`.)*
 - **Contexto:** o D31 entregou um wrapper agentic *fixo* de 2 passos (draft → critique →
   refine ×1): o modelo só devolvia uma diretiva de texto ou `APPROVE`, sem receber schemas
   de tools nem escolher tools. O D29 marcou "tool-calling real / live-by-default agents"
@@ -466,6 +472,7 @@ Datas absolutas. Apendar novas decisões ao final.
   fora de escopo (Fase 2); streaming e judge proxy, fora (Fase 3).
 
 ### D33 — Stage `video` agentic: revision apendada, contabilidade de takes e budget por stage
+*(Substituída por D38 e D46: mídia e vídeo não usam loop de agentes; apenas `concepts`, `scripts` e `creator_profiles` usam `create_agent` com `ToolStrategy`.)*
 - **Contexto:** o D32 entregou o loop de tool-calling real, mas restrito a `concepts`/
   `scripts` — `_AGENT_STAGES` bloqueava mídia e o D29 exigia ADR próprio para liberá-la.
   Mídia é onde o agente pode agregar mais (reagir a uma take ruim ou a uma falha do
@@ -506,6 +513,7 @@ Datas absolutas. Apendar novas decisões ao final.
   próprio; multi-tool por stage segue YAGNI (nenhum stage tem 2 tools legítimas).
 
 ### D34 — Streaming de tokens no GatewayLLMAdapter (SSE)
+*(Substituída por D46: streaming e callbacks são integrados diretamente pelo runtime LangChain).*
 - **Contexto:** o D31 deixou streaming de fora e só o `AnthropicLLMAdapter` emitia tokens
   (via `messages.stream` do SDK). Mas o adapter LLM **default do perfil live** é o
   `GatewayLLMAdapter` — ou seja, na prática o dashboard nunca via token nenhum.
@@ -875,6 +883,75 @@ REST/SSE e adapters de mídia permanecem preservados. Detalhes e matriz completa
   nem quota. O ambiente de desenvolvimento (`DEFAULT_DEV_QUOTAS` e `./scripts/dev-local image-quota`)
   ganha suporte nativo ao bucket `openai_image_units`. Execuções duráveis exigem opt-in
   explícito via `ORCH_ENABLE_PAID_ADAPTERS=true` e `PostgresEffectLedger`.
+
+## 2026-08-17
+
+### D49 — Caracterização de paridade do SDK ElevenLabs e decisão arquitetural
+
+- **Contexto:** A issue `#7` avaliou a viabilidade de migrar as operações de voz
+  (Voice Design, create/finalize, TTS, list voices e reconciliação) para o SDK oficial
+  `AsyncElevenLabs` em vez da implementação REST atual baseada em `httpx.AsyncClient`.
+- **Matriz de paridade executável:**
+  1. *Voice Design (`/v1/text-to-voice/design`):* REST permite parsing direto de `previews`,
+     validação estrita de áudio base64 e hashing determinístico de descrição com modelo
+     `eleven_ttv_v3`. SDK oferece método equivalente, mas tipagem não agrega ganhos
+     ao contrato já encapsulado em `CreatorVoiceSpec` / `VoiceDesignBatch`.
+  2. *Create/Finalize Voice (`/v1/text-to-voice`):* REST usa nome determinístico
+     `ugc-{org}-{creator}-{hash}` e descrição estática `FINALIZED_VOICE_DESCRIPTION`.
+     SDK envia exatamente o mesmo payload JSON.
+  3. *TTS / Voiceover (`/v1/text-to-speech/{voice_id}`):* REST consome o corpo binário direto
+     (`response.content`), codifica em data URI e calcula custo estimado por caracteres
+     com `cost_source=estimate`. SDK retorna stream assíncrono que exige acumulação em buffer.
+  4. *List Voices & Reconciliação (`/v1/voices`):* REST filtra por nome exato e exige
+     correspondência única para resolver ambiguidades pós-envio.
+  5. *Retry e Timeouts:* REST utiliza `with_transport_retry`, restringindo retries em POST
+     a erros pré-envio (`ConnectTimeout`, `ConnectError`, `PoolTimeout`) e 429 (throttle),
+     falhando imediatamente em 5xx ou pós-envio para proteger o `PostgresEffectLedger`
+     contra dupla cobrança. O SDK oficial não oferece esse particionamento fino de
+     transporte por padrão.
+  6. *Test doubles e isolamento offline:* REST usa `httpx.MockTransport` de forma transparente
+     sem bibliotecas externas e sem chamadas de rede live.
+- **Decisão HITL:** **Manter o adapter REST atual (`httpx.AsyncClient`)** e **não migrar para o SDK**.
+  - *Justificativa:* O REST atual oferece controle cirúrgico sobre retries e idempotência
+    de efeitos pagos, zero dependências externas adicionais no `pyproject.toml`, total
+    testabilidade offline e paridade completa comprovada pela suíte `test_elevenlabs_sdk_parity.py`.
+- **Consequência para a Issue #12:** Como a decisão HITL é manter REST, a issue `#12`
+  (`[P2][AFK] Migrar operações aprovadas para AsyncElevenLabs`) torna-se **não aplicável**
+  e deve ser encerrada sem alteração de código, conforme previsto em seu contrato de execução.
+- **Rollback:** Se uma futura versão do SDK trouxer recursos exclusivos indispensáveis, o
+  isolamento de `VoicePort` / `ElevenLabsVoiceDesignAdapter` permite a substituição do
+  transporte sem impactos no grafo LangGraph ou no ledger.
+
+### D50 — Classificação e plano de depreciação de aliases, adapters e integrações legadas
+
+- **Contexto:** o motor de orquestração acumulou aliases históricos de creator (`creator_real_vercel`,
+  `creator_real_replicate`, `creator_vercel_replicate_voice`, `creator_real`), adapters não utilizados
+  (`TopazUpscaleAdapter`, `ReplicateUpscaleAdapter`), adapters e bridges experimentais Node
+  (`VercelGatewayVideoAdapter`, `VercelSeedanceAssemblyAdapter`, `scripts/vercel_generate_video.mjs`,
+  dependências root Node) e protocolos legados (`JudgePort`). Antes da remoção (Issue #16), é necessário
+  inventário formal e classificação para evitar regressão operacional.
+- **Decisão e Classificação:**
+  - **`supported` (Canônico / Live / Staging / Mock):**
+    - Creator: `creator_vercel_elevenlabs_design` (OpenAI Image via Vercel AI Gateway + ElevenLabs Voice Design direto).
+    - Video: `replicate` (P-Video/LTX + LatentSync 2 estágios durável) e `mock`.
+    - Assembly: `ffmpeg_assembly` (FFmpeg local) e `mock`.
+    - Upscale: `passthrough_upscale`.
+    - Language: `vercel_gateway_llm` e `mock`.
+  - **`compatibility` (Mantidos temporariamente com rollback):**
+    - Aliases de creator: `creator_real_vercel`, `creator_real_replicate`, `creator_vercel_replicate_voice`, `creator_real`.
+    - Voice: `ElevenLabsVoiceAdapter` (modo legacy) e `ReplicateVoiceAdapter`.
+    - Language deployments: `anthropic_sdk_gateway`, `anthropic` (a serem centralizados em `LanguageModelFactory` na issue #10).
+    - Dependência `anthropic>=0.40` no `pyproject.toml` (transitiva sob `langchain-anthropic`).
+  - **`dead` (Aprovados para remoção na issue #16):**
+    - `TopazUpscaleAdapter` (`adapters/topaz_upscale.py`) e `ReplicateUpscaleAdapter` (`adapters/replicate_upscale.py`).
+    - `VercelGatewayVideoAdapter` (`adapters/vercel_gateway_video.py`) e `VercelSeedanceAssemblyAdapter` (`adapters/vercel_seedance_assembly.py`).
+    - Bridge script `scripts/vercel_generate_video.mjs`.
+    - Root `package.json`, `package-lock.json` e `node_modules` (o frontend em `front/` é independente e permanece).
+    - Layer de instalação do NodeSource no `Dockerfile`.
+    - `JudgePort` (já removido de produção em D47 e isolado em `orchestrator.evaluation`).
+- **Janela de depreciação e Rollback:** Itens de compatibilidade permanecem até a conclusão das
+  issues #10, #14, #15 e a execução da remoção em fatias na issue #16. Rollback é garantido pela
+  rastreabilidade de commits e histórico Git canônico.
 
 ### D51 — Contratos de prompt e fronteira trusted/untrusted dos agents
 

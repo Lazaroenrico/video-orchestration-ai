@@ -85,7 +85,8 @@ jobs:
       - uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
-      - run: uv sync --all-extras
+      - run: uv lock --check
+      - run: uv sync --frozen --all-extras
       - name: Purge expired media, verify inventory and evaluate alerts
         env:
           DATABASE_URL: ${{ secrets.STAGING_DATABASE_URL }}

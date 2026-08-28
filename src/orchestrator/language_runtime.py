@@ -83,11 +83,159 @@ def serialize_agent_messages(stage: str, inputs: Mapping[str, Any]) -> list[Base
 DEFAULT_GATEWAY_BASE_URL = "https://ai-gateway.vercel.sh/v1"
 DEFAULT_MODEL = "anthropic/claude-opus-4.8"
 _AGENT_STAGES = {"concepts", "scripts", "creator_profiles"}
+_HOOK_STYLES = ["problem", "curiosity", "bold_claim", "emotional", "social_proof"]
+
+
+def _unit(*parts: Any) -> float:
+    """Hash determinístico dos inputs -> float uniforme em [0, 1)."""
+    key = "|".join(str(p) for p in parts)
+    digest = hashlib.sha256(key.encode()).hexdigest()
+    return int(digest[:12], 16) / float(1 << 48)
+
+
+def _mock_structured_submission(stage: str, inputs: dict[str, Any]) -> dict[str, Any]:
+    campaign = inputs.get("campaign")
+    campaign = campaign if isinstance(campaign, dict) else {}
+    if stage == "concepts":
+        count = int(inputs.get("n") or campaign.get("batch_size") or 1)
+        offer = str(campaign.get("offer") or inputs.get("offer") or "the offer")
+        audience = str(campaign.get("audience") or "the audience")
+        return {
+            "proposals": [
+                {
+                    "hook": f"{offer}: angle {index + 1} for {audience}",
+                    "angle": f"Deterministic test angle {index + 1}",
+                    "audience_problem": f"A relevant problem for {audience}",
+                    "product_mechanism": f"The supplied mechanism for {offer}",
+                    "evidence_basis": "cold_test",
+                    "format": "direct-to-camera",
+                    "hook_style": _HOOK_STYLES[index % len(_HOOK_STYLES)],
+                }
+                for index in range(count)
+            ]
+        }
+    if stage == "scripts":
+        concept = inputs.get("concept")
+        concept = concept if isinstance(concept, dict) else {}
+        hook = str(concept.get("hook") or "I changed one part of my routine.")
+        beats = [
+            {"section": "hook", "text": hook, "seconds": 3},
+            {
+                "section": "body",
+                "text": (
+                    "Here is how the approved product fits naturally into a simple routine "
+                    "while addressing the audience problem with a clear, honest, practical "
+                    "and easy-to-follow demonstration for everyday use."
+                ),
+                "seconds": 8,
+            },
+            {"section": "cta", "text": "See the approved offer.", "seconds": 3},
+        ]
+        return {
+            "draft": {
+                "spoken_beats": beats,
+                "visual_beats": [
+                    "Creator addresses camera",
+                    "Approved product demonstration",
+                ],
+                "on_screen_text": [hook[:80]],
+                "call_to_action": "See the approved offer.",
+                "estimated_duration": sum(beat["seconds"] for beat in beats),
+            }
+        }
+    if stage == "creator_profiles":
+        concept_ids = [str(value) for value in inputs.get("concept_ids") or []]
+        return {
+            "creators": [
+                {
+                    "archetype": "Warm routine guide",
+                    "visual_brief": "Adult creator in a bright, realistic home setting.",
+                    "voice_brief": "Warm, clear, conversational delivery.",
+                    "performance_style": "Calm, practical, and credible.",
+                    "exclusions": ["medical authority", "guaranteed outcomes"],
+                },
+                {
+                    "archetype": "Direct product tester",
+                    "visual_brief": "Adult creator at a clean vanity with the real product.",
+                    "voice_brief": "Direct, energetic, natural delivery.",
+                    "performance_style": "Concise demonstration with visible product handling.",
+                    "exclusions": ["medical authority", "guaranteed outcomes"],
+                },
+            ],
+            "assignments": [
+                {"concept_id": concept_id, "creator_index": index % 2}
+                for index, concept_id in enumerate(concept_ids)
+            ],
+        }
+    raise ValueError(f"unsupported terminal mock stage: {stage}")
+
+
+def _mock_direct_generate_concepts(
+    *,
+    offer: str,
+    n: int,
+    seed: str,
+    bias: list[str] | None = None,
+    revision: str | None = None,
+    persona: str | None = None,
+) -> list[dict[str, Any]]:
+    bias_styles = [b for b in (bias or []) if b in _HOOK_STYLES]
+    bias_strength = 0.6
+    concepts: list[dict[str, Any]] = []
+    for i in range(n):
+        persona_part = (f"persona:{persona}",) if persona else ()
+        if revision:
+            style_parts: tuple[Any, ...] = (seed, offer, *persona_part, f"rev:{revision}", i)
+            tag_key = "|".join(str(part) for part in style_parts)
+        else:
+            style_parts = (seed, offer, *persona_part, i)
+            tag_key = "|".join(str(part) for part in style_parts)
+        style = _HOOK_STYLES[int(_unit(*style_parts) * len(_HOOK_STYLES))]
+        if bias_styles and _unit("bias", seed, offer, i) < bias_strength:
+            style = bias_styles[0]
+        tag = hashlib.sha256(tag_key.encode()).hexdigest()[:8]
+        concepts.append(
+            {
+                "id": f"concept-{tag}",
+                "offer": offer,
+                "hook": f"hook[{style}]-{tag}",
+                "angle": style,
+                "hook_style": style,
+                "format": ["talking_head", "demo", "reaction"][i % 3],
+            }
+        )
+    return concepts
+
+
+def _mock_direct_write_script(
+    *,
+    concept: dict[str, Any],
+    creator_ref: str,
+    platform: str,
+    revision: str | None = None,
+    persona: str | None = None,
+) -> str:
+    hook = str(concept.get("hook") or "hook")
+    pacing = "fast" if platform.lower() == "tiktok" else "medium"
+    script = (
+        f"HOOK: {hook} Se você não conhece precisa ver isso.\n"
+        f"BODY: ({platform} / pacing={pacing}) creator={creator_ref} fala sobre "
+        f"{concept.get('offer', 'o produto')} com resultados reais comprovados no dia a dia.\n"
+        f"CTA: confere o link e garante o seu hoje mesmo."
+    )
+    if persona:
+        tag = hashlib.sha256(persona.encode()).hexdigest()[:8]
+        script += f"\nPERSONA_CONTEXT[{tag}]: {persona}"
+    if revision:
+        tag = hashlib.sha256(f"{hook}|{revision}".encode()).hexdigest()[:8]
+        script += f"\nREVISED[{tag}]: {revision}"
+    return script
 
 
 class ConceptAgentOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     proposals: list[ConceptSubmission]
+
 
 
 class ScriptAgentOutput(BaseModel):
@@ -225,12 +373,187 @@ def agent_output_schema(stage: str) -> dict[str, Any]:
     return agent_output_model(stage).model_json_schema()
 
 
+class _FactoryMethod:
+    """Descriptor that dispatches factory methods for both class and instance calls."""
+
+    def __init__(self, method_name: str) -> None:
+        self.method_name = method_name
+
+    def __get__(self, instance: Any, owner: type) -> Any:
+        impl = getattr(owner, f"_{self.method_name}")
+        if instance is None:
+            def class_call(provider: str, *args: Any, **kwargs: Any) -> Any:
+                return impl(provider, *args, **kwargs)
+
+            return class_call
+
+        def instance_call(override_or_model: str | None = None, **kwargs: Any) -> Any:
+            keyword = "model" if self.method_name == "create_model" else "override"
+            if keyword in kwargs:
+                if override_or_model is not None:
+                    raise TypeError(
+                        f"{self.method_name}() got multiple values for argument "
+                        f"{keyword!r}"
+                    )
+                override_or_model = kwargs.pop(keyword)
+            return impl(instance.provider, override_or_model, settings=instance.settings, **kwargs)
+
+        return instance_call
+
+
+class LanguageModelFactory:
+    """Centralized factory for supported LangChain chat model deployments."""
+
+    SUPPORTED_PROVIDERS: frozenset[str] = frozenset(
+        {"mock", "vercel_gateway_llm", "anthropic", "anthropic_sdk_gateway"}
+    )
+
+    def __init__(self, provider: str, settings: Mapping[str, Any] | None = None) -> None:
+        if provider not in self.SUPPORTED_PROVIDERS:
+            raise KeyError(f"language provider desconhecido: {provider!r}")
+        self.provider = provider
+        self.settings = dict(settings or {})
+
+    resolve_model_name = _FactoryMethod("resolve_model_name")
+    create_model = _FactoryMethod("create_model")
+
+    @classmethod
+    def resolve_name(
+        cls,
+        provider: str,
+        override: str | None = None,
+        settings: Mapping[str, Any] | None = None,
+    ) -> str:
+        return cls._resolve_model_name(provider, override=override, settings=settings)
+
+    @classmethod
+    def create(
+        cls,
+        provider: str,
+        model: str | None = None,
+        settings: Mapping[str, Any] | None = None,
+        max_tokens: int | None = None,
+    ) -> BaseChatModel:
+        return cls._create_model(
+            provider, model=model, settings=settings, max_tokens=max_tokens
+        )
+
+    @classmethod
+    def _resolve_model_name(
+        cls,
+        provider: str,
+        override: str | None = None,
+        settings: Mapping[str, Any] | None = None,
+    ) -> str:
+        if provider not in cls.SUPPORTED_PROVIDERS:
+            raise KeyError(f"language provider desconhecido: {provider!r}")
+        if provider == "mock":
+            default = "mock"
+        else:
+            default = "claude-opus-4-8" if provider == "anthropic" else DEFAULT_MODEL
+        cfg = settings or {}
+        gateway_model = (
+            os.environ.get("AI_GATEWAY_LLM_MODEL")
+            if provider in {"vercel_gateway_llm", "anthropic_sdk_gateway"}
+            else None
+        )
+        return str(
+            override
+            or gateway_model
+            or cfg.get("llm_model")
+            or cfg.get("model")
+            or default
+        )
+
+    @classmethod
+    def _create_model(
+        cls,
+        provider: str,
+        model: str | None = None,
+        settings: Mapping[str, Any] | None = None,
+        max_tokens: int | None = None,
+    ) -> BaseChatModel:
+        if provider not in cls.SUPPORTED_PROVIDERS:
+            raise KeyError(f"language provider desconhecido: {provider!r}")
+
+        resolved_model = cls._resolve_model_name(provider, override=model, settings=settings)
+
+        if provider == "mock":
+            return MockChatModel(model=resolved_model, max_tokens=max_tokens)
+
+        _require_trace_redaction()
+
+        from langchain.chat_models import init_chat_model
+
+        if provider == "vercel_gateway_llm":
+            token = os.environ.get("AI_GATEWAY_API_KEY") or os.environ.get("VERCEL_OIDC_TOKEN")
+            if not token:
+                raise RuntimeError(
+                    "AI_GATEWAY_API_KEY or VERCEL_OIDC_TOKEN is required for vercel_gateway_llm"
+                )
+            base_url = _gateway_url(os.environ.get("AI_GATEWAY_BASE_URL"))
+            kwargs: dict[str, Any] = {
+                "model_provider": "openai",
+                "api_key": token,
+                "base_url": base_url,
+                "timeout": 120,
+                "max_retries": 3,
+            }
+            if max_tokens is not None:
+                kwargs["max_tokens"] = max_tokens
+            return init_chat_model(
+                resolved_model,
+                **kwargs,
+            )
+
+        if provider == "anthropic":
+            token = os.environ.get("ANTHROPIC_API_KEY")
+            if not token:
+                raise RuntimeError("ANTHROPIC_API_KEY is required for anthropic")
+            kwargs = {
+                "model_provider": "anthropic",
+                "api_key": token,
+                "timeout": 120,
+                "max_retries": 3,
+            }
+            if max_tokens is not None:
+                kwargs["max_tokens"] = max_tokens
+            return init_chat_model(
+                resolved_model,
+                **kwargs,
+            )
+
+        if provider == "anthropic_sdk_gateway":
+            token = os.environ.get("AI_GATEWAY_API_KEY") or os.environ.get("VERCEL_OIDC_TOKEN")
+            if not token:
+                raise RuntimeError(
+                    "AI_GATEWAY_API_KEY or VERCEL_OIDC_TOKEN is required for anthropic_sdk_gateway"
+                )
+            base_url = _anthropic_gateway_url(os.environ.get("AI_GATEWAY_BASE_URL"))
+            kwargs = {
+                "model_provider": "anthropic",
+                "api_key": token,
+                "base_url": base_url,
+                "timeout": 120,
+                "max_retries": 4,
+            }
+            if max_tokens is not None:
+                kwargs["max_tokens"] = max_tokens
+            return init_chat_model(
+                resolved_model,
+                **kwargs,
+            )
+
+        raise KeyError(f"language provider desconhecido: {provider!r}")
+
+
 class LanguageRuntime:
     """Cached provider models and stateless native creative agents for one run."""
 
     def __init__(self, provider: str, settings: Mapping[str, Any] | None = None) -> None:
         self.provider = provider
         self.settings = dict(settings or {})
+        self.factory = LanguageModelFactory(provider, settings)
         self._models: dict[Any, Any] = {}
         self._agents: dict[tuple[str, str, str, int, int | None, int | None], Any] = {}
 
@@ -241,22 +564,7 @@ class LanguageRuntime:
         return cls(provider, pipeline)
 
     def _model_name(self, override: str | None = None) -> str:
-        if self.provider == "mock":
-            default = "mock"
-        else:
-            default = "claude-opus-4-8" if self.provider == "anthropic" else DEFAULT_MODEL
-        gateway_model = (
-            os.environ.get("AI_GATEWAY_LLM_MODEL")
-            if self.provider in {"vercel_gateway_llm", "anthropic_sdk_gateway"}
-            else None
-        )
-        return str(
-            override
-            or gateway_model
-            or self.settings.get("llm_model")
-            or self.settings.get("model")
-            or default
-        )
+        return self.factory.resolve_model_name(override)
 
     def model_for(
         self, stage: str, model: str | None = None, max_tokens: int | None = None
@@ -273,63 +581,7 @@ class LanguageRuntime:
         return self._models[key]
 
     def _build_model(self, model: str, max_tokens: int | None = None) -> Any:
-        provider = self.provider
-        if provider == "mock":
-            return MockChatModel(model="mock", max_tokens=max_tokens)
-
-        _require_trace_redaction()
-        if provider == "vercel_gateway_llm":
-            from langchain_openai import ChatOpenAI
-
-            token = os.environ.get("AI_GATEWAY_API_KEY") or os.environ.get("VERCEL_OIDC_TOKEN")
-            if not token:
-                raise RuntimeError(
-                    "AI_GATEWAY_API_KEY or VERCEL_OIDC_TOKEN is required for vercel_gateway_llm"
-                )
-            kwargs: dict[str, Any] = {
-                "model": model,
-                "api_key": token,
-                "base_url": _gateway_url(os.environ.get("AI_GATEWAY_BASE_URL")),
-                "timeout": 120,
-                "max_retries": 3,
-            }
-            if max_tokens is not None:
-                kwargs["max_tokens"] = max_tokens
-            return ChatOpenAI(**kwargs)
-        if provider == "anthropic":
-            from langchain_anthropic import ChatAnthropic
-
-            token = os.environ.get("ANTHROPIC_API_KEY")
-            if not token:
-                raise RuntimeError("ANTHROPIC_API_KEY is required for anthropic")
-            kwargs: dict[str, Any] = {
-                "model": model,
-                "api_key": token,
-                "timeout": 120,
-                "max_retries": 3,
-            }
-            if max_tokens is not None:
-                kwargs["max_tokens"] = max_tokens
-            return ChatAnthropic(**kwargs)
-        if provider == "anthropic_sdk_gateway":
-            from langchain_anthropic import ChatAnthropic
-
-            token = os.environ.get("AI_GATEWAY_API_KEY") or os.environ.get("VERCEL_OIDC_TOKEN")
-            if not token:
-                raise RuntimeError(
-                    "AI_GATEWAY_API_KEY or VERCEL_OIDC_TOKEN is required for anthropic_sdk_gateway"
-                )
-            kwargs: dict[str, Any] = {
-                "model": model,
-                "api_key": token,
-                "base_url": _anthropic_gateway_url(os.environ.get("AI_GATEWAY_BASE_URL")),
-                "timeout": 120,
-                "max_retries": 4,
-            }
-            if max_tokens is not None:
-                kwargs["max_tokens"] = max_tokens
-            return ChatAnthropic(**kwargs)
-        raise KeyError(f"language provider desconhecido: {provider!r}")
+        return self.factory.create_model(model, max_tokens=max_tokens)
 
     def _agent_budgets(self, stage: str) -> tuple[int, int | None]:
         raw = self.settings.get("agent", {})
@@ -426,15 +678,14 @@ class LanguageRuntime:
             payload["draft"]["estimated_duration"] = sum(beat["seconds"] for beat in beats)
         return agent_output_model(stage).model_validate(payload)
 
-    async def run_agent(
+    async def generate_structured(
         self,
         *,
         stage: str,
         inputs: dict[str, Any],
         system_prompt: str | None = None,
         model: str | None = None,
-        materialize: Any,
-    ) -> Any:
+    ) -> BaseModel:
         if stage not in _AGENT_STAGES:
             raise ValueError(
                 f"native creative agents are only supported for: {sorted(_AGENT_STAGES)}"
@@ -443,33 +694,85 @@ class LanguageRuntime:
             structured = self._mock_output(stage, inputs)
         else:
             agent = self.agent_for(stage, model=model, system_prompt=system_prompt)
-            result = await agent.ainvoke({"messages": serialize_agent_messages(stage, inputs)})
-            structured = result.get("structured_response") if isinstance(result, dict) else None
-            if structured is None:
+            # Direct runtime callers may omit the count; use the server-owned
+            # single-concept default for the trusted envelope.  Pipeline nodes
+            # always provide their configured batch size explicitly.
+            agent_inputs = dict(inputs)
+            if stage == "concepts" and "n" not in agent_inputs:
+                agent_inputs["n"] = 1
+            result = await agent.ainvoke(
+                {"messages": serialize_agent_messages(stage, agent_inputs)}
+            )
+            raw = result.get("structured_response") if isinstance(result, dict) else None
+            if raw is None:
                 raise RuntimeError(f"agent for stage {stage!r} did not return structured_response")
-            structured = agent_output_model(stage).model_validate(structured)
-        args = structured.model_dump(mode="json")
-        output = await materialize(args)
+            if isinstance(raw, BaseModel):
+                structured = raw
+            elif isinstance(raw, dict):
+                structured = agent_output_model(stage).model_validate(raw)
+            else:
+                raise RuntimeError(f"agent for stage {stage!r} returned unexpected structured_response type")
         add_trace_metadata(agent_backend="langchain", stage=stage, provider=self.provider)
-        return output
+        return structured
 
-    async def generate_concepts(self, **kwargs: Any) -> list[dict[str, Any]]:
+    async def generate_concepts(
+        self,
+        *,
+        offer: str = "the offer",
+        n: int = 1,
+        seed: str = "seed",
+        bias: list[str] | None = None,
+        revision: str | None = None,
+        persona: str | None = None,
+        **kwargs: Any,
+    ) -> list[dict[str, Any]]:
         if self.provider == "mock":
-            payload = self._mock_output("concepts", kwargs)
-            return [proposal.model_dump(mode="json") for proposal in payload.proposals]
+            resolved_offer = str(kwargs.get("offer") or offer)
+            resolved_n = int(kwargs.get("n") or n)
+            resolved_seed = str(kwargs.get("seed") or seed)
+            resolved_bias = kwargs.get("bias", bias)
+            resolved_revision = kwargs.get("revision", revision)
+            resolved_persona = kwargs.get("persona", persona)
+            return _mock_direct_generate_concepts(
+                offer=resolved_offer,
+                n=resolved_n,
+                seed=resolved_seed,
+                bias=resolved_bias,
+                revision=resolved_revision,
+                persona=resolved_persona,
+            )
         raise RuntimeError("direct concept generation is only available for the mock runtime")
 
-    async def write_script(self, **kwargs: Any) -> str:
+    async def write_script(
+        self,
+        *,
+        concept: dict[str, Any] | None = None,
+        creator_ref: str = "creator",
+        platform: str = "tiktok",
+        revision: str | None = None,
+        persona: str | None = None,
+        **kwargs: Any,
+    ) -> str:
         if self.provider == "mock":
-            payload = self._mock_output("scripts", kwargs)
-            return "\n".join(
-                f"{beat.section.upper()}: {beat.text}" for beat in payload.draft.spoken_beats
+            resolved_concept = kwargs.get("concept") or concept or {}
+            resolved_creator_ref = str(kwargs.get("creator_ref") or creator_ref)
+            resolved_platform = str(kwargs.get("platform") or platform)
+            resolved_revision = kwargs.get("revision", revision)
+            resolved_persona = kwargs.get("persona", persona)
+            return _mock_direct_write_script(
+                concept=resolved_concept,
+                creator_ref=resolved_creator_ref,
+                platform=resolved_platform,
+                revision=resolved_revision,
+                persona=resolved_persona,
             )
         raise RuntimeError("direct script generation is only available for the mock runtime")
 
 
+
 __all__ = [
     "LanguageRuntime",
+    "LanguageModelFactory",
     "MockChatModel",
     "ConceptAgentOutput",
     "ScriptAgentOutput",

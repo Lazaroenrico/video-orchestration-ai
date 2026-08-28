@@ -133,14 +133,11 @@ flowchart TD
 ### Instalação Rápida
 
 ```bash
-# 1. Clone o repositório e crie o ambiente virtual
+# 1. Clone o repositório e configure o ambiente sincronizado com o lockfile
 uv venv --python 3.12
-source .venv/bin/activate
+uv sync --frozen --all-extras
 
-# 2. Instale o pacote em modo editável com dependências completas
-uv pip install -e ".[dev,web]"
-
-# 3. Instale dependências e compile o frontend SPA
+# 2. Instale dependências e compile o frontend SPA
 cd front && npm install && npm run build && cd ..
 ```
 

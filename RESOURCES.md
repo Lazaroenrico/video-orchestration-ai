@@ -14,16 +14,18 @@
   Topologia LangGraph: grafo de topo, subgrafo por item, fan-out e gates. Use para: localizar o fluxo real.
 - [src/orchestrator/adapters/base.py](src/orchestrator/adapters/base.py)
   Contratos dos ports e `VoiceProfile`. Use para: entender como providers reais e mock precisam se comportar.
+- [src/orchestrator/language_runtime.py](src/orchestrator/language_runtime.py)
+  `LanguageRuntime` para resolução de modelos de linguagem e execução de agentes criativos nativos LangChain (D46).
 - [src/orchestrator/registry.py](src/orchestrator/registry.py)
-  `CompositeAdapter` e role routing por YAML. Use para: entender como trocar providers sem mexer no grafo.
+  `CompositeAdapter` (domain/media-only) e role routing de mídia/efeitos por YAML. Use para: entender como trocar providers sem mexer no grafo.
 - [src/orchestrator/nodes/stages.py](src/orchestrator/nodes/stages.py)
   Os stages como nodes e a logica de roster, approval, video, QC, assembly e feedback. Use para: diagnosticar comportamento do run.
 - [src/orchestrator/adapters/openai_image.py](src/orchestrator/adapters/openai_image.py)
   Prompt seguro de imagem e GPT Image 2 via Vercel Gateway. Use para: ajustar aparencia do creator.
 - [src/orchestrator/adapters/creator_real.py](src/orchestrator/adapters/creator_real.py)
-  Composicao imagem + upscale + voz e reroll de voz. Use para: entender o nascimento do creator real.
-- [src/orchestrator/adapters/replicate_voice.py](src/orchestrator/adapters/replicate_voice.py)
-  ElevenLabs hospedado no Replicate, campos configuraveis e pools de voz. Use para: diagnosticar voz ausente ou repetida.
+  Composicao imagem + Voice Design e reroll de voz. Use para: entender o nascimento do creator real.
+- [src/orchestrator/adapters/elevenlabs_voice_design.py](src/orchestrator/adapters/elevenlabs_voice_design.py)
+  ElevenLabs Voice Design direto (`eleven_ttv_v3`), previews e finalização determinística.
 - [src/orchestrator/adapters/_throttle.py](src/orchestrator/adapters/_throttle.py)
   Rate limiter global do Replicate. Use para: entender e ajustar 429/rate limit.
 

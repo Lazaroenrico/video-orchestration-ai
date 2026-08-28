@@ -1,6 +1,8 @@
 """Live config must not route production roles to mock adapters."""
 from __future__ import annotations
 
+import pytest
+
 from orchestrator.adapters.elevenlabs_voice_design import ElevenLabsVoiceDesignAdapter
 from orchestrator.adapters.ffmpeg_assembly import FfmpegAssemblyAdapter
 from orchestrator.adapters.replicate_video import ReplicateVideoAdapter
@@ -72,8 +74,10 @@ def test_live_runtime_uses_replicate_for_clips_and_ffmpeg_for_assembly(monkeypat
 
 
 def test_live_config_activates_agent_mode_only_on_creative_stages():
-    """Media/QC/assembly remain deterministic adapters outside prompt authority."""
+    """Media/QC/assembly remain deterministic adapters outside prompt authority and catalog."""
     catalog = load_agent_catalog("config")
+
+    assert set(catalog.as_dict()["stages"].keys()) == {"concepts", "scripts", "creator_profiles"}
 
     for stage in ("concepts", "scripts", "creator_profiles"):
         spec = catalog.stage(stage)
@@ -91,9 +95,8 @@ def test_live_config_activates_agent_mode_only_on_creative_stages():
         "assembly",
         "upscale",
     ):
-        spec = catalog.stage(stage)
-        assert spec.executor == "tool", f"{stage} deve permanecer em modo tool"
-        assert spec.agent_enabled is False
+        with pytest.raises(KeyError):
+            catalog.stage(stage)
 
 
 def test_live_config_allows_one_bounded_script_correction():

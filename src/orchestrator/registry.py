@@ -30,12 +30,6 @@ from orchestrator.adapters.integrity_qc import build_integrity_qc_adapter
 from orchestrator.adapters.mock import MockAdapter
 from orchestrator.adapters.passthrough_upscale import build_passthrough_upscale_adapter
 from orchestrator.adapters.replicate_video import ReplicateVideoAdapter
-from orchestrator.adapters.vercel_gateway_video import (
-    build_vercel_gateway_video_adapter,
-)
-from orchestrator.adapters.vercel_seedance_assembly import (
-    build_vercel_seedance_assembly_adapter,
-)
 from orchestrator.tracing import traced
 
 # Papéis que o grafo exerce (cada método de node mapeia para um destes).
@@ -95,8 +89,6 @@ _ADAPTERS: dict[str, Callable[[dict[str, Any]], Any]] = {
     "creator_vercel_elevenlabs_design": build_real_creator_vercel_adapter,
     "integrity_qc": build_integrity_qc_adapter,
     "ffmpeg_assembly": build_ffmpeg_assembly_adapter,
-    "vercel_gateway_video": build_vercel_gateway_video_adapter,
-    "vercel_seedance_assembly": build_vercel_seedance_assembly_adapter,
     "passthrough_upscale": build_passthrough_upscale_adapter,
     "elevenlabs_voice_design": lambda pipeline: ElevenLabsVoiceDesignAdapter(
         design_model=pipeline.get("voice", {}).get("design_model", "eleven_ttv_v3"),

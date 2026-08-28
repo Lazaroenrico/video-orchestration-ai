@@ -37,7 +37,8 @@ jobs:
       - uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
-      - run: uv sync --all-extras
+      - run: uv lock --check
+      - run: uv sync --frozen --all-extras
       - run: >-
           uv run python -m pytest
           --postgresql-host=127.0.0.1
@@ -52,7 +53,8 @@ jobs:
       - uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
-      - run: uv sync --all-extras
+      - run: uv lock --check
+      - run: uv sync --frozen --all-extras
       - run: uv run ruff check src/ tests/
 
   build:

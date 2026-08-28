@@ -87,14 +87,14 @@ def test_env_expansion_applies_to_pipeline_providers_judge_and_agents(tmp_path, 
     )
     _write(
         profile / "agents.yaml",
-        'stages:\n  roster:\n    prompt_version: "${MISSING_PV:-roster-v9}"\n',
+        'stages:\n  concepts:\n    prompt_version: "${MISSING_PV:-concepts-v9}"\n',
     )
 
     assert load_pipeline(str(profile))["voice"]["provider"] == "https://example.invalid/hit"
     assert load_providers(str(profile))["storage"]["backend"] == "local"
     judge = load_judge(str(profile))
     assert judge["gateway"]["url"] == "https://example.invalid/hit"
-    assert load_agent_catalog(str(profile)).stage("roster").prompt_version == "roster-v9"
+    assert load_agent_catalog(str(profile)).stage("concepts").prompt_version == "concepts-v9"
 
 
 def test_profile_without_sibling_base_loads_its_own_yaml_verbatim(tmp_path):

@@ -37,6 +37,7 @@ def _force_mock_providers(monkeypatch):
     # O ambiente do desenvolvedor pode apontar para PostgreSQL real. Testes continuam
     # JSON/SQLite por default; casos de integração optam explicitamente via monkeypatch.
     for key in (
+        "AI_GATEWAY_LLM_MODEL",
         "DATABASE_URL",
         "ORCH_ORGANIZATION_SLUG",
         "ORCH_ORGANIZATION_NAME",
@@ -99,9 +100,12 @@ def adapter(pipeline_cfg):
 
 @pytest.fixture
 def run_config(adapter, pipeline_cfg):
+    from orchestrator.language_runtime import LanguageRuntime
+
     return {
         "configurable": {
             "adapter": adapter,
+            "language_runtime": LanguageRuntime.from_provider("mock", pipeline_cfg),
             "pipeline": pipeline_cfg,
             "run": {"platform": "tiktok"},
         },

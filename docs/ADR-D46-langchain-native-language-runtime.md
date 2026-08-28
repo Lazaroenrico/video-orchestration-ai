@@ -24,8 +24,14 @@ que o SDK acrescenta em `/v1/messages`) e
 de retry; agentes são stateless e sem checkpointer interno.
 
 Os agentes criativos usam `create_agent` + `ToolStrategy` com schemas Pydantic
-produzíveis pelo modelo. IDs, contagens, assignments, provider, budgets e
-segurança permanecem server-owned e a materialização continua em typed tools.
+produzíveis pelo modelo para structured output (`concepts`, `scripts`, `creator_profiles`).
+`ToolStrategy` é estritamente uma estratégia declarativa de formatação de resposta do LangChain,
+não devendo ser confundida com as *action tools* (`src/orchestrator/tools/`).
+As *action tools* são ferramentas de domínio executáveis chamadas pelos nós da pipeline
+para efetuar operações de domínio, persistência em storage, reserva de quotas e
+idempotência no ledger (`execute_paid_effect`).
+
+IDs, contagens, assignments, provider, budgets e segurança permanecem server-owned.
 `parallel_tool_calls` fica desativado e limites de model/tool terminam com erro.
 
 ## Decisões substituídas e preservadas
@@ -34,7 +40,8 @@ As partes aplicáveis de D16–D18, D29, D31, D32 e D34 que definiam transporte,
 ports ou loops próprios de LLM/agentes ficam substituídas por esta decisão. D33
 já havia sido substituída por D38. D7, D8, persistência, mídia/QC/storage/effects
 e seus contratos permanecem preservados. O Judge, `judge.yaml` e cassettes estão
-fora deste corte.
+fora deste corte e foram isolados em `orchestrator.evaluation` por D47. O `CompositeAdapter`
+é estritamente domain/media-only (`creator`, `video`, `qc`, `assembly`, `upscale`).
 
 Não há runtime paralelo nem feature flag de migração. Após a chamada de modelo,
 um resume pode repetir custo se a confirmação não foi persistida; essa é uma

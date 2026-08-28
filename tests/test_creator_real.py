@@ -6,9 +6,12 @@ Os handlers validam método, rota e headers antes de retornar respostas mock.
 from __future__ import annotations
 
 import json
+from typing import Any
 
 import httpx
+import openai
 import pytest
+from openai import AsyncOpenAI
 
 from orchestrator import media_store
 from orchestrator.adapters.base import VoiceProfile
@@ -23,7 +26,6 @@ from orchestrator.adapters.openai_image import (
     build_openai_image_vercel_adapter,
 )
 from orchestrator.adapters.replicate_voice import ReplicateVoiceAdapter
-from orchestrator.adapters.topaz_upscale import TopazUpscaleAdapter
 from orchestrator.graph.state import Artifact, Item
 
 # ---------------------------------------------------------------------------
@@ -31,12 +33,10 @@ from orchestrator.graph.state import Artifact, Item
 # ---------------------------------------------------------------------------
 
 BASE_OPENAI = "https://api.openai.com/v1"
-BASE_TOPAZ = "https://api.topazlabs.com/v1"
 BASE_ELEVENLABS = "https://api.elevenlabs.io/v1"
 
 FAKE_TOKEN = "test-token-123"
 FAKE_FACE_URL = "https://cdn.openai.com/face-primary.png"
-FAKE_UPSCALED_URL = "https://cdn.topazlabs.com/face-4k.png"
 FAKE_VOICE_ID = "voice-abc123"
 
 
@@ -55,25 +55,6 @@ def _make_openai_transport(expected_index: int) -> httpx.MockTransport:
         assert body["model"] == "gpt-image-2"
         assert f"creator-{expected_index}" in body["prompt"]
         return httpx.Response(200, json={"data": [{"url": FAKE_FACE_URL}]})
-
-    return httpx.MockTransport(handler)
-
-
-def _make_topaz_transport(expected_image_url: str) -> httpx.MockTransport:
-    """MockTransport que valida a chamada ao endpoint de upscale Topaz."""
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        assert request.method == "POST", f"Esperado POST, recebido {request.method}"
-        assert str(request.url) == f"{BASE_TOPAZ}/upscale", (
-            f"URL incorreta: {request.url}"
-        )
-        assert "Bearer" in request.headers.get("authorization", ""), (
-            "Header Authorization ausente ou inválido"
-        )
-        body = json.loads(request.content)
-        assert body["image_url"] == expected_image_url
-        assert body["scale"] == 4
-        return httpx.Response(200, json={"output_url": FAKE_UPSCALED_URL})
 
     return httpx.MockTransport(handler)
 
@@ -133,7 +114,7 @@ async def test_openai_image_sends_correct_endpoint_and_auth() -> None:
 
 
 async def test_openai_image_raises_on_http_error() -> None:
-    """generate_face deve propagar erro HTTP (raise_for_status)."""
+    """generate_face deve propagar erro HTTP (APIStatusError)."""
 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(401, json={"error": "unauthorized"})
@@ -141,7 +122,7 @@ async def test_openai_image_raises_on_http_error() -> None:
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url=BASE_OPENAI)
     adapter = OpenAIImageAdapter(base_url=BASE_OPENAI, token="bad-key", client=client)
 
-    with pytest.raises(httpx.HTTPStatusError):
+    with pytest.raises(openai.APIStatusError):
         await adapter.generate_face(0)
 
 
@@ -159,7 +140,7 @@ async def test_openai_image_logs_error_body(caplog: pytest.LogCaptureFixture) ->
     adapter = OpenAIImageAdapter(base_url=BASE_OPENAI, token=FAKE_TOKEN, client=client)
 
     with caplog.at_level("ERROR", logger="orchestrator.adapters.openai_image"):
-        with pytest.raises(httpx.HTTPStatusError):
+        with pytest.raises(openai.APIStatusError):
             await adapter.generate_face(0)
 
     assert any("status=400" in r.message and "prompt rejeitado" in r.message for r in caplog.records)
@@ -177,13 +158,12 @@ async def test_openai_image_http_error_includes_response_body() -> None:
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url=BASE_OPENAI)
     adapter = OpenAIImageAdapter(base_url=BASE_OPENAI, token=FAKE_TOKEN, client=client)
 
-    with pytest.raises(httpx.HTTPStatusError) as excinfo:
+    with pytest.raises(openai.APIStatusError) as excinfo:
         await adapter.generate_face(0)
 
     message = str(excinfo.value)
-    assert "openai_image: 400 Bad Request" in message
+    assert "400" in message
     assert "Model 'openai/gpt-image-2' is not available" in message
-    assert "/images/generations" in message
 
 
 async def test_openai_image_wraps_custom_prompt_with_safety_guardrails() -> None:
@@ -228,55 +208,6 @@ async def test_openai_image_safe_prompt_avoids_explicit_sensitive_terms() -> Non
         assert blocked not in prompt
 
 
-# ---------------------------------------------------------------------------
-# Testes isolados: TopazUpscaleAdapter
-# ---------------------------------------------------------------------------
-
-
-async def test_topaz_upscale_returns_output_url() -> None:
-    """upscale deve retornar a string output_url da resposta."""
-    transport = _make_topaz_transport(expected_image_url=FAKE_FACE_URL)
-    client = httpx.AsyncClient(transport=transport, base_url=BASE_TOPAZ)
-    adapter = TopazUpscaleAdapter(base_url=BASE_TOPAZ, token=FAKE_TOKEN, client=client)
-
-    result = await adapter.upscale(FAKE_FACE_URL)
-
-    assert result == FAKE_UPSCALED_URL
-
-
-async def test_topaz_upscale_sends_correct_endpoint_and_auth() -> None:
-    """upscale deve chamar /upscale com Authorization: Bearer e scale=4."""
-    calls: list[httpx.Request] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        calls.append(request)
-        return httpx.Response(200, json={"output_url": "https://topaz.example.com/out.png"})
-
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url=BASE_TOPAZ)
-    adapter = TopazUpscaleAdapter(base_url=BASE_TOPAZ, token="topaz-key", client=client)
-
-    await adapter.upscale("https://source.example.com/img.png")
-
-    assert len(calls) == 1
-    req = calls[0]
-    assert str(req.url).endswith("/upscale")
-    assert req.headers["authorization"] == "Bearer topaz-key"
-    body = json.loads(req.content)
-    assert body["scale"] == 4
-    assert body["image_url"] == "https://source.example.com/img.png"
-
-
-async def test_topaz_upscale_raises_on_http_error() -> None:
-    """upscale deve propagar erro HTTP (raise_for_status)."""
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(500, json={"error": "server error"})
-
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url=BASE_TOPAZ)
-    adapter = TopazUpscaleAdapter(base_url=BASE_TOPAZ, token=FAKE_TOKEN, client=client)
-
-    with pytest.raises(httpx.HTTPStatusError):
-        await adapter.upscale("https://source.example.com/img.png")
 
 
 # ---------------------------------------------------------------------------
@@ -387,19 +318,12 @@ async def test_real_creator_build_creator_returns_correct_shape() -> None:
 
 
 async def test_real_creator_does_not_upscale_the_image() -> None:
-    """A face crua vira ``upscaled_base``: nenhum upscaler de imagem é chamado."""
-    topaz_calls: list[str] = []
-
+    """A face crua vira ``upscaled_base``: a face gerada é preservada sem upscaler de imagem."""
     def openai_handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"data": [{"url": "https://openai.example.com/face.png"}]})
 
     def elevenlabs_handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"voice_id": "v-xyz"})
-
-    class _SpyUpscale:
-        async def upscale(self, image_url: str) -> str:
-            topaz_calls.append(image_url)
-            return "https://topaz.example.com/upscaled.png"
 
     image_adapter = OpenAIImageAdapter(
         base_url=BASE_OPENAI,
@@ -412,11 +336,9 @@ async def test_real_creator_does_not_upscale_the_image() -> None:
         client=httpx.AsyncClient(transport=httpx.MockTransport(elevenlabs_handler), base_url=BASE_ELEVENLABS),
     )
 
-    # Mesmo passando um upscaler (compat), ele NÃO deve ser chamado.
-    creator = RealCreatorAdapter(image=image_adapter, voice=voice_adapter, topaz=_SpyUpscale())
+    creator = RealCreatorAdapter(image=image_adapter, voice=voice_adapter)
     result = await creator.build_creator(0)
 
-    assert topaz_calls == []  # imagem não é upscalada
     assert result["upscaled_base"] == "https://openai.example.com/face.png"
 
 
@@ -429,7 +351,7 @@ async def test_real_creator_infers_voice_profile_from_system_prompt() -> None:
             captured.append(voice_profile)
             return "voice-inferred"
 
-    creator = RealCreatorAdapter(image=image, topaz=_OkUpscale(), voice=_VoiceSpy())
+    creator = RealCreatorAdapter(image=image, voice=_VoiceSpy())
 
     result = await creator.build_creator(
         0, system_prompt="Criadora UGC feminina, tom caloroso e amigavel."
@@ -455,7 +377,7 @@ async def test_real_creator_explicit_voice_profile_overrides_inference() -> None
             return "voice-override"
 
     image = _FakeImage()
-    creator = RealCreatorAdapter(image=image, topaz=_OkUpscale(), voice=_VoiceSpy())
+    creator = RealCreatorAdapter(image=image, voice=_VoiceSpy())
     override = VoiceProfile(preset="male", prompt="Deep and grounded delivery.")
 
     result = await creator.build_creator(
@@ -480,9 +402,6 @@ async def test_real_creator_implements_creator_port_protocol() -> None:
     def openai_handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"data": [{"url": "https://example.com/f.png"}]})
 
-    def topaz_handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={"output_url": "https://example.com/upscaled.png"})
-
     def elevenlabs_handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"voice_id": "v-protocol"})
 
@@ -491,18 +410,13 @@ async def test_real_creator_implements_creator_port_protocol() -> None:
         token=FAKE_TOKEN,
         client=httpx.AsyncClient(transport=httpx.MockTransport(openai_handler), base_url=BASE_OPENAI),
     )
-    topaz_adapter = TopazUpscaleAdapter(
-        base_url=BASE_TOPAZ,
-        token=FAKE_TOKEN,
-        client=httpx.AsyncClient(transport=httpx.MockTransport(topaz_handler), base_url=BASE_TOPAZ),
-    )
     voice_adapter = ElevenLabsVoiceAdapter(
         base_url=BASE_ELEVENLABS,
         token=FAKE_TOKEN,
         client=httpx.AsyncClient(transport=httpx.MockTransport(elevenlabs_handler), base_url=BASE_ELEVENLABS),
     )
 
-    creator = RealCreatorAdapter(image=image_adapter, topaz=topaz_adapter, voice=voice_adapter)
+    creator = RealCreatorAdapter(image=image_adapter, voice=voice_adapter)
     assert isinstance(creator, CreatorPort)
 
 
@@ -511,7 +425,6 @@ async def test_build_real_creator_adapter_factory() -> None:
     adapter = build_real_creator_adapter({})
     assert isinstance(adapter, RealCreatorAdapter)
     assert isinstance(adapter.image, OpenAIImageAdapter)
-    assert adapter.topaz is None  # imagem não é mais upscalada
     assert isinstance(adapter.voice, ElevenLabsVoiceAdapter)
 
 
@@ -542,10 +455,6 @@ class _FakeImage:
     async def generate_face(self, index: int, system_prompt=None, voice_profile=None) -> dict:
         self.voice_profile_seen = voice_profile
         return {"primary": self.primary, "angles": ["front", "3/4", "profile", "smile", "neutral"]}
-
-
-class _OkUpscale:
-    """Upscaler de imagem que NÃO deve mais ser chamado pelo creator (compat)."""
 
     async def upscale(self, image_url: str) -> str:
         return "https://cdn/upscaled.png"
@@ -584,7 +493,7 @@ async def test_build_creator_propagates_when_face_generation_fails() -> None:
         async def generate_face(self, index: int, system_prompt=None, voice_profile=None) -> dict:
             raise RuntimeError("image indisponível")
 
-    creator = RealCreatorAdapter(image=_BoomImage(), topaz=_OkUpscale(), voice=_OkVoice())
+    creator = RealCreatorAdapter(image=_BoomImage(), voice=_OkVoice())
     with pytest.raises(RuntimeError, match="image indisponível"):
         await creator.build_creator(0)
 
@@ -596,7 +505,7 @@ async def test_build_creator_raises_clear_error_when_face_missing_primary() -> N
         async def generate_face(self, index: int, system_prompt=None, voice_profile=None) -> dict:
             return {"angles": ["front", "3/4", "profile", "smile", "neutral"]}
 
-    creator = RealCreatorAdapter(image=_NoPrimaryImage(), topaz=_OkUpscale(), voice=_OkVoice())
+    creator = RealCreatorAdapter(image=_NoPrimaryImage(), voice=_OkVoice())
     with pytest.raises(RuntimeError, match="primary"):
         await creator.build_creator(0)
 
@@ -606,7 +515,7 @@ async def test_build_creator_raises_clear_error_when_face_missing_angles() -> No
         async def generate_face(self, index: int, system_prompt=None, voice_profile=None) -> dict:
             return {"primary": "data:image/png;base64,AAAA"}
 
-    creator = RealCreatorAdapter(image=_NoAnglesImage(), topaz=_OkUpscale(), voice=_OkVoice())
+    creator = RealCreatorAdapter(image=_NoAnglesImage(), voice=_OkVoice())
     with pytest.raises(RuntimeError, match="angles"):
         await creator.build_creator(0)
 
@@ -651,30 +560,9 @@ async def test_openai_image_does_not_retry_non_429_status() -> None:
         base_url=BASE_OPENAI, token=FAKE_TOKEN, client=client, backoff_base=0
     )
 
-    with pytest.raises(httpx.HTTPStatusError):
+    with pytest.raises(openai.APIStatusError):
         await adapter.generate_face(0)
     assert calls == 1
-
-
-async def test_topaz_upscale_retries_on_429_then_succeeds() -> None:
-    calls = 0
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        nonlocal calls
-        calls += 1
-        if calls == 1:
-            return httpx.Response(429, json={"error": "rate limited"})
-        return httpx.Response(200, json={"output_url": FAKE_UPSCALED_URL})
-
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    adapter = TopazUpscaleAdapter(
-        base_url=BASE_TOPAZ, token=FAKE_TOKEN, client=client, backoff_base=0
-    )
-
-    result = await adapter.upscale("https://cdn/face.png")
-
-    assert result == FAKE_UPSCALED_URL
-    assert calls == 2
 
 
 async def test_elevenlabs_create_voice_retries_on_429_then_succeeds() -> None:
@@ -793,6 +681,55 @@ async def test_openai_image_raises_when_no_url_or_b64() -> None:
 
     with pytest.raises(RuntimeError):
         await adapter.generate_face(0)
+
+
+async def test_openai_image_accepts_direct_asyncopenai_client() -> None:
+    """OpenAIImageAdapter deve aceitar uma instância AsyncOpenAI injetada diretamente."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": [{"url": "https://direct.openai.com/img.png"}]})
+
+    http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    openai_client = AsyncOpenAI(api_key="direct-key", base_url=BASE_OPENAI, http_client=http_client)
+    adapter = OpenAIImageAdapter(client=openai_client)
+
+    result = await adapter.generate_face(0)
+
+    assert result["primary"] == "https://direct.openai.com/img.png"
+    assert result["angles"] == ["front", "3/4", "profile", "smile", "neutral"]
+
+
+async def test_openai_image_accepts_fake_client_without_network() -> None:
+    """OpenAIImageAdapter deve aceitar fake client com interface compatível sem usar rede."""
+    class FakeImageObj:
+        def __init__(self, url: str | None = None, b64_json: str | None = None):
+            self.url = url
+            self.b64_json = b64_json
+
+    class FakeResponse:
+        def __init__(self, items):
+            self.data = items
+
+    class FakeImagesResource:
+        def __init__(self, items):
+            self.items = items
+            self.captured_calls: list[dict[str, Any]] = []
+
+        async def generate(self, *, model: str, prompt: str, **kwargs):
+            self.captured_calls.append({"model": model, "prompt": prompt})
+            return FakeResponse(self.items)
+
+    class FakeOpenAIClient:
+        def __init__(self, items):
+            self.images = FakeImagesResource(items)
+
+    fake_client = FakeOpenAIClient([FakeImageObj(b64_json="fakebase64str")])
+    adapter = OpenAIImageAdapter(client=fake_client)
+
+    result = await adapter.generate_face(1)
+
+    assert result["primary"] == "data:image/png;base64,fakebase64str"
+    assert len(fake_client.images.captured_calls) == 1
+    assert "creator-1" in fake_client.images.captured_calls[0]["prompt"]
 
 
 # ---------------------------------------------------------------------------
@@ -958,7 +895,7 @@ class _StubVoiceWithPreview:
 async def test_build_voice_preview_synthesizes_for_opaque_voice_id(tmp_path) -> None:
     from orchestrator.nodes.stages import _build_voice_preview
 
-    adapter = RealCreatorAdapter(image=_FakeImage(), topaz=_OkUpscale(), voice=_StubVoiceWithPreview())
+    adapter = RealCreatorAdapter(image=_FakeImage(), voice=_StubVoiceWithPreview())
     creator = {"id": "creator-0", "voice_id": "voice-opaque-id"}
 
     preview = await _build_voice_preview(adapter, creator, run_id="run-9", media_root=tmp_path)
@@ -971,7 +908,7 @@ async def test_build_voice_preview_reuses_already_downloaded_voice(tmp_path) -> 
     """Voz já persistida como áudio local (Replicate) -> preview é o próprio path local."""
     from orchestrator.nodes.stages import _build_voice_preview
 
-    adapter = RealCreatorAdapter(image=_FakeImage(), topaz=_OkUpscale(), voice=_StubVoiceWithPreview())
+    adapter = RealCreatorAdapter(image=_FakeImage(), voice=_StubVoiceWithPreview())
     creator = {
         "id": "creator-1",
         "voice_id": "/media/run-9/creator-1/voice.wav",
@@ -1019,7 +956,7 @@ class _RerollVoiceSpy:
 async def test_reroll_creator_voice_requests_next_pool_index() -> None:
     """Reroll N desloca o índice do pool em N — voz DIFERENTE, gênero preservado."""
     voice = _RerollVoiceSpy()
-    adapter = RealCreatorAdapter(image=_FakeImage(), topaz=_OkUpscale(), voice=voice)
+    adapter = RealCreatorAdapter(image=_FakeImage(), voice=voice)
     profile = VoiceProfile(preset="female", prompt="warm delivery")
 
     update = await adapter.reroll_creator_voice(
@@ -1049,7 +986,6 @@ async def test_build_creator_preserves_stable_voice_model_reference() -> None:
 
     adapter = RealCreatorAdapter(
         image=_FakeImage(),
-        topaz=_OkUpscale(),
         voice=_VoiceWithStableRef(),
     )
 
@@ -1075,7 +1011,6 @@ async def test_real_creator_delegates_full_voiceover_to_voice_adapter() -> None:
 
     adapter = RealCreatorAdapter(
         image=_FakeImage(),
-        topaz=_OkUpscale(),
         voice=_Voice(),
     )
 
@@ -1092,7 +1027,6 @@ async def test_real_creator_rejects_full_voiceover_when_adapter_lacks_it() -> No
 
     adapter = RealCreatorAdapter(
         image=_FakeImage(),
-        topaz=_OkUpscale(),
         voice=_PreviewOnlyVoice(),
     )
 
@@ -1106,7 +1040,6 @@ async def test_real_creator_rejects_full_voiceover_when_adapter_lacks_it() -> No
 async def test_real_creator_builds_image_when_voice_has_no_legacy_create_method() -> None:
     adapter = RealCreatorAdapter(
         image=_FakeImage(),
-        topaz=_OkUpscale(),
         voice=object(),
     )
 
@@ -1176,7 +1109,7 @@ async def test_persist_creator_media_does_not_replace_voice_model_reference(tmp_
 
 async def test_reroll_creator_voice_shifts_again_on_second_reroll() -> None:
     voice = _RerollVoiceSpy()
-    adapter = RealCreatorAdapter(image=_FakeImage(), topaz=_OkUpscale(), voice=voice)
+    adapter = RealCreatorAdapter(image=_FakeImage(), voice=voice)
 
     await adapter.reroll_creator_voice(
         creator_id="creator-0", index=0, reroll_count=2,
@@ -1192,13 +1125,13 @@ async def test_reroll_creator_voice_shifts_again_on_second_reroll() -> None:
 
 
 def _patch_own_client(monkeypatch, module, transport: httpx.MockTransport, base_url: str):
-    # module.httpx é o módulo global compartilhado; captura o construtor real antes
-    # de patchar para não recursar quando a fábrica criar o client de teste.
-    real_async_client = httpx.AsyncClient
-    monkeypatch.setattr(
-        module.httpx, "AsyncClient",
-        lambda *a, **k: real_async_client(transport=transport, base_url=base_url),
-    )
+    class _PatchedAsyncClient(httpx.AsyncClient):
+        def __init__(self, *args, **kwargs):
+            kwargs["transport"] = transport
+            kwargs.setdefault("base_url", base_url)
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(module.httpx, "AsyncClient", _PatchedAsyncClient)
 
 
 async def test_openai_generate_face_uses_own_client_and_gender_clause(monkeypatch):
@@ -1210,17 +1143,6 @@ async def test_openai_generate_face_uses_own_client_and_gender_clause(monkeypatc
     result = await adapter.generate_face(1, voice_profile=VoiceProfile(preset="female"))
 
     assert result["primary"] == FAKE_FACE_URL
-
-
-async def test_topaz_upscale_uses_own_client(monkeypatch):
-    import orchestrator.adapters.topaz_upscale as topaz_upscale
-
-    _patch_own_client(monkeypatch, topaz_upscale, _make_topaz_transport(FAKE_FACE_URL), BASE_TOPAZ)
-    adapter = TopazUpscaleAdapter(base_url=BASE_TOPAZ, token=FAKE_TOKEN)  # sem client
-
-    result = await adapter.upscale(FAKE_FACE_URL)
-
-    assert result == FAKE_UPSCALED_URL
 
 
 async def test_elevenlabs_create_voice_uses_own_client(monkeypatch):
@@ -1275,5 +1197,4 @@ def test_build_real_creator_vercel_adapter_wires_subadapters(monkeypatch):
 
     assert isinstance(adapter, RealCreatorAdapter)
     assert isinstance(adapter.image, OpenAIImageAdapter)
-    assert adapter.topaz is None  # imagem não é mais upscalada
     assert isinstance(adapter.voice, ElevenLabsVoiceAdapter)

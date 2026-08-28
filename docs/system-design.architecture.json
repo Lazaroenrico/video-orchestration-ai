@@ -61,7 +61,7 @@
       "id": "adapters",
       "type": "backend",
       "label": "CompositeAdapter",
-      "sublabel": "role → provider",
+      "sublabel": "domain/media roles",
       "pos": [1170, 290],
       "size": [170, 68]
     },
@@ -85,34 +85,34 @@
     {
       "id": "runtime_memory",
       "type": "messagebus",
-      "label": "Runtime Memory",
-      "sublabel": "SSE queues · replay · gates",
+      "label": "Runtime & Queue",
+      "sublabel": "SSE stream · outbox wake-up",
       "pos": [260, 590],
       "size": [170, 72],
-      "tag": "process-local"
+      "tag": "durable"
     },
     {
       "id": "runs_sqlite",
       "type": "database",
-      "label": "runs.sqlite",
-      "sublabel": "LangGraph checkpoints",
+      "label": "PostgreSQL / SQLite",
+      "sublabel": "AsyncPostgresSaver",
       "pos": [500, 590],
       "size": [170, 72],
-      "tag": "thread_id = run_id"
+      "tag": "checkpoints"
     },
     {
       "id": "artifacts_sqlite",
       "type": "database",
-      "label": "artifacts.sqlite",
-      "sublabel": "metadata · hash · retention",
+      "label": "Artifacts & Ledger",
+      "sublabel": "metadata · effects · retention",
       "pos": [740, 590],
       "size": [180, 72],
-      "tag": "canonical metadata"
+      "tag": "canonical persistence"
     },
     {
       "id": "json_stores",
       "type": "database",
-      "label": "JSON Stores",
+      "label": "PostgreSQL Stores",
       "sublabel": "creators · prompts · feedback",
       "pos": [990, 590],
       "size": [180, 72]
@@ -129,7 +129,7 @@
       "id": "gateway",
       "type": "cloud",
       "label": "Vercel AI Gateway",
-      "sublabel": "LLM · image · assembly",
+      "sublabel": "LLM (LangChain) · Image",
       "pos": [1490, 100],
       "size": [180, 72]
     },
@@ -137,7 +137,7 @@
       "id": "replicate",
       "type": "cloud",
       "label": "Replicate",
-      "sublabel": "creator · video · voice",
+      "sublabel": "video (LTX + LatentSync)",
       "pos": [1490, 280],
       "size": [180, 72]
     },
@@ -145,7 +145,7 @@
       "id": "elevenlabs",
       "type": "cloud",
       "label": "ElevenLabs",
-      "sublabel": "voice synthesis",
+      "sublabel": "Voice Design · TTS",
       "pos": [1490, 460],
       "size": [180, 72]
     },
@@ -161,10 +161,10 @@
       "id": "postgres",
       "type": "database",
       "label": "PostgreSQL",
-      "sublabel": "docker-compose scaffold",
+      "sublabel": "canonical DB & RLS",
       "pos": [1490, 790],
       "size": [180, 72],
-      "tag": "not connected"
+      "tag": "multi-tenant"
     }
   ],
   "boundaries": [
@@ -366,35 +366,35 @@
       "title": "Application boundary",
       "items": [
         "React SPA talks to FastAPI over REST and SSE",
-        "CLI and API execute the Python runner in-process",
-        "There is no durable job queue in the current version"
+        "LanguageRuntime manages native LangChain chat models & agents (D46)",
+        "CompositeAdapter manages domain/media-only adapters and effects"
       ]
     },
     {
       "dot": "violet",
       "title": "Persistence contracts",
       "items": [
-        "runs.sqlite stores LangGraph checkpoints for resume",
-        "artifacts.sqlite stores canonical media metadata",
-        "creator, prompt and feedback stores are JSON today"
+        "PostgreSQL stores AsyncPostgresSaver checkpoints with tenant RLS",
+        "PostgresEffectLedger enforces idempotency and quota reservations",
+        "run_gates and run_events persist Human Gate V2 decisions and SSE streams"
       ]
     },
     {
       "dot": "amber",
       "title": "Media and providers",
       "items": [
-        "Mock profile writes media to local filesystem",
+        "Mock profile writes media to local filesystem deterministically",
         "Live profile writes bytes to private R2 via S3 API",
-        "Signed URLs are derived at the API boundary"
+        "Signed URLs are derived at the API boundary only"
       ]
     },
     {
       "dot": "rose",
       "title": "Deployment truth",
       "items": [
-        "PostgreSQL exists only as docker-compose scaffolding",
-        "Runtime state, approvals and SSE replay remain process-local",
-        "External providers and LangSmith are opt-in"
+        "PostgreSQL + outbox queues wake up durable Runner workers",
+        "GatewayJudge is isolated in evaluation module with cassette replay (D47)",
+        "Paid live adapters require ORCH_ENABLE_PAID_ADAPTERS=true"
       ]
     }
   ]

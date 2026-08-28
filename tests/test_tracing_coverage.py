@@ -55,22 +55,16 @@ def test_concrete_domain_adapters_keep_trace_markers():
     from orchestrator.adapters.elevenlabs_voice import ElevenLabsVoiceAdapter
     from orchestrator.adapters.mock import MockAdapter
     from orchestrator.adapters.openai_image import OpenAIImageAdapter
-    from orchestrator.adapters.replicate_upscale import ReplicateUpscaleAdapter
     from orchestrator.adapters.replicate_video import ReplicateVideoAdapter
     from orchestrator.adapters.replicate_voice import ReplicateVoiceAdapter
-    from orchestrator.adapters.topaz_upscale import TopazUpscaleAdapter
-    from orchestrator.adapters.vercel_gateway_video import VercelGatewayVideoAdapter
 
     methods = (
         (MockAdapter, "generate_clip"),
         (MockAdapter, "build_creator"),
         (RealCreatorAdapter, "build_creator"),
         (OpenAIImageAdapter, "generate_face"),
-        (TopazUpscaleAdapter, "upscale"),
         (ElevenLabsVoiceAdapter, "create_voice"),
         (ReplicateVideoAdapter, "generate_clip"),
-        (VercelGatewayVideoAdapter, "generate_clip"),
-        (ReplicateUpscaleAdapter, "upscale"),
         (ReplicateVoiceAdapter, "create_voice"),
     )
     assert all(_trace_name(getattr(cls, method)).startswith("adapter.") for cls, method in methods)
@@ -78,21 +72,17 @@ def test_concrete_domain_adapters_keep_trace_markers():
 
 
 def test_language_runtime_marks_native_agent_backend(monkeypatch):
+    import asyncio
+
     from orchestrator import language_runtime
     observed: dict[str, object] = {}
     monkeypatch.setattr(language_runtime, "add_trace_metadata", lambda **values: observed.update(values))
     runtime = language_runtime.LanguageRuntime.from_provider("mock", {})
 
-    async def materialize(submission):
-        return submission
-
-    import asyncio
-
     asyncio.run(
-        runtime.run_agent(
+        runtime.generate_structured(
             stage="concepts",
             inputs={"offer": "x", "n": 1},
-            materialize=materialize,
         )
     )
     assert observed == {"agent_backend": "langchain", "stage": "concepts", "provider": "mock"}

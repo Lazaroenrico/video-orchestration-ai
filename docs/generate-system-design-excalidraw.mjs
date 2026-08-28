@@ -238,28 +238,28 @@ box("api", "FastAPI + SSE", "REST · stream · static", 350, 280, 180, 100, pale
 box("runner", "Runner", "run · resume · status", 570, 280, 180, 100, palette.backend);
 box("graph", "LangGraph", "batch + item subgraph", 790, 280, 190, 100, palette.backend);
 box("executor", "Stage Executor", "typed tools · validation", 1020, 280, 190, 100, palette.tool);
-box("adapters", "CompositeAdapter", "role → provider", 1250, 280, 180, 100, palette.backend);
+box("adapters", "CompositeAdapter", "domain/media roles", 1250, 280, 180, 100, palette.backend);
 box("config", "Configuration", "pipeline · providers · agents", 570, 120, 180, 80, palette.data);
 box("prompts", "Agent Catalog", "prompts · allowlists", 1020, 120, 180, 80, palette.security);
 
 box("runtime-memory", "Runtime memory", "SSE queues · replay · gates", 340, 690, 200, 95, palette.tool);
-box("runs-db", "runs.sqlite", "LangGraph checkpoints", 570, 690, 190, 95, palette.data);
-box("artifacts-db", "artifacts.sqlite", "metadata · hash · retention", 800, 690, 200, 95, palette.data);
-box("json-stores", "JSON stores", "creators · prompts · feedback", 1040, 690, 190, 95, palette.data);
+box("runs-db", "PostgreSQL / SQLite", "checkpoints (AsyncPostgresSaver)", 570, 690, 190, 95, palette.data);
+box("artifacts-db", "Artifacts & Ledger", "metadata · effects · retention", 800, 690, 200, 95, palette.data);
+box("json-stores", "PostgreSQL / JSON", "creators · prompts · feedback", 1040, 690, 190, 95, palette.data);
 box("media-store", "MediaStorage", "Local FS / R2-S3", 1260, 690, 160, 95, palette.cloud);
 
-box("gateway", "Vercel AI Gateway", "LLM · image · assembly", 1580, 125, 220, 80, palette.cloud);
-box("replicate", "Replicate", "creator · video · voice", 1580, 325, 220, 80, palette.cloud);
-box("elevenlabs", "ElevenLabs", "voice synthesis", 1580, 525, 220, 80, palette.cloud);
+box("gateway", "Vercel AI Gateway", "LLM (LangChain) · Image", 1580, 125, 220, 80, palette.cloud);
+box("replicate", "Replicate", "video (LTX + LatentSync)", 1580, 325, 220, 80, palette.cloud);
+box("elevenlabs", "ElevenLabs", "Voice Design · TTS", 1580, 525, 220, 80, palette.cloud);
 box("langsmith", "LangSmith", "optional tracing", 1580, 705, 220, 80, palette.cloud);
-box("postgres", "PostgreSQL", "scaffold · NOT CONNECTED", 1580, 815, 220, 70, palette.neutral);
+box("postgres", "PostgreSQL", "canonical persistence & RLS", 1580, 815, 220, 70, palette.backend);
 
-labels.push(textElement("current-note", "CURRENT TRUTH\nAPI + Runner share one process. No durable job queue. Runtime approvals and SSE replay live in memory.", 0, 960, 580, 105, {
+labels.push(textElement("current-note", "CURRENT TRUTH\nLangGraph + LanguageRuntime (D46) + CompositeAdapter (media-only). PostgreSQL canonical persistence, durable jobs, effects ledger.", 0, 960, 580, 105, {
   fontSize: 18,
   color: palette.backend.stroke,
   align: "left",
 }));
-labels.push(textElement("db-note", "DATABASE CONTRACTS\nruns.sqlite = checkpoints · artifacts.sqlite = canonical media metadata · JSON = creators/prompts/feedback", 640, 960, 600, 105, {
+labels.push(textElement("db-note", "DATABASE CONTRACTS\nPostgreSQL = checkpoints (AsyncPostgresSaver) · run_gates · run_events · external_effects · artifacts", 640, 960, 600, 105, {
   fontSize: 18,
   color: palette.data.stroke,
   align: "left",

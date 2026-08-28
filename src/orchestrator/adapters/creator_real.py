@@ -19,14 +19,12 @@ _log = logging.getLogger(__name__)
 
 
 class RealCreatorAdapter:
-    """
+    """Implementa CreatorPort compondo os sub-adapters de imagem e voz.
 
     Parameters
     ----------
     image:
         Instância de ``OpenAIImageAdapter``. Se ``None``, instancia o real.
-    topaz:
-        Instância de ``TopazUpscaleAdapter``. Se ``None``, instancia o real.
     voice:
         Instância de ``VoicePort`` compatível. Se ``None``, instancia ElevenLabs direto.
     """
@@ -35,14 +33,9 @@ class RealCreatorAdapter:
         self,
         image: Optional[OpenAIImageAdapter] = None,
         voice: Optional[VoicePort] = None,
-        topaz: Optional[Any] = None,
     ) -> None:
         self.image = image if image is not None else OpenAIImageAdapter()
         self.voice = voice if voice is not None else ElevenLabsVoiceAdapter()
-        # ``topaz`` foi o upscaler da IMAGEM; o upscale passou para o vídeo final
-        # (papel ``upscale`` / ``node_upscale``). Mantido só por compatibilidade de
-        # assinatura e NÃO é usado — a face crua vira o ``upscaled_base`` do creator.
-        self.topaz = topaz
 
     @traced("adapter.creator_real.build_creator", run_type="chain", step=3, provider="creator_real")
     async def build_creator(

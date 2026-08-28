@@ -4,27 +4,24 @@
 stages:
   concepts:
     executor: agent
-    tools: [generate_concepts]
+    materializer: generate_concepts
     target_model: null
-    target_agent: concept-agent
     system_prompt_path: prompts/agents/concepts.md
     prompt_version: concepts-v3
     schema_version: creative-v2
     agent_enabled: true
   scripts:
     executor: agent
-    tools: [write_script]
+    materializer: write_script
     target_model: null
-    target_agent: script-agent
     system_prompt_path: prompts/agents/scripts.md
     prompt_version: scripts-v3
     schema_version: creative-v2
     agent_enabled: true
   creator_profiles:
     executor: agent
-    tools: [design_creator_roster]
+    materializer: design_creator_roster
     target_model: null
-    target_agent: creator-agent
     system_prompt_path: prompts/agents/creators.md
     prompt_version: creators-v3
     schema_version: creative-v2

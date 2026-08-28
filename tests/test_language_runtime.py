@@ -15,24 +15,21 @@ def test_mock_language_runtime_is_deterministic_and_offline():
 
 
 @pytest.mark.asyncio
-async def test_mock_agent_returns_schema_submission_to_server_materializer():
-    from orchestrator.language_runtime import LanguageRuntime
+async def test_mock_agent_generate_structured_returns_pydantic_model():
+    from pydantic import BaseModel
+
+    from orchestrator.language_runtime import ConceptAgentOutput, LanguageRuntime
 
     runtime = LanguageRuntime.from_provider("mock", {})
-    materialized: dict[str, object] = {}
 
-    async def materialize(submission: dict[str, object]) -> object:
-        materialized.update(submission)
-        return "materialized"
-
-    result = await runtime.run_agent(
+    result = await runtime.generate_structured(
         stage="concepts",
         inputs={"offer": "offer", "n": 2, "campaign": {"offer": "offer", "batch_size": 2}},
-        materialize=materialize,
     )
 
-    assert result == "materialized"
-    assert len(materialized["proposals"]) == 2  # type: ignore[arg-type]
+    assert isinstance(result, BaseModel)
+    assert isinstance(result, ConceptAgentOutput)
+    assert len(result.proposals) == 2
 
 
 def test_live_language_provider_fails_before_model_construction_without_credentials(monkeypatch):
@@ -91,6 +88,60 @@ def test_native_agents_are_limited_to_creative_stages():
     runtime = LanguageRuntime.from_provider("mock", {})
     with pytest.raises(ValueError, match="only supported"):
         runtime.agent_for("video")
+
+
+@pytest.mark.asyncio
+async def test_generate_structured_rejects_non_creative_stage():
+    from orchestrator.language_runtime import LanguageRuntime
+
+    runtime = LanguageRuntime.from_provider("mock", {})
+    with pytest.raises(ValueError, match="only supported"):
+        await runtime.generate_structured(stage="video", inputs={})
+
+
+@pytest.mark.asyncio
+async def test_generate_structured_handles_dict_and_error_modes(monkeypatch):
+    from orchestrator.language_runtime import ConceptAgentOutput, LanguageRuntime
+
+    class FakeAgent:
+        def __init__(self, response):
+            self.response = response
+
+        async def ainvoke(self, _inputs):
+            return self.response
+
+    runtime = LanguageRuntime.from_provider("anthropic", {"llm_model": "test-model"})
+
+    # 1. Dict response gets converted to Pydantic model
+    valid_dict = {
+        "structured_response": {
+            "proposals": [
+                {
+                    "hook": "h",
+                    "angle": "a",
+                    "audience_problem": "p",
+                    "product_mechanism": "m",
+                    "evidence_basis": "cold_test",
+                    "format": "f",
+                    "hook_style": "s",
+                }
+            ]
+        }
+    }
+    monkeypatch.setattr(runtime, "agent_for", lambda *a, **kw: FakeAgent(valid_dict))
+    res = await runtime.generate_structured(stage="concepts", inputs={"offer": "x"})
+    assert isinstance(res, ConceptAgentOutput)
+    assert res.proposals[0].hook == "h"
+
+    # 2. Missing structured_response raises RuntimeError
+    monkeypatch.setattr(runtime, "agent_for", lambda *a, **kw: FakeAgent({"messages": []}))
+    with pytest.raises(RuntimeError, match="did not return structured_response"):
+        await runtime.generate_structured(stage="concepts", inputs={"offer": "x"})
+
+    # 3. Unexpected type raises RuntimeError
+    monkeypatch.setattr(runtime, "agent_for", lambda *a, **kw: FakeAgent({"structured_response": 12345}))
+    with pytest.raises(RuntimeError, match="unexpected structured_response type"):
+        await runtime.generate_structured(stage="concepts", inputs={"offer": "x"})
 
 
 def test_agent_budgets_use_pipeline_overrides_and_are_not_silenced(monkeypatch):
@@ -232,3 +283,238 @@ async def test_native_agent_keeps_base_model_and_binds_serial_structured_output(
         call.get("parallel_tool_calls") is False
         for call in FakeStructuredModel.bind_calls
     )
+
+
+def test_language_model_factory_resolves_mock_deployment():
+    from orchestrator.language_runtime import LanguageModelFactory, MockChatModel
+
+    factory = LanguageModelFactory("mock")
+    model = factory.create_model()
+    assert isinstance(model, MockChatModel)
+    assert model.model == "mock"
+    assert factory.resolve_model_name() == "mock"
+    assert factory.resolve_model_name("custom-mock") == "custom-mock"
+
+
+def test_language_model_factory_resolve_model_name_accepts_override_keyword():
+    from orchestrator.language_runtime import LanguageModelFactory
+
+    factory = LanguageModelFactory("mock")
+
+    assert factory.resolve_model_name(override="custom-mock") == "custom-mock"
+
+
+def test_language_model_factory_create_model_accepts_model_keyword():
+    from orchestrator.language_runtime import LanguageModelFactory, MockChatModel
+
+    model = LanguageModelFactory("mock").create_model(model="custom-mock")
+
+    assert isinstance(model, MockChatModel)
+    assert model.model == "custom-mock"
+
+
+def test_language_model_factory_rejects_arbitrary_or_unknown_provider():
+    from orchestrator.language_runtime import LanguageModelFactory
+
+    with pytest.raises(KeyError, match="desconhecido"):
+        LanguageModelFactory("untrusted_provider").create_model()
+
+    with pytest.raises(KeyError, match="desconhecido"):
+        LanguageModelFactory.resolve_model_name("arbitrary_user_provider")
+
+    with pytest.raises(KeyError, match="desconhecido"):
+        LanguageModelFactory.create_model("attacker_supplied_provider")
+
+
+def test_language_model_factory_auth_precedence_and_missing_credentials(monkeypatch):
+    from orchestrator.language_runtime import LanguageModelFactory
+
+    # vercel_gateway_llm without keys
+    monkeypatch.delenv("AI_GATEWAY_API_KEY", raising=False)
+    monkeypatch.delenv("VERCEL_OIDC_TOKEN", raising=False)
+    with pytest.raises(RuntimeError, match="AI_GATEWAY_API_KEY or VERCEL_OIDC_TOKEN"):
+        LanguageModelFactory("vercel_gateway_llm").create_model()
+
+    # anthropic without keys
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    with pytest.raises(RuntimeError, match="ANTHROPIC_API_KEY"):
+        LanguageModelFactory("anthropic").create_model()
+
+    # anthropic_sdk_gateway without keys
+    with pytest.raises(RuntimeError, match="AI_GATEWAY_API_KEY or VERCEL_OIDC_TOKEN"):
+        LanguageModelFactory("anthropic_sdk_gateway").create_model()
+
+
+def test_language_model_factory_init_chat_model_deployments(monkeypatch):
+    from orchestrator.language_runtime import LanguageModelFactory
+
+    captured_inits: list[dict[str, object]] = []
+
+    def fake_init_chat_model(model: str, **kwargs: object):
+        captured_inits.append({"model": model, **kwargs})
+        return object()
+
+    monkeypatch.setattr("langchain.chat_models.init_chat_model", fake_init_chat_model)
+
+    # 1. vercel_gateway_llm with VERCEL_OIDC_TOKEN
+    monkeypatch.delenv("AI_GATEWAY_API_KEY", raising=False)
+    monkeypatch.setenv("VERCEL_OIDC_TOKEN", "oidc-token-123")
+    monkeypatch.setenv("AI_GATEWAY_BASE_URL", "https://gateway.internal")
+    LanguageModelFactory("vercel_gateway_llm", {"llm_model": "openai/gpt-5"}).create_model()
+
+    assert captured_inits[-1] == {
+        "model": "openai/gpt-5",
+        "model_provider": "openai",
+        "api_key": "oidc-token-123",
+        "base_url": "https://gateway.internal/v1",
+        "timeout": 120,
+        "max_retries": 3,
+    }
+
+    # 2. AI_GATEWAY_API_KEY takes precedence over VERCEL_OIDC_TOKEN
+    monkeypatch.setenv("AI_GATEWAY_API_KEY", "primary-api-key")
+    LanguageModelFactory("vercel_gateway_llm").create_model("custom/model-override")
+    assert captured_inits[-1]["api_key"] == "primary-api-key"
+    assert captured_inits[-1]["model"] == "custom/model-override"
+
+    # 3. anthropic direct
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-secret")
+    LanguageModelFactory("anthropic").create_model()
+    assert captured_inits[-1] == {
+        "model": "claude-opus-4-8",
+        "model_provider": "anthropic",
+        "api_key": "anthropic-secret",
+        "timeout": 120,
+        "max_retries": 3,
+    }
+
+    # 4. anthropic_sdk_gateway strips /v1
+    monkeypatch.setenv("AI_GATEWAY_BASE_URL", "https://ai-gateway.vercel.sh/v1")
+    LanguageModelFactory("anthropic_sdk_gateway").create_model()
+    assert captured_inits[-1] == {
+        "model": "anthropic/claude-opus-4.8",
+        "model_provider": "anthropic",
+        "api_key": "primary-api-key",
+        "base_url": "https://ai-gateway.vercel.sh",
+        "timeout": 120,
+        "max_retries": 4,
+    }
+
+
+def test_language_model_factory_enforces_trace_redaction(monkeypatch):
+    from orchestrator.language_runtime import LanguageModelFactory
+
+    monkeypatch.setenv("LANGSMITH_TRACING", "true")
+    monkeypatch.setenv("LANGSMITH_HIDE_INPUTS", "false")
+    monkeypatch.setenv("LANGSMITH_HIDE_OUTPUTS", "false")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "secret")
+
+    with pytest.raises(RuntimeError, match="LANGSMITH_HIDE_INPUTS=true and LANGSMITH_HIDE_OUTPUTS=true"):
+        LanguageModelFactory("anthropic").create_model()
+
+    # With redaction properly enabled, it succeeds
+    monkeypatch.setenv("LANGSMITH_HIDE_INPUTS", "true")
+    monkeypatch.setenv("LANGSMITH_HIDE_OUTPUTS", "true")
+    captured = []
+    monkeypatch.setattr("langchain.chat_models.init_chat_model", lambda *a, **kw: captured.append(kw) or object())
+    LanguageModelFactory("anthropic").create_model()
+    assert len(captured) == 1
+
+
+
+@pytest.mark.asyncio
+async def test_mock_language_runtime_generate_concepts_determinism_and_spread():
+    from orchestrator.language_runtime import LanguageRuntime
+
+    runtime = LanguageRuntime.from_provider("mock", {})
+    a = await runtime.generate_concepts(offer="serum X", n=10, seed="wk1")
+    b = await runtime.generate_concepts(offer="serum X", n=10, seed="wk1")
+
+    assert len(a) == 10
+    assert a == b
+    assert len({c["hook_style"] for c in a}) > 1
+
+
+@pytest.mark.asyncio
+async def test_mock_language_runtime_generate_concepts_seed_changes_output():
+    from orchestrator.language_runtime import LanguageRuntime
+
+    runtime = LanguageRuntime.from_provider("mock", {})
+    a = await runtime.generate_concepts(offer="serum X", n=5, seed="wk1")
+    b = await runtime.generate_concepts(offer="serum X", n=5, seed="wk2")
+
+    assert a != b
+
+
+@pytest.mark.asyncio
+async def test_mock_language_runtime_write_script_has_hook_and_cta():
+    from orchestrator.language_runtime import LanguageRuntime
+
+    runtime = LanguageRuntime.from_provider("mock", {})
+    concept = {"id": "concept-1", "hook": "você está fazendo errado", "angle": "problema", "hook_style": "problem", "offer": "o serum"}
+    script = await runtime.write_script(concept=concept, creator_ref="creator-1", platform="tiktok")
+
+    assert isinstance(script, str)
+    assert "HOOK" in script.upper()
+    assert "CTA" in script.upper()
+    assert "tiktok" in script.lower()
+
+
+@pytest.mark.asyncio
+async def test_mock_language_runtime_generate_structured_all_stages():
+    from orchestrator.language_runtime import (
+        ConceptAgentOutput,
+        CreatorProfilesAgentOutput,
+        LanguageRuntime,
+        ScriptAgentOutput,
+    )
+
+    runtime = LanguageRuntime.from_provider("mock", {})
+
+    concepts_out = await runtime.generate_structured(
+        stage="concepts",
+        inputs={"offer": "Serum Y", "n": 3, "campaign": {"offer": "Serum Y", "batch_size": 3}},
+    )
+    assert isinstance(concepts_out, ConceptAgentOutput)
+    assert len(concepts_out.proposals) == 3
+
+    script_out = await runtime.generate_structured(
+        stage="scripts",
+        inputs={"concept": {"id": "c-1", "hook": "Look here", "offer": "Serum Y"}},
+    )
+    assert isinstance(script_out, ScriptAgentOutput)
+    assert len(script_out.draft.spoken_beats) >= 2
+    assert script_out.draft.estimated_duration >= 14
+
+    creators_out = await runtime.generate_structured(
+        stage="creator_profiles",
+        inputs={"concept_ids": ["c-1", "c-2"]},
+    )
+    assert isinstance(creators_out, CreatorProfilesAgentOutput)
+    assert len(creators_out.creators) == 2
+    assert len(creators_out.assignments) == 2
+
+
+@pytest.mark.asyncio
+async def test_mock_language_runtime_unsupported_stage_raises_value_error():
+    from orchestrator.language_runtime import _mock_structured_submission
+
+    with pytest.raises(ValueError, match="unsupported terminal mock stage"):
+        _mock_structured_submission("unknown_stage", {})
+
+
+@pytest.mark.asyncio
+async def test_non_mock_language_runtime_direct_methods_raise_runtime_error(monkeypatch):
+    from orchestrator.language_runtime import LanguageRuntime
+
+    monkeypatch.setenv("AI_GATEWAY_TOKEN", "mock-token")
+    runtime = LanguageRuntime.from_provider(
+        "vercel_gateway_llm",
+        {"pipeline": {"llm_model": "google/gemini-2.5-flash"}},
+    )
+
+    with pytest.raises(RuntimeError, match="direct concept generation is only available for the mock runtime"):
+        await runtime.generate_concepts(offer="test")
+
+    with pytest.raises(RuntimeError, match="direct script generation is only available for the mock runtime"):
+        await runtime.write_script(concept={"id": "c-1"})
