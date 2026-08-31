@@ -9,7 +9,7 @@ x-orchestrator-service: &orchestrator-service
   env_file:
     - "${ORCH_DEV_ENV_FILE:-.env}"
   environment: &orchestrator-environment
-    DATABASE_URL: "postgresql://orchestrator:orchestrator@postgres:5432/orchestrator"
+    DATABASE_URL: "postgresql://orchestrator_runtime:orchestrator_runtime@postgres:5432/orchestrator"
     MIGRATION_DATABASE_URL: "postgresql://orchestrator:orchestrator@postgres:5432/orchestrator"
     ORCH_CONFIG_DIR: "${ORCH_DEV_CONFIG_DIR:-config}"
     ORCH_AUTH_MODE: "disabled"
@@ -39,11 +39,34 @@ services:
       - ./infra/postgres:/docker-entrypoint-initdb.d
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U orchestrator -d orchestrator"]
+      test: ["CMD-SHELL", "pg_isready -U postgres -d orchestrator"]
       interval: 2s
       timeout: 5s
       retries: 20
       start_period: 5s
+
+  db-roles:
+    image: postgres:16
+    environment:
+      PGPASSWORD: "orchestrator"
+    volumes:
+      - ./infra/postgres:/infra/postgres:ro
+    command:
+      [
+        "psql",
+        "-h",
+        "postgres",
+        "-U",
+        "postgres",
+        "-d",
+        "orchestrator",
+        "-f",
+        "/infra/postgres/10-app-role.sql",
+      ]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
 
   migrate:
     <<: *orchestrator-service
@@ -51,6 +74,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      db-roles:
+        condition: service_completed_successfully
     restart: "no"
 
   api:
