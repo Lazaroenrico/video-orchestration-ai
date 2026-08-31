@@ -20,6 +20,8 @@ const sharedEnv = () => ({
   R2_BUCKET: env.R2_BUCKET,
   CF_ACCESS_TEAM_DOMAIN: env.CF_ACCESS_TEAM_DOMAIN,
   CF_ACCESS_AUDIENCE: env.CF_ACCESS_AUDIENCE,
+  ORCH_ORGANIZATION_SLUG: env.ORCH_ORGANIZATION_SLUG,
+  ORCH_ORGANIZATION_NAME: env.ORCH_ORGANIZATION_NAME,
 });
 
 export class ApiContainer extends Container {
@@ -44,8 +46,6 @@ export class RunnerContainer extends Container {
   envVars = {
     ...sharedEnv(),
     ORCH_INTERNAL_TOKEN: env.ORCH_INTERNAL_TOKEN,
-    ORCH_ORGANIZATION_SLUG: env.ORCH_ORGANIZATION_SLUG,
-    ORCH_ORGANIZATION_NAME: env.ORCH_ORGANIZATION_NAME,
     ORCH_USER_SUBJECT: env.ORCH_RUNNER_SUBJECT,
   };
   pingEndpoint = "localhost/healthz";
@@ -70,8 +70,6 @@ async function forwardApi(request: Request, bindings: Env): Promise<Response> {
   if (accessJwt) {
     headers.set("Cf-Access-Jwt-Assertion", accessJwt);
   }
-  headers.set("X-Orch-Organization-Slug", bindings.ORCH_ORGANIZATION_SLUG);
-  headers.set("X-Orch-Organization-Name", bindings.ORCH_ORGANIZATION_NAME);
   const api = await getRandom(bindings.API_CONTAINER, 2);
   const response = await api.fetch(new Request(request, { headers }));
 
