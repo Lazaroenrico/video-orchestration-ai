@@ -55,6 +55,14 @@ def test_compose_role_separation_and_dependencies():
 
     # 3. Dependências da API
     api = services["api"]
+    assert api.get("restart") == "unless-stopped", (
+        "api deve se recuperar automaticamente de falhas transitórias de infraestrutura"
+    )
+    api_ports = api.get("ports", [])
+    assert any(
+        str(port.get("published")) == "8005" and port.get("target") == 8000
+        for port in api_ports
+    ), "api deve publicar a porta interna 8000 na porta local 8005"
     api_deps = api.get("depends_on", {})
     assert "migrate" in api_deps, "api deve depender de migrate"
     migrate_dep_condition = (

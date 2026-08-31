@@ -25,6 +25,7 @@ novas entregas usam uma página própria em `docs/progress/changes/`.
 
 ## Últimas 10 entregas
 
+- [Recuperação automática da API após falhas transitórias do Docker DNS](progress/changes/2026-08-31-compose-api-dns-resilience.md) — serviço `api` usa `restart: unless-stopped`, publica `8005:8000` e possui contrato automatizado da configuração efetiva do Compose.
 - [MVP de Login via Cloudflare Access com Convites por E-mail e Claim Atômico](progress/changes/2026-08-31-cloudflare-access-login-mvp.md) — tabela de convites, RLS restrito a owner/admin, claim atômico via SECURITY DEFINER com validação de contexto, owner-bootstrap idempotente, rotas /api/v2/invitations, SessionBoundary e exclusão de chaves sensíveis da persistência frontend.
 - [Separação de papéis PostgreSQL e bootstrap no Docker Compose](progress/changes/2026-08-29-postgres-role-separation.md) — migrador `orchestrator` com `BYPASSRLS`, runtime `orchestrator_runtime` com `NOBYPASSRLS`, serviço one-shot `db-roles` no Compose, preflight check na migração 0012 e isolamento de tenant 100% verificado.
 - [Revisão e endurecimento do MVP multiusuário e RBAC](progress/changes/2026-08-29-user-management-rbac-review-fixes.md) — tenant server-owned via Cloudflare Access, contrato de POST não-upsert com 409, políticas RLS reais para NOBYPASSRLS, proteção de concorrência com lock do último owner e frontend com auth_mode e permissões.
@@ -34,7 +35,6 @@ novas entregas usam uma página própria em `docs/progress/changes/`.
 - [Benchmark isolado de modelos para scripts](progress/changes/2026-08-26-script-model-benchmark.md) — harness opt-in (`--live`) que compara deepseek/gemini/qwen com judge fixo claude-opus-5 via cassette, com custo estimado e razão score/custo.
 - [Correções pós-revisão da refatoração estrutural](progress/changes/2026-08-25-refactor-review-fixes.md) — topologia runtime cobre tiers customizados de ponta a ponta, contratos de dict/gênero foram corrigidos e o storage R2 ficou seguro entre loops e cancelamentos.
 - [Divisão do web/server.py em módulos](progress/changes/2026-08-25-server-split.md) — server.py de 2.253 para 625 linhas: events, run_executor, RunRegistry injetável e rotas por domínio, com gate dual-mode e payloads preservados.
-- [Quebra de ciclos de camadas e vazamentos de adapters](progress/changes/2026-08-25-layering-adapters.md) — ArtifactRecord em módulo neutro, migrações sem grafo, accessors explícitos no CompositeAdapter e fallback mock injetado.
 
 ## Índice do histórico
 
