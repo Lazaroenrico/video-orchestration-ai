@@ -1,6 +1,8 @@
 import { useEffect, useRef } from "react";
 import { NavLink, useNavigate } from "react-router";
 import { Icon } from "../components/Icon";
+import { RoleBadge } from "../components/RoleBadge";
+import { useSessionQuery } from "../api/queries";
 
 type NavItem = { label: string; icon: string; to: string; end?: boolean };
 
@@ -21,33 +23,39 @@ const baseLink =
 
 function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
   const navigate = useNavigate();
+  const session = useSessionQuery();
+  const user = session.data;
+  const canCreate = user ? user.permissions.includes("runs:create") : false;
+
   return (
     <>
-      <div className="mb-7 mt-1 flex items-center gap-3 px-2">
+      <div className="mb-6 mt-1 flex items-center gap-3 px-2">
         <div className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-lg border border-surface-border bg-surface-container text-primary">
           <Icon name="motion_photos_on" size={22} />
         </div>
         <div className="min-w-0">
           <span className="block truncate font-headline-md text-headline-md font-bold text-primary">
-            Marketing Suite
+            {user?.organization.name ?? "Marketing Suite"}
           </span>
           <span className="block truncate font-label-sm text-label-sm text-on-surface-variant">
-            AI UGC workspace
+            {user?.organization.slug ? `@${user.organization.slug}` : "AI UGC workspace"}
           </span>
         </div>
       </div>
 
-      <button
-        type="button"
-        onClick={() => {
-          onNavigate?.();
-          navigate("/campaigns/new");
-        }}
-        className="mb-6 inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-lg bg-primary px-4 py-3 font-label-md text-label-md font-bold text-on-primary transition-transform duration-150 active:translate-y-px"
-      >
-        <Icon name="add" size={18} />
-        New Campaign
-      </button>
+      {canCreate && (
+        <button
+          type="button"
+          onClick={() => {
+            onNavigate?.();
+            navigate("/campaigns/new");
+          }}
+          className="mb-6 inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-lg bg-primary px-4 py-3 font-label-md text-label-md font-bold text-on-primary transition-transform duration-150 active:translate-y-px"
+        >
+          <Icon name="add" size={18} />
+          New Campaign
+        </button>
+      )}
 
       <div className="flex flex-1 flex-col gap-1 overflow-y-auto">
         <p className="px-3 pb-1 font-label-sm text-label-sm uppercase tracking-wider text-on-surface-variant">
@@ -77,10 +85,37 @@ function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
         ))}
       </div>
 
-      <div className="mt-4 border-t border-surface-border pt-4">
-        <p className="px-3 font-label-sm text-label-sm leading-relaxed text-on-surface-variant">
-          v1 ends at assembled output.
-        </p>
+      <div className="mt-4 border-t border-surface-border pt-3">
+        {user ? (
+          <div className="flex items-center justify-between px-2 py-1.5">
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-1.5">
+                <span className="truncate font-label-md text-label-md font-medium text-primary">
+                  {user.display_name || user.email || user.subject}
+                </span>
+                <RoleBadge role={user.role} />
+              </div>
+              {user.email && user.display_name && (
+                <span className="block truncate text-[11px] text-on-surface-variant">
+                  {user.email}
+                </span>
+              )}
+            </div>
+            {user.auth_mode === "cloudflare_access" && (
+              <a
+                href="/cdn-cgi/access/logout"
+                title="Logout"
+                className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-on-surface-variant hover:bg-surface-container hover:text-primary transition-colors"
+              >
+                <Icon name="logout" size={18} />
+              </a>
+            )}
+          </div>
+        ) : (
+          <p className="px-3 font-label-sm text-label-sm text-on-surface-variant">
+            v1 ends at assembled output.
+          </p>
+        )}
       </div>
     </>
   );

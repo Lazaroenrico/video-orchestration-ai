@@ -13,6 +13,14 @@ vi.mock("../api/queries", async (importOriginal) => {
   return {
     ...actual,
     useReviewRunV2Mutation: () => reviewMutation,
+    useSessionQuery: () => ({
+      data: {
+        id: "test-user",
+        subject: "test-user",
+        role: "owner",
+        permissions: ["read", "runs:create", "runs:review", "runs:retry", "runs:voice_reroll"],
+      },
+    }),
   };
 });
 

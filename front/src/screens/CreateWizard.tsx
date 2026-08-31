@@ -3,7 +3,7 @@ import { useNavigate } from "react-router";
 import { Icon } from "../components/Icon";
 import { Button } from "../components/Button";
 import { Card } from "../components/Card";
-import { useStartRunV2Mutation } from "../api/queries";
+import { useSessionQuery, useStartRunV2Mutation } from "../api/queries";
 import type { PerformanceSnapshot } from "../types";
 
 const PLATFORMS = ["tiktok", "instagram", "youtube", "facebook"] as const;
@@ -21,6 +21,8 @@ function optional(value: string): string | null {
 export function CreateWizard() {
   const navigate = useNavigate();
   const startRun = useStartRunV2Mutation();
+  const session = useSessionQuery();
+  const canCreate = session.data ? session.data.permissions.includes("runs:create") : false;
   const [step, setStep] = useState(0);
   const [error, setError] = useState<string | null>(null);
 
@@ -78,6 +80,26 @@ export function CreateWizard() {
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
     }
+  }
+
+  if (!canCreate) {
+    return (
+      <div className="min-h-[100dvh] bg-background px-4 py-6 sm:px-6 lg:px-margin-desktop lg:py-10">
+        <div className="mx-auto max-w-3xl">
+          <Card>
+            <h1 className="hm-page-title mb-2 text-primary">Nova campanha</h1>
+            <p className="font-body-md text-body-md text-on-surface-variant">
+              A criação de novas campanhas é restrita a membros com permissão de criação.
+            </p>
+            <div className="mt-4">
+              <Button variant="secondary" onClick={() => navigate("/")}>
+                Voltar ao Dashboard
+              </Button>
+            </div>
+          </Card>
+        </div>
+      </div>
+    );
   }
 
   return (

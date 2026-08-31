@@ -1,4 +1,5 @@
 import { Routes, Route, Navigate } from "react-router";
+import { SessionBoundary } from "./components/SessionBoundary";
 import { AppShell } from "./layout/AppShell";
 import { Dashboard } from "./screens/Dashboard";
 import { Campaigns } from "./screens/Campaigns";
@@ -17,22 +18,24 @@ import { Settings } from "./screens/Settings";
 // so it lives outside the AppShell. Everything else renders inside the shell.
 export function AppRoutes() {
   return (
-    <Routes>
-      <Route path="/campaigns/new" element={<CreateWizard />} />
-      <Route element={<AppShell />}>
-        <Route path="/" element={<Dashboard />} />
-        <Route path="/campaigns" element={<Campaigns />} />
-        <Route path="/campaigns/:runId" element={<CampaignDetail />} />
-        <Route path="/scripts" element={<Concepts />} />
-        <Route path="/creators" element={<Creators />} />
-        <Route path="/queue" element={<Queue />} />
-        <Route path="/review" element={<VideoReview />} />
-        <Route path="/analytics" element={<Analytics />} />
-        <Route path="/publishing" element={<Publishing />} />
-        <Route path="/integrations" element={<Integrations />} />
-        <Route path="/settings" element={<Settings />} />
-      </Route>
-      <Route path="*" element={<Navigate to="/" replace />} />
-    </Routes>
+    <SessionBoundary>
+      <Routes>
+        <Route path="/campaigns/new" element={<CreateWizard />} />
+        <Route element={<AppShell />}>
+          <Route path="/" element={<Dashboard />} />
+          <Route path="/campaigns" element={<Campaigns />} />
+          <Route path="/campaigns/:runId" element={<CampaignDetail />} />
+          <Route path="/scripts" element={<Concepts />} />
+          <Route path="/creators" element={<Creators />} />
+          <Route path="/queue" element={<Queue />} />
+          <Route path="/review" element={<VideoReview />} />
+          <Route path="/analytics" element={<Analytics />} />
+          <Route path="/publishing" element={<Publishing />} />
+          <Route path="/integrations" element={<Integrations />} />
+          <Route path="/settings" element={<Settings />} />
+        </Route>
+        <Route path="*" element={<Navigate to="/" replace />} />
+      </Routes>
+    </SessionBoundary>
   );
 }

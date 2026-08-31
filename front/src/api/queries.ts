@@ -18,6 +18,9 @@ import type {
   RunsIndex,
   StartRunBody,
   StartRunV2Body,
+  GrantMemberBody,
+  CreateInvitationBody,
+  UserRole,
 } from "./contracts";
 
 const SECOND = 1_000;
@@ -37,6 +40,9 @@ export const queryKeys = {
   creators: () => ["creators"] as const,
   integrations: () => ["integrations"] as const,
   prompts: () => ["prompts"] as const,
+  session: () => ["session", "me"] as const,
+  members: () => ["members"] as const,
+  invitations: () => ["invitations"] as const,
 };
 
 export interface CampaignRow {
@@ -385,4 +391,84 @@ export function promptStoreFromCache(data: PromptsIndex | undefined) {
     storePath: data?.store_path,
     exists: data?.exists,
   };
+}
+
+export function useSessionQuery() {
+  return useQuery({
+    queryKey: queryKeys.session(),
+    queryFn: api.getMe,
+    staleTime: 5 * MINUTE,
+    retry: false,
+  });
+}
+
+export function useMembersQuery(enabled = true) {
+  return useQuery({
+    queryKey: queryKeys.members(),
+    queryFn: api.getMembers,
+    enabled,
+    staleTime: 30 * SECOND,
+    retry: false,
+  });
+}
+
+export function useGrantMemberMutation() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (body: GrantMemberBody) => api.grantMember(body),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: queryKeys.members() });
+    },
+  });
+}
+
+export function useUpdateMemberRoleMutation() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: ({ subject, role }: { subject: string; role: UserRole }) =>
+      api.updateMemberRole(subject, { role }),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: queryKeys.members() });
+    },
+  });
+}
+
+export function useRevokeMemberMutation() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (subject: string) => api.revokeMember(subject),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: queryKeys.members() });
+    },
+  });
+}
+
+export function useInvitationsQuery(enabled = true) {
+  return useQuery({
+    queryKey: queryKeys.invitations(),
+    queryFn: api.getInvitations,
+    enabled,
+    staleTime: 30 * SECOND,
+    retry: false,
+  });
+}
+
+export function useCreateInvitationMutation() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (body: CreateInvitationBody) => api.createInvitation(body),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: queryKeys.invitations() });
+    },
+  });
+}
+
+export function useCancelInvitationMutation() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (email: string) => api.cancelInvitation(email),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: queryKeys.invitations() });
+    },
+  });
 }

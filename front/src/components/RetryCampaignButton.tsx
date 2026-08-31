@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useNavigate } from "react-router";
-import { useRetryRunMutation } from "../api/queries";
+import { useRetryRunMutation, useSessionQuery } from "../api/queries";
 import { Button } from "./Button";
 
 type ButtonVariant = "primary" | "secondary" | "ghost" | "danger";
@@ -18,7 +18,11 @@ export function RetryCampaignButton({
 }) {
   const navigate = useNavigate();
   const retryRun = useRetryRunMutation();
+  const session = useSessionQuery();
+  const canRetry = session.data ? session.data.permissions.includes("runs:retry") : false;
   const [error, setError] = useState<string | null>(null);
+
+  if (!canRetry) return null;
 
   async function retry() {
     setError(null);
