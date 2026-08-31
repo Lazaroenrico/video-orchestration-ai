@@ -1,14 +1,20 @@
-"""Autenticação Cloudflare Access sem misturar identidade e autorização."""
+"""Autenticação Cloudflare Access e autorização baseada em papéis (RBAC)."""
 from __future__ import annotations
 
 import json
 import os
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Iterator, Mapping
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass
+from enum import Enum
 from typing import Any
 from urllib.parse import urlparse
+from uuid import UUID
 
 import httpx
 import jwt
+from fastapi import Depends, HTTPException
 from jwt import PyJWTError
 from jwt.algorithms import RSAAlgorithm
 from starlette.responses import JSONResponse
@@ -24,6 +30,148 @@ from orchestrator.db.tenancy import (
 
 class AccessTokenError(ValueError):
     """Token ausente, inválido ou incompatível com o aplicativo Access."""
+
+
+class Permission(str, Enum):
+    READ = "read"
+    RUNS_CREATE = "runs:create"
+    RUNS_REVIEW = "runs:review"
+    RUNS_RETRY = "runs:retry"
+    RUNS_VOICE_REROLL = "runs:voice_reroll"
+    PROMPTS_WRITE = "prompts:write"
+    MEMBERS_READ = "members:read"
+    MEMBERS_WRITE = "members:write"
+
+
+ROLE_PERMISSIONS: dict[str, frozenset[Permission]] = {
+    "viewer": frozenset({Permission.READ}),
+    "member": frozenset({
+        Permission.READ,
+        Permission.RUNS_CREATE,
+        Permission.RUNS_REVIEW,
+        Permission.RUNS_RETRY,
+        Permission.RUNS_VOICE_REROLL,
+        Permission.PROMPTS_WRITE,
+    }),
+    "admin": frozenset({
+        Permission.READ,
+        Permission.RUNS_CREATE,
+        Permission.RUNS_REVIEW,
+        Permission.RUNS_RETRY,
+        Permission.RUNS_VOICE_REROLL,
+        Permission.PROMPTS_WRITE,
+        Permission.MEMBERS_READ,
+        Permission.MEMBERS_WRITE,
+    }),
+    "owner": frozenset({
+        Permission.READ,
+        Permission.RUNS_CREATE,
+        Permission.RUNS_REVIEW,
+        Permission.RUNS_RETRY,
+        Permission.RUNS_VOICE_REROLL,
+        Permission.PROMPTS_WRITE,
+        Permission.MEMBERS_READ,
+        Permission.MEMBERS_WRITE,
+    }),
+}
+
+_SAFE_CLAIMS = {"email", "name", "display_name", "preferred_username"}
+
+
+@dataclass(frozen=True)
+class RequestPrincipal:
+    tenant: TenantContext
+    user_id: UUID
+    user_subject: str
+    organization_id: UUID
+    organization_slug: str
+    organization_name: str
+    role: str
+    permissions: frozenset[Permission]
+    claims: dict[str, Any]
+
+    @classmethod
+    def from_tenant(
+        cls,
+        tenant: TenantContext,
+        organization_name: str,
+        claims: Mapping[str, Any] | None = None,
+    ) -> RequestPrincipal:
+        safe_claims = {
+            k: str(v)
+            for k, v in (claims or {}).items()
+            if k.lower() in _SAFE_CLAIMS and v is not None
+        }
+        role = tenant.role or "viewer"
+        permissions = ROLE_PERMISSIONS.get(role, frozenset({Permission.READ}))
+        return cls(
+            tenant=tenant,
+            user_id=tenant.user_id,
+            user_subject=tenant.user_subject,
+            organization_id=tenant.organization_id,
+            organization_slug=tenant.organization_slug,
+            organization_name=organization_name,
+            role=role,
+            permissions=permissions,
+            claims=safe_claims,
+        )
+
+    def has_permission(self, permission: Permission | str) -> bool:
+        perm = Permission(permission) if isinstance(permission, str) else permission
+        return perm in self.permissions
+
+    def can_manage_role(self, target_role: str) -> bool:
+        if self.role == "owner":
+            return True
+        if self.role == "admin":
+            return target_role in ("member", "viewer")
+        return False
+
+
+_REQUEST_PRINCIPAL: ContextVar[RequestPrincipal | None] = ContextVar(
+    "orchestrator_request_principal", default=None
+)
+
+
+@contextmanager
+def request_principal_context(principal: RequestPrincipal) -> Iterator[None]:
+    token = _REQUEST_PRINCIPAL.set(principal)
+    try:
+        yield
+    finally:
+        _REQUEST_PRINCIPAL.reset(token)
+
+
+def get_current_principal() -> RequestPrincipal:
+    principal = _REQUEST_PRINCIPAL.get()
+    if principal is not None:
+        return principal
+    if os.environ.get("ORCH_AUTH_MODE", "disabled") != "cloudflare_access":
+        slug = os.environ.get("ORCH_ORGANIZATION_SLUG", "local")
+        name = os.environ.get("ORCH_ORGANIZATION_NAME", "Local Organization")
+        subject = os.environ.get("ORCH_USER_SUBJECT", "local-user")
+        identity = TenantIdentity(organization_slug=slug, organization_name=name, user_subject=subject)
+        tenant = identity.context(role="owner")
+        return RequestPrincipal.from_tenant(
+            tenant,
+            organization_name=identity.organization_name,
+            claims={"email": f"{subject}@local.test", "name": subject.capitalize()},
+        )
+    raise HTTPException(status_code=401, detail="Não autenticado")
+
+
+def require_permission(permission: Permission):
+    async def dependency(
+        principal: RequestPrincipal = Depends(get_current_principal),
+    ) -> RequestPrincipal:
+        if not principal.has_permission(permission):
+            raise HTTPException(
+                status_code=403,
+                detail=f"Permissão negada: {permission.value}",
+            )
+        return principal
+
+    return dependency
 
 
 def _normalized_team_domain(value: str) -> str:
@@ -104,18 +252,34 @@ class AccessJwtVerifier:
         return dict(claims)
 
 
-Authorize = Callable[[TenantIdentity], Awaitable[TenantContext]]
+Authorize = Callable[..., Awaitable[TenantContext]]
 
 
 async def _authorize_with_app_database(
     scope: Scope,
     identity: TenantIdentity,
+    verified_email: str | None = None,
 ) -> TenantContext:
+    import inspect
+
     app = scope["app"]
     database = getattr(app.state, "auth_database", None)
     if database is None:
         async with Database.from_env() as transient_database:
+            sig = inspect.signature(transient_database.authorize_tenant)
+            if len(sig.parameters) >= 2 or any(
+                p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+            ):
+                return await transient_database.authorize_tenant(
+                    identity, verified_email=verified_email
+                )
             return await transient_database.authorize_tenant(identity)
+
+    sig = inspect.signature(database.authorize_tenant)
+    if len(sig.parameters) >= 2 or any(
+        p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+    ):
+        return await database.authorize_tenant(identity, verified_email=verified_email)
     return await database.authorize_tenant(identity)
 
 
@@ -168,10 +332,10 @@ class CloudflareAccessMiddleware:
         if not token:
             await self._reject(scope, receive, send, 401, "JWT do Cloudflare Access ausente")
             return
-        organization_slug = headers.get("x-orch-organization-slug", "").strip()
-        organization_name = headers.get("x-orch-organization-name", "").strip()
+        organization_slug = os.environ.get("ORCH_ORGANIZATION_SLUG", "").strip()
+        organization_name = os.environ.get("ORCH_ORGANIZATION_NAME", "").strip()
         if not organization_slug or not organization_name:
-            await self._reject(scope, receive, send, 400, "tenant da requisição ausente")
+            await self._reject(scope, receive, send, 503, "configuração de tenant ausente no servidor")
             return
 
         try:
@@ -180,11 +344,31 @@ class CloudflareAccessMiddleware:
             subject = str(claims.get("sub", "")).strip()
             if not subject:
                 raise AccessTokenError("token Access sem subject")
+            raw_email = claims.get("email")
+            verified_email = str(raw_email).strip() if raw_email else None
             identity = TenantIdentity(organization_slug, organization_name, subject)
             if self.authorize is not None:
-                await self.authorize(identity)
+                import inspect
+
+                sig = inspect.signature(self.authorize)
+                if len(sig.parameters) >= 2 or any(
+                    p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+                ):
+                    tenant = await self.authorize(identity, verified_email)
+                else:
+                    tenant = await self.authorize(identity)
             else:
-                await _authorize_with_app_database(scope, identity)
+                import inspect
+
+                sig = inspect.signature(_authorize_with_app_database)
+                if len(sig.parameters) >= 3 or "verified_email" in sig.parameters or any(
+                    p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+                ):
+                    tenant = await _authorize_with_app_database(
+                        scope, identity, verified_email=verified_email
+                    )
+                else:
+                    tenant = await _authorize_with_app_database(scope, identity)
         except AccessTokenError as exc:
             await self._reject(scope, receive, send, 401, str(exc))
             return
@@ -195,5 +379,11 @@ class CloudflareAccessMiddleware:
             await self._reject(scope, receive, send, 503, str(exc))
             return
 
-        with tenant_identity_context(identity):
+        principal = RequestPrincipal.from_tenant(
+            tenant,
+            organization_name=organization_name,
+            claims=claims,
+        )
+
+        with tenant_identity_context(identity), request_principal_context(principal):
             await self.app(scope, receive, send)

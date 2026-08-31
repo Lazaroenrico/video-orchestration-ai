@@ -11,10 +11,11 @@ import os
 import uuid
 from typing import Any, Literal, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 import orchestrator.job_store as job_store
+from orchestrator.auth import Permission, RequestPrincipal, require_permission
 from orchestrator.nodes.stages import (
     apply_review_concept_updates,
     apply_review_creator_updates,
@@ -155,6 +156,7 @@ def _validated_review_resolution(
 async def review_run_v2(
     run_id: str,
     req: ReviewV2Request,
+    _principal: RequestPrincipal = Depends(require_permission(Permission.RUNS_REVIEW)),
 ) -> dict[str, Any]:
     if os.environ.get("DATABASE_URL"):
         if req.gate_id is None or req.version is None:
@@ -218,7 +220,11 @@ class ApproveRequest(BaseModel):
 
 
 @router.post("/api/approve/{run_id}/creators/{creator_id}/reroll-voice")
-async def reroll_creator_voice(run_id: str, creator_id: str) -> dict[str, Any]:
+async def reroll_creator_voice(
+    run_id: str,
+    creator_id: str,
+    _principal: RequestPrincipal = Depends(require_permission(Permission.RUNS_VOICE_REROLL)),
+) -> dict[str, Any]:
     """Compatibility endpoint that resumes the combined gate's voice-only branch."""
     if os.environ.get("DATABASE_URL"):
         raise HTTPException(
@@ -252,7 +258,11 @@ async def reroll_creator_voice(run_id: str, creator_id: str) -> dict[str, Any]:
 
 
 @router.post("/api/approve/{run_id}")
-async def approve(run_id: str, req: ApproveRequest) -> dict[str, Any]:
+async def approve(
+    run_id: str,
+    req: ApproveRequest,
+    _principal: RequestPrincipal = Depends(require_permission(Permission.RUNS_REVIEW)),
+) -> dict[str, Any]:
     if os.environ.get("DATABASE_URL"):
         if req.gate_id is None or req.version is None:
             raise HTTPException(409, "gate_id e version são obrigatórios")
@@ -292,7 +302,11 @@ class ConceptEditRequest(BaseModel):
 
 
 @router.post("/api/approve/{run_id}/concepts")
-async def submit_concepts(run_id: str, req: ConceptEditRequest) -> dict[str, Any]:
+async def submit_concepts(
+    run_id: str,
+    req: ConceptEditRequest,
+    _principal: RequestPrincipal = Depends(require_permission(Permission.RUNS_REVIEW)),
+) -> dict[str, Any]:
     if os.environ.get("DATABASE_URL"):
         if req.gate_id is None or req.version is None:
             raise HTTPException(409, "gate_id e version são obrigatórios")

@@ -9,7 +9,7 @@ import os
 import uuid
 from typing import Any, Optional
 
-from fastapi import APIRouter, BackgroundTasks, Header, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict
 
@@ -17,6 +17,7 @@ import orchestrator.job_store as job_store
 import orchestrator.prompt_store as prompt_store
 import orchestrator.run_store as run_store
 from orchestrator import runner
+from orchestrator.auth import Permission, RequestPrincipal, require_permission
 from orchestrator.common.plain import to_plain as _to_plain
 from orchestrator.config import default_db_path, default_prompt_store_path
 from orchestrator.creative_contracts import CampaignInput
@@ -71,6 +72,7 @@ class RunV2Request(BaseModel):
 async def start_run_v2(
     req: RunV2Request,
     background_tasks: BackgroundTasks,
+    _principal: RequestPrincipal = Depends(require_permission(Permission.RUNS_CREATE)),
 ) -> dict[str, str]:
     campaign = req.campaign
     run_id = f"web-{uuid.uuid4().hex[:8]}"
@@ -136,7 +138,11 @@ async def start_run_v2(
 
 
 @router.post("/api/run")
-async def start_run(req: RunRequest, background_tasks: BackgroundTasks) -> dict[str, str]:
+async def start_run(
+    req: RunRequest,
+    background_tasks: BackgroundTasks,
+    _principal: RequestPrincipal = Depends(require_permission(Permission.RUNS_CREATE)),
+) -> dict[str, str]:
     seed_creator = None
     if req.creator_id:
         seed_creator = await _server_attr("_find_creator_for_draft_repository")(
@@ -236,7 +242,10 @@ def _retry_payload_fields(payload: dict[str, Any]) -> tuple[str, str, int]:
 
 
 @router.post("/api/run/{run_id}/retry")
-async def retry_run(run_id: str) -> dict[str, str]:
+async def retry_run(
+    run_id: str,
+    _principal: RequestPrincipal = Depends(require_permission(Permission.RUNS_RETRY)),
+) -> dict[str, str]:
     async with run_store.open_repository() as runs:
         snapshot = await runs.get(run_id) if runs is not None else None
     if snapshot is None:

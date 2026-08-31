@@ -40,12 +40,13 @@ class TenantIdentity:
         values = {field: os.environ[name] for name, field in _ENVIRONMENT_FIELDS.items()}
         return cls(**values)
 
-    def context(self) -> "TenantContext":
+    def context(self, role: str = "owner") -> "TenantContext":
         return TenantContext(
             organization_id=_stable_id("organization", self.organization_slug),
             user_id=_stable_id("user", self.user_subject),
             organization_slug=self.organization_slug,
             user_subject=self.user_subject,
+            role=role,
         )
 
 
@@ -55,6 +56,16 @@ class TenantContext:
     user_id: UUID
     organization_slug: str
     user_subject: str
+    role: str = "owner"
+
+    def with_role(self, role: str) -> "TenantContext":
+        return TenantContext(
+            organization_id=self.organization_id,
+            user_id=self.user_id,
+            organization_slug=self.organization_slug,
+            user_subject=self.user_subject,
+            role=role,
+        )
 
 
 _REQUEST_IDENTITY = ContextVar("orchestrator_request_tenant_identity", default=None)

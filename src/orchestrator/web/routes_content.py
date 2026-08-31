@@ -6,11 +6,12 @@ import logging
 from pathlib import Path
 from typing import Any, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 import orchestrator.creator_store as creator_store
 import orchestrator.prompt_store as prompt_store
+from orchestrator.auth import Permission, RequestPrincipal, require_permission
 from orchestrator.config import default_prompt_store_path
 from orchestrator.web.events import (
     _creator_id,
@@ -47,7 +48,10 @@ async def prompts_index() -> dict[str, Any]:
 
 
 @router.post("/api/prompts")
-async def save_prompt_template(req: PromptTemplateRequest) -> dict[str, Any]:
+async def save_prompt_template(
+    req: PromptTemplateRequest,
+    _principal: RequestPrincipal = Depends(require_permission(Permission.PROMPTS_WRITE)),
+) -> dict[str, Any]:
     try:
         async with prompt_store.open_repository(default_prompt_store_path()) as prompts:
             saved = await prompts.save_template(
@@ -62,7 +66,10 @@ async def save_prompt_template(req: PromptTemplateRequest) -> dict[str, Any]:
 
 
 @router.delete("/api/prompts/{template_id}")
-async def delete_prompt_template(template_id: str) -> dict[str, Any]:
+async def delete_prompt_template(
+    template_id: str,
+    _principal: RequestPrincipal = Depends(require_permission(Permission.PROMPTS_WRITE)),
+) -> dict[str, Any]:
     async with prompt_store.open_repository(default_prompt_store_path()) as prompts:
         if not await prompts.delete_template(template_id):
             raise HTTPException(status_code=404, detail=f"template {template_id!r} not found")
