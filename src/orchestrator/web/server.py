@@ -62,7 +62,14 @@ from orchestrator.storage.factory import build_media_storage, resolve_storage_ba
 from orchestrator.storage.r2 import R2MediaStorage
 from orchestrator.storage.resolve import resolve_signed_uris
 from orchestrator.tracing import run_trace_config
-from orchestrator.web import routes_content, routes_review, routes_runs, runs_registry
+from orchestrator.web import (
+    routes_content,
+    routes_invitations,
+    routes_members,
+    routes_review,
+    routes_runs,
+    runs_registry,
+)
 from orchestrator.web.events import (
     DATABASE_UNAVAILABLE_ERRORS,
     _artifact_dict,
@@ -606,6 +613,8 @@ async def dashboard() -> HTMLResponse:
 app.include_router(routes_runs.router)
 app.include_router(routes_review.router)
 app.include_router(routes_content.router)
+app.include_router(routes_members.router)
+app.include_router(routes_invitations.router)
 # --------------------------------------------------------------------------- #
 # SPA fallback: rotas client-side (/campaigns, /analytics, …) devem servir o     #
 # index do SPA para que refresh/deep-link funcionem. Registrado por último para #

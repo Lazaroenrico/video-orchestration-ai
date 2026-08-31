@@ -91,6 +91,8 @@ async def test_access_verifier_rejects_another_application_audience(access_keypa
 
 async def test_access_middleware_bypasses_health_and_rejects_missing_jwt(monkeypatch):
     monkeypatch.setenv("ORCH_AUTH_MODE", "cloudflare_access")
+    monkeypatch.setenv("ORCH_ORGANIZATION_SLUG", "acme")
+    monkeypatch.setenv("ORCH_ORGANIZATION_NAME", "Acme Inc.")
     downstream_calls: list[str] = []
 
     async def authorize(_identity: TenantIdentity) -> TenantContext:
@@ -118,13 +120,7 @@ async def test_access_middleware_bypasses_health_and_rejects_missing_jwt(monkeyp
         base_url="https://origin.test",
     ) as client:
         health_response = await client.get("/healthz")
-        api_response = await client.get(
-            "/api/runs",
-            headers={
-                "X-Orch-Organization-Slug": "acme",
-                "X-Orch-Organization-Name": "Acme",
-            },
-        )
+        api_response = await client.get("/api/runs")
 
     assert health_response.status_code == 200
     assert api_response.status_code == 401
@@ -135,6 +131,8 @@ async def test_access_middleware_binds_verified_identity_and_authorizes_membersh
     monkeypatch,
 ):
     monkeypatch.setenv("ORCH_AUTH_MODE", "cloudflare_access")
+    monkeypatch.setenv("ORCH_ORGANIZATION_SLUG", "acme")
+    monkeypatch.setenv("ORCH_ORGANIZATION_NAME", "Acme Inc.")
     authorized: list[TenantIdentity] = []
 
     class Verifier:
@@ -169,8 +167,6 @@ async def test_access_middleware_binds_verified_identity_and_authorizes_membersh
             "/api/whoami",
             headers={
                 "Cf-Access-Jwt-Assertion": "signed-access-token",
-                "X-Orch-Organization-Slug": "acme",
-                "X-Orch-Organization-Name": "Acme Inc.",
             },
         )
 
@@ -180,6 +176,89 @@ async def test_access_middleware_binds_verified_identity_and_authorizes_membersh
         "subject": "access|alice",
     }
     assert authorized == [TenantIdentity("acme", "Acme Inc.", "access|alice")]
+
+
+async def test_access_middleware_ignores_forged_organization_headers_and_uses_server_config(
+    monkeypatch,
+):
+    """Headers forjados enviados pelo cliente nunca alteram o tenant fixo do servidor."""
+    monkeypatch.setenv("ORCH_AUTH_MODE", "cloudflare_access")
+    monkeypatch.setenv("ORCH_ORGANIZATION_SLUG", "server-org")
+    monkeypatch.setenv("ORCH_ORGANIZATION_NAME", "Server Org")
+    authorized: list[TenantIdentity] = []
+
+    class Verifier:
+        async def verify(self, token: str) -> dict[str, str]:
+            return {"sub": "access|alice"}
+
+    async def authorize(identity: TenantIdentity) -> TenantContext:
+        authorized.append(identity)
+        return identity.context()
+
+    app = FastAPI()
+    app.add_middleware(
+        CloudflareAccessMiddleware,
+        verifier=Verifier(),
+        authorize=authorize,
+    )
+
+    @app.get("/api/tenant-check")
+    async def tenant_check() -> dict[str, str]:
+        identity = TenantIdentity.from_env()
+        return {"slug": identity.organization_slug, "name": identity.organization_name}
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="https://origin.test",
+    ) as client:
+        response = await client.get(
+            "/api/tenant-check",
+            headers={
+                "Cf-Access-Jwt-Assertion": "valid-token",
+                "X-Orch-Organization-Slug": "evil-attacker",
+                "X-Orch-Organization-Name": "Attacker Inc.",
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {"slug": "server-org", "name": "Server Org"}
+    assert authorized == [TenantIdentity("server-org", "Server Org", "access|alice")]
+
+
+async def test_access_middleware_fails_safely_when_server_organization_config_is_missing(
+    monkeypatch,
+):
+    """Se a configuração de tenant do deployment estiver ausente em cloudflare_access, falha com 503."""
+    monkeypatch.setenv("ORCH_AUTH_MODE", "cloudflare_access")
+    monkeypatch.delenv("ORCH_ORGANIZATION_SLUG", raising=False)
+    monkeypatch.delenv("ORCH_ORGANIZATION_NAME", raising=False)
+
+    class Verifier:
+        async def verify(self, token: str) -> dict[str, str]:
+            return {"sub": "access|alice"}
+
+    app = FastAPI()
+    app.add_middleware(
+        CloudflareAccessMiddleware,
+        verifier=Verifier(),
+        authorize=lambda identity: identity.context(),
+    )
+
+    @app.get("/api/protected")
+    async def protected():
+        return {"ok": True}
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="https://origin.test",
+    ) as client:
+        response = await client.get(
+            "/api/protected",
+            headers={"Cf-Access-Jwt-Assertion": "valid-token"},
+        )
+
+    assert response.status_code == 503
+    assert "configuração de tenant ausente" in response.json()["detail"].lower()
 
 
 async def test_request_tenant_context_is_isolated_between_coroutines(monkeypatch):
@@ -327,40 +406,16 @@ async def test_access_database_authorizer_uses_pool_or_transient_database(monkey
     assert calls == ["enter", "authorize", "exit", "authorize"]
 
 
-@pytest.mark.parametrize(
-    ("headers", "verifier", "authorize", "status_code"),
-    [
-        (
-            {"Cf-Access-Jwt-Assertion": "token"},
-            type("Verifier", (), {"verify": lambda self, token: _claims("alice")})(),
-            None,
-            400,
-        ),
-        (
-            {
-                "Cf-Access-Jwt-Assertion": "token",
-                "X-Orch-Organization-Slug": "acme",
-                "X-Orch-Organization-Name": "Acme",
-            },
-            type("Verifier", (), {"verify": lambda self, token: _claims("")})(),
-            None,
-            401,
-        ),
-    ],
-)
-async def test_access_middleware_rejects_missing_tenant_or_subject(
+async def test_access_middleware_rejects_empty_subject(
     monkeypatch,
-    headers,
-    verifier,
-    authorize,
-    status_code,
 ):
     monkeypatch.setenv("ORCH_AUTH_MODE", "cloudflare_access")
+    monkeypatch.setenv("ORCH_ORGANIZATION_SLUG", "acme")
+    monkeypatch.setenv("ORCH_ORGANIZATION_NAME", "Acme Inc.")
     app = FastAPI()
     app.add_middleware(
         CloudflareAccessMiddleware,
-        verifier=verifier,
-        authorize=authorize,
+        verifier=type("Verifier", (), {"verify": lambda self, token: _claims("")})(),
     )
 
     @app.get("/api/protected")
@@ -371,9 +426,12 @@ async def test_access_middleware_rejects_missing_tenant_or_subject(
         transport=httpx.ASGITransport(app=app),
         base_url="https://origin.test",
     ) as client:
-        response = await client.get("/api/protected", headers=headers)
+        response = await client.get(
+            "/api/protected",
+            headers={"Cf-Access-Jwt-Assertion": "token"},
+        )
 
-    assert response.status_code == status_code
+    assert response.status_code == 401
 
 
 async def _claims(subject: str) -> dict[str, str]:
@@ -382,10 +440,10 @@ async def _claims(subject: str) -> dict[str, str]:
 
 async def test_access_middleware_maps_membership_and_configuration_errors(monkeypatch):
     monkeypatch.setenv("ORCH_AUTH_MODE", "cloudflare_access")
+    monkeypatch.setenv("ORCH_ORGANIZATION_SLUG", "acme")
+    monkeypatch.setenv("ORCH_ORGANIZATION_NAME", "Acme Inc.")
     headers = {
         "Cf-Access-Jwt-Assertion": "token",
-        "X-Orch-Organization-Slug": "acme",
-        "X-Orch-Organization-Name": "Acme",
     }
 
     class Verifier:
@@ -428,6 +486,8 @@ async def test_access_middleware_maps_membership_and_configuration_errors(monkey
 
 async def test_access_middleware_uses_the_application_database_by_default(monkeypatch):
     monkeypatch.setenv("ORCH_AUTH_MODE", "cloudflare_access")
+    monkeypatch.setenv("ORCH_ORGANIZATION_SLUG", "acme")
+    monkeypatch.setenv("ORCH_ORGANIZATION_NAME", "Acme Inc.")
     authorized: list[TenantIdentity] = []
 
     class Verifier:
@@ -456,12 +516,48 @@ async def test_access_middleware_uses_the_application_database_by_default(monkey
     ) as client:
         response = await client.get(
             "/api/protected",
-            headers={
-                "Cf-Access-Jwt-Assertion": "token",
-                "X-Orch-Organization-Slug": "acme",
-                "X-Orch-Organization-Name": "Acme",
-            },
+            headers={"Cf-Access-Jwt-Assertion": "token"},
         )
 
     assert response.status_code == 200
-    assert authorized == [TenantIdentity("acme", "Acme", "access|alice")]
+    assert authorized == [TenantIdentity("acme", "Acme Inc.", "access|alice")]
+
+
+async def test_access_middleware_passes_verified_email_to_authorizer(monkeypatch):
+    monkeypatch.setenv("ORCH_AUTH_MODE", "cloudflare_access")
+    monkeypatch.setenv("ORCH_ORGANIZATION_SLUG", "acme")
+    monkeypatch.setenv("ORCH_ORGANIZATION_NAME", "Acme Inc.")
+    received_calls: list[tuple[TenantIdentity, str | None]] = []
+
+    class Verifier:
+        async def verify(self, _token):
+            return {"sub": "access|bob", "email": "bob@acme.com"}
+
+    async def custom_authorizer(identity: TenantIdentity, verified_email: str | None = None):
+        received_calls.append((identity, verified_email))
+        return identity.context(role="member")
+
+    app = FastAPI()
+    app.add_middleware(
+        CloudflareAccessMiddleware,
+        verifier=Verifier(),
+        authorize=custom_authorizer,
+    )
+
+    @app.get("/api/protected")
+    async def protected():
+        return {"ok": True}
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="https://origin.test",
+    ) as client:
+        response = await client.get(
+            "/api/protected",
+            headers={"Cf-Access-Jwt-Assertion": "token"},
+        )
+
+    assert response.status_code == 200
+    assert received_calls == [
+        (TenantIdentity("acme", "Acme Inc.", "access|bob"), "bob@acme.com")
+    ]

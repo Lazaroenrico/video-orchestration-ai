@@ -1,10 +1,10 @@
 """Interface pública da persistência PostgreSQL multi-tenant."""
 
 from orchestrator.db.admin import (
-    MEMBERSHIP_ROLES,
     RUNTIME_ROLE,
     create_organization,
     grant_membership,
+    owner_bootstrap,
     provision_runtime_role,
     revoke_membership,
 )
@@ -23,6 +23,12 @@ from orchestrator.db.effects import (
     UncertainEffectError,
 )
 from orchestrator.db.feedback import PostgresFeedbackRepository
+from orchestrator.db.invitations import (
+    InvitationConflictError,
+    InvitationRecord,
+    PostgresInvitationRepository,
+    normalize_email,
+)
 from orchestrator.db.jobs import (
     CancellationSummary,
     CancelledGateError,
@@ -34,12 +40,33 @@ from orchestrator.db.jobs import (
     RunGate,
     StaleGateError,
 )
+from orchestrator.db.members import (
+    ExistingMemberError,
+    LastOwnerError,
+    MemberRecord,
+    MemberRepository,
+    PostgresMemberRepository,
+)
 from orchestrator.db.migrations import upgrade_database
 from orchestrator.db.prompts import PostgresPromptRepository
+from orchestrator.db.roles import (
+    MEMBERSHIP_ROLES,
+    VALID_ROLES,
+    validate_role,
+)
 from orchestrator.db.runs import PostgresRunRepository, RunIndexEntry, RunSnapshot
 from orchestrator.db.tenancy import TenantContext, TenantIdentity
 
 __all__ = [
+    "ExistingMemberError",
+    "LastOwnerError",
+    "MemberRecord",
+    "MemberRepository",
+    "PostgresMemberRepository",
+    "InvitationConflictError",
+    "InvitationRecord",
+    "PostgresInvitationRepository",
+    "normalize_email",
     "CancellationSummary",
     "CancelledGateError",
     "Database",
@@ -47,6 +74,8 @@ __all__ = [
     "PostgresArtifactRepository",
     "RUNTIME_ROLE",
     "MEMBERSHIP_ROLES",
+    "VALID_ROLES",
+    "validate_role",
     "PostgresCreatorRepository",
     "PostgresFeedbackRepository",
     "EffectReservation",
@@ -71,6 +100,7 @@ __all__ = [
     "create_organization",
     "grant_membership",
     "revoke_membership",
+    "owner_bootstrap",
     "get_shared_database",
     "close_shared_database",
 ]

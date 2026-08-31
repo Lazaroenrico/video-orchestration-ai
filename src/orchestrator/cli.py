@@ -29,6 +29,7 @@ from orchestrator.db import (
     TenantIdentity,
     create_organization,
     grant_membership,
+    owner_bootstrap,
     provision_runtime_role,
     revoke_membership,
     upgrade_database,
@@ -259,6 +260,35 @@ def membership_revoke(
     )
     suffix = "" if removed else " (já ausente)"
     click.echo(f"membership de {user_subject!r} em {organization_slug!r} revogada{suffix}")
+
+
+@db_commands.command(name="owner-bootstrap")
+@click.option(
+    "--migration-database-url",
+    envvar="MIGRATION_DATABASE_URL",
+    required=True,
+    help="Conexão direta e privilegiada.",
+)
+@click.option("--slug", "--organization-slug", "slug", required=True, help="Slug da organização.")
+@click.option("--name", "--organization-name", "name", required=True, help="Nome da organização.")
+@click.option("--email", "--owner-email", "email", required=True, help="E-mail do primeiro owner.")
+def db_owner_bootstrap(
+    migration_database_url: str,
+    slug: str,
+    name: str,
+    email: str,
+) -> None:
+    """Inicializa ou valida a organização criando o convite do primeiro owner de modo idempotente."""
+    try:
+        result = owner_bootstrap(
+            migration_database_url,
+            organization_slug=slug,
+            organization_name=name,
+            owner_email=email,
+        )
+    except (ValueError, RuntimeError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps(result, sort_keys=True))
 
 
 @cli.command(name="import-legacy")
