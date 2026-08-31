@@ -7,38 +7,69 @@ distribuído sem chamar provider pago.
 ## Banco e identidade
 
 O projeto Neon fica em `aws-sa-east-1`, PostgreSQL 16, com sete dias de PITR. Os dois
-segredos de conexão precisam apontar ao endpoint **direto**:
+segredos de conexão precisam apontar ao endpoint **direto** e nunca podem ser iguais:
 
-- `MIGRATION_DATABASE_URL`: papel privilegiado usado exclusivamente pelo job de
-  migração e pelos comandos administrativos.
-- `DATABASE_URL`: papel fixo `orchestrator_runtime`, sem `SUPERUSER`/`BYPASSRLS`,
-  usado por API e Runner.
+- `MIGRATION_DATABASE_URL`: papel administrativo/migrador privilegiado (`BYPASSRLS`),
+  usado exclusivamente pelo job de migração e pelos comandos administrativos (`db org-create`,
+  `membership-grant`). Em staging, utiliza o papel com `BYPASSRLS` provisionado pelo Neon;
+  localmente, utiliza o papel `orchestrator` (`LOGIN NOSUPERUSER BYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION`).
+- `DATABASE_URL`: papel não-proprietário de runtime `orchestrator_runtime`, estritamente
+  configurado com `LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION`,
+  usado exclusivamente por API e Runner.
+
+### Atributos esperados dos papéis
+
+| Papel | Escopo de Uso | Atributos Obrigatórios | URL de Conexão |
+| --- | --- | --- | --- |
+| Migrador (`orchestrator`) | Migrações Alembic e CLI admin | `LOGIN NOSUPERUSER BYPASSRLS` | `MIGRATION_DATABASE_URL` |
+| Runtime (`orchestrator_runtime`) | API FastAPI e Runners | `LOGIN NOSUPERUSER NOBYPASSRLS` | `DATABASE_URL` |
+
+### Ordem de provisionamento e preflight BYPASSRLS
+
+A migração `20260829_0012` possui um preflight check que valida se a conexão migradora
+possui `BYPASSRLS` ou `SUPERUSER`, falhando rápido com `RuntimeError` caso executada
+incorretamente com o papel de runtime. A ordem obrigatória de rollout é:
+
+1. **Bootstrap de Papéis:**
+   - **Local / Compose:** o serviço one-shot `db-roles` executa `infra/postgres/10-app-role.sql`
+     autenticado como `postgres` assim que o serviço de banco estiver saudável (`postgres: condition: service_healthy`).
+   - **Staging / Neon:** o OpenTofu provisiona o banco e o secret `runtime_role_password`.
+2. **Execução de Migrações:**
+   - O job `migrate` executa `orchestrator migrate` conectado via `MIGRATION_DATABASE_URL`.
+3. **Hardening de Runtime e Grants:**
+   - O workflow executa `orchestrator db provision-runtime` via `MIGRATION_DATABASE_URL`
+     para conceder privilégios em tabelas, sequences e funções (`EXECUTE ON ALL FUNCTIONS` e
+     `ALTER DEFAULT PRIVILEGES`) ao `orchestrator_runtime`.
+4. **Inicialização da Aplicação:**
+   - API e Runners iniciam conectados unicamente via `DATABASE_URL` (`orchestrator_runtime`).
 
 Não use hostname `-pooler`/pooled em nenhuma dessas URLs. O checkpointer do LangGraph
 depende de escopo transacional e de sessão previsível; migrações também exigem conexão
-direta. O workflow executa `orchestrator migrate` antes do rollout e depois endurece o
-papel runtime com `orchestrator db provision-runtime`.
+direta.
 
-Access valida a identidade, mas não concede acesso. Depois do primeiro apply:
+Access valida a identidade do usuário através do JWT verificado (`sub` canônico e claim `email`). Depois do primeiro deploy/apply de migrações:
 
 ```bash
-orchestrator db org-create \
+orchestrator db owner-bootstrap \
   --slug staging \
-  --name "UGC Orchestrator Staging"
+  --name "UGC Orchestrator Staging" \
+  --email "founder@example.com"
+```
 
+O comando `owner-bootstrap` cria a organização e um convite pendente para o primeiro `owner` de forma idempotente. Quando o owner faz seu primeiro login via Cloudflare Access, o convite é consumido atomicamente na transação da requisição (`claim_organization_invitation`), materializando o usuário e sua membership `owner`.
+
+Novos membros são convidados pela API autenticada (`POST /api/v2/invitations`) por administradores e proprietários. O onboarding é concluído no primeiro request em que o JWT verificado do Cloudflare Access apresentar o e-mail convidado.
+
+Para contas de serviço e acesso direto de emergência (break-glass), utilize `membership-grant`:
+
+```bash
 orchestrator db membership-grant \
   --organization-slug staging \
   --user-subject 'service|cloudflare-runner' \
   --role member
-
-orchestrator db membership-grant \
-  --organization-slug staging \
-  --user-subject '<sub do JWT Access>' \
-  --role member
 ```
 
-Todos usam `MIGRATION_DATABASE_URL`. Revogue com `db membership-revoke`; a API nunca
-cria organização, usuário ou membership durante uma requisição.
+Todos os comandos de CLI administrativa usam `MIGRATION_DATABASE_URL`. Revogue memberships ativas com `db membership-revoke`.
 
 ## Provisionamento
 
