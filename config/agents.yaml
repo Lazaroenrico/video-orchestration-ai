@@ -1,11 +1,13 @@
-# Live profile: only bounded creative work is agent-backed.
+# Live profile: only bounded creative work is agent-backed. O catálogo comum
+# (todos os stages em modo tool) vive em ../config-base/agents.yaml; aqui apenas
+# os três stages criativos sobem para modo agent.
 stages:
   concepts:
     executor: agent
     materializer: generate_concepts
     target_model: null
     system_prompt_path: prompts/agents/concepts.md
-    prompt_version: concepts-v2
+    prompt_version: concepts-v3
     schema_version: creative-v2
     agent_enabled: true
   scripts:
@@ -13,7 +15,7 @@ stages:
     materializer: write_script
     target_model: null
     system_prompt_path: prompts/agents/scripts.md
-    prompt_version: scripts-v2
+    prompt_version: scripts-v3
     schema_version: creative-v2
     agent_enabled: true
   creator_profiles:
@@ -21,6 +23,6 @@ stages:
     materializer: design_creator_roster
     target_model: null
     system_prompt_path: prompts/agents/creators.md
-    prompt_version: creators-v2
+    prompt_version: creators-v3
     schema_version: creative-v2
     agent_enabled: true

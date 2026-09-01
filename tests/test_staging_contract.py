@@ -56,8 +56,9 @@ def test_wrangler_routes_spa_api_sse_and_uses_distinct_container_roles():
 def test_worker_forwards_access_jwt_injects_tenant_and_only_wakes_runner():
     worker = (ROOT / "deploy/cloudflare/src/index.ts").read_text(encoding="utf-8")
 
-    assert 'headers.set("X-Orch-Organization-Slug"' in worker
-    assert 'headers.set("X-Orch-Organization-Name"' in worker
+    assert "ORCH_ORGANIZATION_SLUG: env.ORCH_ORGANIZATION_SLUG" in worker
+    assert "ORCH_ORGANIZATION_NAME: env.ORCH_ORGANIZATION_NAME" in worker
+    assert "X-Orch-Organization" not in worker
     assert "Cf-Access-Jwt-Assertion" in worker
     assert 'url.pathname.startsWith("/api/")' in worker
     assert "batch.messages" in worker

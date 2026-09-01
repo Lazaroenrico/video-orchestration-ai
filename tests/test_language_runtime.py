@@ -296,6 +296,23 @@ def test_language_model_factory_resolves_mock_deployment():
     assert factory.resolve_model_name("custom-mock") == "custom-mock"
 
 
+def test_language_model_factory_resolve_model_name_accepts_override_keyword():
+    from orchestrator.language_runtime import LanguageModelFactory
+
+    factory = LanguageModelFactory("mock")
+
+    assert factory.resolve_model_name(override="custom-mock") == "custom-mock"
+
+
+def test_language_model_factory_create_model_accepts_model_keyword():
+    from orchestrator.language_runtime import LanguageModelFactory, MockChatModel
+
+    model = LanguageModelFactory("mock").create_model(model="custom-mock")
+
+    assert isinstance(model, MockChatModel)
+    assert model.model == "custom-mock"
+
+
 def test_language_model_factory_rejects_arbitrary_or_unknown_provider():
     from orchestrator.language_runtime import LanguageModelFactory
 
@@ -501,7 +518,3 @@ async def test_non_mock_language_runtime_direct_methods_raise_runtime_error(monk
 
     with pytest.raises(RuntimeError, match="direct script generation is only available for the mock runtime"):
         await runtime.write_script(concept={"id": "c-1"})
-
-
-
-

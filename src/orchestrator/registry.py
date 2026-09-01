@@ -9,9 +9,10 @@ reais e mock sem tocar o grafo.
 
 Papéis não especificados em ``providers.yaml`` caem em ``mock`` (dry-run, custo zero).
 """
+
 from __future__ import annotations
 
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
 from orchestrator.adapters._throttle import get_replicate_throttle
 from orchestrator.adapters.creator_real import (
@@ -20,7 +21,9 @@ from orchestrator.adapters.creator_real import (
     build_real_creator_vercel_adapter,
 )
 from orchestrator.adapters.elevenlabs_voice_design import (
+    DEFAULT_PREVIEW_TEXT,
     ElevenLabsVoiceDesignAdapter,
+    voice_description_hash,
 )
 from orchestrator.adapters.ffmpeg_assembly import build_ffmpeg_assembly_adapter
 from orchestrator.adapters.integrity_qc import build_integrity_qc_adapter
@@ -33,18 +36,41 @@ from orchestrator.tracing import traced
 # ``upscale`` roda pós-montagem, sobre o vídeo final (não a imagem do creator).
 ROLES = ("creator", "video", "qc", "assembly", "upscale")
 
+__all__ = [
+    "DEFAULT_PREVIEW_TEXT",
+    "ROLES",
+    "CompositeAdapter",
+    "build_adapter_from_providers",
+    "register_adapter",
+    "resolve_adapter",
+    "voice_description_hash",
+]
+
+
+def _mock_clip_generator(
+    tiers: list[dict[str, Any]], latentsync: Optional[dict[str, Any]]
+) -> Callable[..., Any]:
+    """Fallback determinístico para tiers sem modelo real configurado.
+
+    A política de fallback é injetada no ``ReplicateVideoAdapter``: o módulo pago
+    não importa MockAdapter — a composition root (aqui) decide quem gera o clip
+    de fallback e com qual implementação.
+    """
+    mock = MockAdapter(tiers=tiers, latentsync=latentsync)
+    return mock.generate_clip
+
 
 def _build_replicate(pipeline: dict[str, Any]) -> ReplicateVideoAdapter:
     """Fábrica do ReplicateVideoAdapter — SDK lê REPLICATE_API_TOKEN do ambiente."""
+    latentsync = pipeline.get("latentsync", {})
     return ReplicateVideoAdapter(
         tiers=pipeline["tiers"],
         clip=pipeline.get("clip", {}),
         assembly=pipeline.get("assembly", {}),
-        latentsync=pipeline.get("latentsync", {}),
+        latentsync=latentsync,
         throttle=get_replicate_throttle(),
-        allow_mock_fallback=bool(
-            pipeline.get("video", {}).get("allow_mock_fallback", True)
-        ),
+        allow_mock_fallback=bool(pipeline.get("video", {}).get("allow_mock_fallback", True)),
+        mock_clip_generator=_mock_clip_generator(pipeline["tiers"], latentsync),
     )
 
 
@@ -94,11 +120,26 @@ class CompositeAdapter:
     def __init__(self, by_role: dict[str, Any]) -> None:
         self._by_role = by_role
 
-    # Ports OPCIONAIS do papel creator (reroll de voz e o sub-adapter ``voice``
-    # usado nos previews): só existem quando o adapter do papel os expõe. Quem
-    # chama usa ``getattr(adapter, ..., None)`` e cai no fallback quando ausente
-    # (ex.: MockAdapter) — por isso delegamos via __getattr__ em vez de métodos
-    # fixos, que fariam o fallback nunca disparar.
+    @property
+    def is_mock(self) -> bool:
+        """``True`` somente quando TODOS os papéis estão em mock (pipeline dry-run)."""
+        return all(getattr(adapter, "is_mock", False) for adapter in self._by_role.values())
+
+    def has_role(self, role: str) -> bool:
+        """Indica se um papel de domínio foi montado neste composite."""
+        return role in self._by_role
+
+    def get_role(self, role: str) -> Any:
+        """Adapter do papel solicitado (ou ``None`` para papel ausente)."""
+        return self._by_role.get(role)
+
+    # Ports OPCIONAIS dos papéis creator/video: continuam delegados via
+    # __getattr__ DE PROPÓSITO. Call sites sondam capacidades com
+    # ``getattr(adapter, ..., None)`` (ex.: ``reroll_creator_voice`` em
+    # nodes/stages.py, ``voice``/``image`` em tools/, ``latentsync_*`` em
+    # tools/video.py) e o fallback DEVE disparar quando o adapter do papel não
+    # expõe a capacidade — métodos fixos fariam essa sonda nunca cair no default.
+    # Para acesso não opcional, use ``get_role(role)``/``has_role(role)``.
     _OPTIONAL_CREATOR_ATTRS = frozenset({"reroll_creator_voice", "voice", "image"})
     _OPTIONAL_VIDEO_ATTRS = frozenset(
         {

@@ -6,7 +6,7 @@ import { Button } from "../components/Button";
 import { Icon } from "../components/Icon";
 import { Drawer } from "../components/Drawer";
 import { Loading, ErrorState, EmptyState } from "../components/States";
-import { errorMessage, useCreators, useStartRunMutation } from "../api/queries";
+import { errorMessage, useCreators, useSessionQuery, useStartRunMutation } from "../api/queries";
 import { mediaUrl } from "../api/urls";
 import { creatorVoiceUri } from "../api/media";
 import type { Creator } from "../types";
@@ -72,6 +72,8 @@ export function Creators() {
   const loading = creatorsQuery.isLoading;
   const error = errorMessage(creatorsQuery.error);
   const startRun = useStartRunMutation();
+  const session = useSessionQuery();
+  const canCreate = session.data ? session.data.permissions.includes("runs:create") : false;
   const navigate = useNavigate();
   const [selected, setSelected] = useState<Creator | null>(null);
   const [query, setQuery] = useState("");
@@ -169,7 +171,7 @@ export function Creators() {
         onClose={() => setSelected(null)}
         title={selected?.id ?? ""}
         footer={
-          selected ? (
+          selected && canCreate ? (
             <Button icon="movie" className="w-full" onClick={launchDraft} loading={startRun.isPending}>
               {startRun.isPending ? "Starting draft" : `Draft Video with ${selected.id}`}
             </Button>

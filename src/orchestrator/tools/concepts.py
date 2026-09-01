@@ -94,10 +94,7 @@ async def generate_concepts_tool(
                 product_mechanism=str(
                     concept.get("product_mechanism") or campaign_input.offer
                 ),
-                evidence_basis=(
-                    concept.get("evidence_basis")
-                    or ("performance" if bias else "cold_test")
-                ),
+                evidence_basis=concept.get("evidence_basis") or "cold_test",
                 format=str(concept.get("format") or "talking_head"),
                 hook_style=str(concept.get("hook_style") or "problem"),
             )

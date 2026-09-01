@@ -1,4 +1,5 @@
 """Carga dos arquivos de configuração (YAML) e caminhos padrão."""
+
 from __future__ import annotations
 
 import os
@@ -11,6 +12,12 @@ import yaml
 from orchestrator.agent_catalog import AgentCatalog, build_agent_catalog, default_agent_catalog
 
 _ENV_RE = re.compile(r"\$\{([A-Z0-9_]+)(?::-([^}]*))?\}")
+
+# Diretório irmão dos perfis com o conteúdo compartilhado. Cada perfil
+# (config/, config-mock/, config-staging/) mantém apenas os overrides;
+# o loader funde base + perfil (deep-merge, overlay vence; listas são
+# substituídas wholesale).
+_BASE_CONFIG_DIRNAME = "config-base"
 
 
 def _expand_env(text: str) -> str:
@@ -27,32 +34,67 @@ def config_dir(path: str | os.PathLike[str] | None = None) -> Path:
     return Path(path or os.environ.get("ORCH_CONFIG_DIR", "config"))
 
 
-def _load_yaml(path: Path, expand: bool = False) -> dict[str, Any]:
+def config_base_dir(path: str | os.PathLike[str] | None = None) -> Path | None:
+    """Base compartilhada do perfil (irmã do config dir); None se não existir."""
+    candidate = config_dir(path).parent / _BASE_CONFIG_DIRNAME
+    return candidate if candidate.is_dir() else None
+
+
+def _deep_merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
+    """Fusão recursiva: overlay vence por chave; listas e escalares são substituídos."""
+    merged = dict(base)
+    for key, value in overlay.items():
+        if isinstance(merged.get(key), dict) and isinstance(value, dict):
+            merged[key] = _deep_merge(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def _load_yaml(path: Path, expand: bool = True) -> dict[str, Any]:
     text = path.read_text(encoding="utf-8")
     if expand:
         text = _expand_env(text)
     return yaml.safe_load(text) or {}
 
 
+def _load_merged_yaml(name: str, path: str | os.PathLike[str] | None = None) -> dict[str, Any]:
+    """Carrega <perfil>/<name> fundido sobre <config-base>/<name> (se houver)."""
+    data = _load_yaml(config_dir(path) / name)
+    base = config_base_dir(path)
+    if base is not None:
+        base_path = base / name
+        if base_path.exists():
+            data = _deep_merge(_load_yaml(base_path), data)
+    return data
+
+
 def load_pipeline(path: str | None = None) -> dict[str, Any]:
-    return _load_yaml(config_dir(path) / "pipeline.yaml")
+    return _load_merged_yaml("pipeline.yaml", path)
 
 
 def load_providers(path: str | None = None) -> dict[str, Any]:
-    return _load_yaml(config_dir(path) / "providers.yaml")
+    return _load_merged_yaml("providers.yaml", path)
 
 
 def load_judge(path: str | None = None) -> dict[str, Any]:
     # judge.yaml tem placeholders de ambiente (url/key do gateway).
-    return _load_yaml(config_dir(path) / "judge.yaml", expand=True)
+    return _load_merged_yaml("judge.yaml", path)
 
 
 def load_agent_catalog(path: str | None = None) -> AgentCatalog:
-    base = config_dir(path)
-    catalog_path = base / "agents.yaml"
-    if not catalog_path.exists():
+    profile = config_dir(path)
+    catalog_path = profile / "agents.yaml"
+    base = config_base_dir(path)
+    base_catalog_path = base / "agents.yaml" if base is not None else None
+    if not catalog_path.exists() and (base_catalog_path is None or not base_catalog_path.exists()):
         return default_agent_catalog()
-    return build_agent_catalog(_load_yaml(catalog_path), base_dir=base)
+    fallback_dirs = (base,) if base is not None else ()
+    return build_agent_catalog(
+        _load_merged_yaml("agents.yaml", path),
+        base_dir=profile,
+        fallback_dirs=fallback_dirs,
+    )
 
 
 def default_db_path() -> Path:

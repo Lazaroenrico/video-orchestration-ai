@@ -3,6 +3,58 @@
 
 export type MediaType = "image" | "video" | "audio" | "reference";
 
+export type UserRole = "owner" | "admin" | "member" | "viewer";
+
+export interface UserOrganization {
+  id: string;
+  slug: string;
+  name: string;
+}
+
+export interface UserSession {
+  id: string;
+  subject: string;
+  email?: string | null;
+  display_name?: string | null;
+  organization: UserOrganization;
+  role: UserRole;
+  permissions: string[];
+  auth_mode: "cloudflare_access" | "disabled" | string;
+}
+
+export interface MemberRecord {
+  id: string;
+  subject: string;
+  email?: string | null;
+  display_name?: string | null;
+  role: UserRole;
+  created_at: string;
+}
+
+export interface GrantMemberBody {
+  subject: string;
+  role: UserRole;
+  email?: string | null;
+  display_name?: string | null;
+}
+
+export interface UpdateMemberRoleBody {
+  role: UserRole;
+}
+
+export interface Invitation {
+  organization_id: string;
+  email: string;
+  role: UserRole;
+  invited_by_user_id?: string | null;
+  created_at: string;
+}
+
+export interface CreateInvitationBody {
+  email: string;
+  role: UserRole;
+}
+
 export interface Artifact {
   kind: string;
   uri: string;
@@ -180,6 +232,7 @@ export interface StartRunBody {
   video_prompt?: string | null;
   approve_creators?: boolean;
   edit_concepts?: boolean;
+  script_model?: string | null;
 }
 
 export interface PerformanceMetric {
@@ -205,6 +258,7 @@ export interface CampaignInput {
   objective?: "conversion" | "awareness" | "consideration";
   batch_size?: number;
   performance?: PerformanceSnapshot | null;
+  script_model?: string | null;
 }
 
 export interface StartRunV2Body {

@@ -1,23 +1,2 @@
-# Staging profile: same contracts and prompts, deterministic direct tools.
-stages:
-  concepts:
-    executor: tool
-    materializer: generate_concepts
-    system_prompt_path: prompts/agents/concepts.md
-    prompt_version: concepts-v2
-    schema_version: creative-v2
-    agent_enabled: false
-  scripts:
-    executor: tool
-    materializer: write_script
-    system_prompt_path: prompts/agents/scripts.md
-    prompt_version: scripts-v2
-    schema_version: creative-v2
-    agent_enabled: false
-  creator_profiles:
-    executor: tool
-    materializer: design_creator_roster
-    system_prompt_path: prompts/agents/creators.md
-    prompt_version: creators-v2
-    schema_version: creative-v2
-    agent_enabled: false
+# Perfil staging: herda o catálogo inteiro de ../config-base/agents.yaml
+# (todos os stages em modo tool; prompts resolvidos em ../config-base/prompts/agents/).

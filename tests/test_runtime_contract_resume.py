@@ -381,3 +381,36 @@ async def test_config_mock_with_judge_gateway_not_treated_as_paid_on_legacy_resu
     assert len(resumed_out["results"]) == 6
 
 
+async def test_run_pipeline_injects_open_artifact_repository_into_graph_config(tmp_path, pipeline_cfg, monkeypatch):
+    """Garante que run_pipeline injeta a instância de ArtifactRepository aberta em _build_config e no grafo."""
+    from contextlib import asynccontextmanager
+
+    db_path = tmp_path / "checkpoint.sqlite"
+    sentinel_repo = object()
+
+    @asynccontextmanager
+    async def fake_open_artifact_repo(path):
+        yield sentinel_repo
+
+    monkeypatch.setattr(runner, "open_artifact_repository", fake_open_artifact_repo)
+
+    captured_configs: list[dict] = []
+
+    class FakeGraph:
+        async def ainvoke(self, initial_state, config):
+            captured_configs.append(config)
+            return {"run_id": initial_state["run_id"], "results": []}
+
+    monkeypatch.setattr(runner, "build_graph", lambda *_args, **_kwargs: FakeGraph())
+
+    run_id, out = await runner.run_pipeline(
+        pipeline_cfg,
+        _MOCK_PROVIDERS,
+        db_path=db_path,
+        run_id="run-repo-injection",
+        batch=2,
+    )
+
+    assert len(captured_configs) == 1
+    artifact_db = captured_configs[0]["configurable"].get("artifact_db")
+    assert artifact_db is sentinel_repo

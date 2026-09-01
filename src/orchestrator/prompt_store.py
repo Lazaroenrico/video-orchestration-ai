@@ -1,28 +1,6 @@
-"""Persistência de prompts do dashboard (templates + último usado por tipo).
-
-Antes, os templates de prompt viviam só no ``localStorage`` do browser. O primeiro
-backend no servidor foi um arquivo JSON (``.orchestrator/prompts.json`` por padrão,
-override via ``ORCH_PROMPTS``), ainda preservado para mock/offline:
-
-    {
-      "templates": {
-        "1": {"id": "1", "_idx": 1, "kind": "creator", "title": "...",
-               "desc": "...", "text": "..."}
-      },
-      "last_used": {"creator": "...", "video": "..."}
-    }
-
-Com ``DATABASE_URL``, ``open_repository`` seleciona o repositório PostgreSQL
-tenant-scoped da ADR-D36. Sem ela, ``_idx`` incremental global no JSON define
-"mais recente" de forma determinística
-(timestamps de FS não são confiáveis em CI/containers). ``last_used`` guarda o
-último prompt enviado num run por tipo — a UI usa como valor inicial das
-textareas quando não há rascunho local. Os dois backends mantêm o mesmo contrato.
-"""
 from __future__ import annotations
 
 import json
-import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, AsyncIterator, Optional, Protocol
@@ -42,7 +20,9 @@ def _read_store(path: Path) -> dict[str, Any]:
 
 def _write_store(path: Path, data: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2, sort_keys=True, ensure_ascii=False), encoding="utf-8")
+    path.write_text(
+        json.dumps(data, indent=2, sort_keys=True, ensure_ascii=False), encoding="utf-8"
+    )
 
 
 def save_template(
@@ -195,14 +175,16 @@ class JsonPromptRepository:
 @asynccontextmanager
 async def open_repository(path: str | Path) -> AsyncIterator[PromptRepository]:
     """Seleciona PostgreSQL por ``DATABASE_URL``; sem ela, mantém JSON local."""
-    if not os.environ.get("DATABASE_URL"):
-        yield JsonPromptRepository(path)
-        return
-
     # Imports tardios evitam carregar a stack PostgreSQL no modo mock/local.
-    from orchestrator.db import PostgresPromptRepository, TenantIdentity, get_shared_database
+    from orchestrator.runtime_mode import open_repository_backend
 
-    database = await get_shared_database()
-    tenant = await database.resolve_tenant(TenantIdentity.from_env())
-    yield PostgresPromptRepository(database, tenant)
+    def postgres_repository(database, tenant):
+        from orchestrator.db import PostgresPromptRepository
 
+        return PostgresPromptRepository(database, tenant)
+
+    async with open_repository_backend(
+        lambda: JsonPromptRepository(path),
+        postgres_repository,
+    ) as repository:
+        yield repository

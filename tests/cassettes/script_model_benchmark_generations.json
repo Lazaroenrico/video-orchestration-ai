@@ -1,0 +1,668 @@
+{
+  "case-finance-app:alibaba/qwen3.8-max:0": {
+    "latency_ms": 5800,
+    "structured_response": {
+      "draft": {
+        "call_to_action": "Download the app now and start saving money today.",
+        "estimated_duration": 16,
+        "on_screen_text": [
+          "Stop losing money on hidden subscriptions"
+        ],
+        "spoken_beats": [
+          {
+            "seconds": 3,
+            "section": "hook",
+            "text": "Stop losing money on hidden bank fees and forgotten subscriptions every month."
+          },
+          {
+            "seconds": 10,
+            "section": "body",
+            "text": "This smart finance app automatically scans your recurring charges, flags unnecessary expenses, and organizes your budget so you can effortlessly build your savings."
+          },
+          {
+            "seconds": 3,
+            "section": "cta",
+            "text": "Download the app now and start saving money today."
+          }
+        ],
+        "visual_beats": [
+          "close-up of the mobile app tracking monthly expenses"
+        ]
+      }
+    },
+    "usage": {
+      "input_tokens": 420,
+      "output_tokens": 180,
+      "total_tokens": 600
+    }
+  },
+  "case-finance-app:alibaba/qwen3.8-max:1": {
+    "latency_ms": 5900,
+    "structured_response": {
+      "draft": {
+        "call_to_action": "Tap the link to secure your budget in minutes.",
+        "estimated_duration": 16,
+        "on_screen_text": [
+          "Track every dollar automatically"
+        ],
+        "spoken_beats": [
+          {
+            "seconds": 3,
+            "section": "hook",
+            "text": "If you never know where your paycheck goes, watch this simple trick."
+          },
+          {
+            "seconds": 10,
+            "section": "body",
+            "text": "With this personal finance tracker, all your accounts connect safely in one place, showing you exactly how to cut bills and grow your emergency fund fast."
+          },
+          {
+            "seconds": 3,
+            "section": "cta",
+            "text": "Tap the link to secure your budget in minutes."
+          }
+        ],
+        "visual_beats": [
+          "creator showing live financial dashboard on phone"
+        ]
+      }
+    },
+    "usage": {
+      "input_tokens": 425,
+      "output_tokens": 185,
+      "total_tokens": 610
+    }
+  },
+  "case-finance-app:deepseek/deepseek-v4-pro:0": {
+    "latency_ms": 21500,
+    "structured_response": {
+      "draft": {
+        "call_to_action": "Try the smart budget assistant today for free.",
+        "estimated_duration": 16,
+        "on_screen_text": [
+          "Cut wasted spending instantly"
+        ],
+        "spoken_beats": [
+          {
+            "seconds": 3,
+            "section": "hook",
+            "text": "Are you still tracking your expenses manually on outdated spreadsheets?"
+          },
+          {
+            "seconds": 10,
+            "section": "body",
+            "text": "This automated money manager alerts you before bills are due, cancels unwanted free trials, and creates a personalized savings plan tailored to your financial goals."
+          },
+          {
+            "seconds": 3,
+            "section": "cta",
+            "text": "Try the smart budget assistant today for free."
+          }
+        ],
+        "visual_beats": [
+          "screen recording of quick spending breakdown"
+        ]
+      }
+    },
+    "usage": {
+      "input_tokens": 440,
+      "output_tokens": 190,
+      "total_tokens": 630
+    }
+  },
+  "case-finance-app:deepseek/deepseek-v4-pro:1": {
+    "latency_ms": 22000,
+    "structured_response": {
+      "draft": {
+        "call_to_action": "Download free on iOS and Android right now.",
+        "estimated_duration": 16,
+        "on_screen_text": [
+          "Save hundreds every single month"
+        ],
+        "spoken_beats": [
+          {
+            "seconds": 3,
+            "section": "hook",
+            "text": "Here is the number one reason most people struggle to save money."
+          },
+          {
+            "seconds": 10,
+            "section": "body",
+            "text": "Micro-transactions eat up your cash without you noticing, but this intelligent assistant categorizes every purchase instantly and keeps you on track without restrictive budgets."
+          },
+          {
+            "seconds": 3,
+            "section": "cta",
+            "text": "Download free on iOS and Android right now."
+          }
+        ],
+        "visual_beats": [
+          "creator smiling while reviewing positive balance"
+        ]
+      }
+    },
+    "usage": {
+      "input_tokens": 435,
+      "output_tokens": 185,
+      "total_tokens": 620
+    }
+  },
+  "case-finance-app:google/gemini-3.7-flash:0": {
+    "latency_ms": 6800,
+    "structured_response": {
+      "draft": {
+        "call_to_action": "Click below to start managing your money smarter.",
+        "estimated_duration": 16,
+        "on_screen_text": [
+          "Smart AI budget tool"
+        ],
+        "spoken_beats": [
+          {
+            "seconds": 3,
+            "section": "hook",
+            "text": "Stop stressing about your monthly bills and take back control."
+          },
+          {
+            "seconds": 10,
+            "section": "body",
+            "text": "This AI-powered financial assistant gives you real-time insights into your daily cash flow, helping you eliminate debt and reach your financial freedom faster than ever."
+          },
+          {
+            "seconds": 3,
+            "section": "cta",
+            "text": "Click below to start managing your money smarter."
+          }
+        ],
+        "visual_beats": [
+          "phone displaying debt payoff progress graph"
+        ]
+      }
+    },
+    "usage": {
+      "input_tokens": 410,
+      "output_tokens": 175,
+      "total_tokens": 585
+    }
+  },
+  "case-finance-app:google/gemini-3.7-flash:1": {
+    "latency_ms": 7000,
+    "structured_response": {
+      "draft": {
+        "call_to_action": "Claim your free trial through the link below.",
+        "estimated_duration": 16,
+        "on_screen_text": [
+          "Your pocket money expert"
+        ],
+        "spoken_beats": [
+          {
+            "seconds": 3,
+            "section": "hook",
+            "text": "What if you had a personal financial advisor right in your pocket?"
+          },
+          {
+            "seconds": 10,
+            "section": "body",
+            "text": "Our award-winning app monitors your accounts around the clock, discovers hidden savings opportunities, and automates your deposits so you can achieve your dream goals."
+          },
+          {
+            "seconds": 3,
+            "section": "cta",
+            "text": "Claim your free trial through the link below."
+          }
+        ],
+        "visual_beats": [
+          "clean interface animation showing automated deposits"
+        ]
+      }
+    },
+    "usage": {
+      "input_tokens": 415,
+      "output_tokens": 180,
+      "total_tokens": 595
+    }
+  },
+  "case-kitchen-gadget:alibaba/qwen3.8-max:0": {
+    "latency_ms": 5700,
+    "structured_response": {
+      "draft": {
+        "call_to_action": "Order yours today while promo stocks last.",
+        "estimated_duration": 16,
+        "on_screen_text": [
+          "Prep dinner in under five minutes"
+        ],
+        "spoken_beats": [
+          {
+            "seconds": 3,
+            "section": "hook",
+            "text": "Stop spending thirty painful minutes chopping vegetables every single evening."
+          },
+          {
+            "seconds": 10,
+            "section": "body",
+            "text": "This multifunctional kitchen slicer preps onions, potatoes, and salads in seconds with stainless steel blades that deliver uniform cuts with zero mess on your counter."
+          },
+          {
+            "seconds": 3,
+            "section": "cta",
+            "text": "Order yours today while promo stocks last."
+          }
+        ],
+        "visual_beats": [
+          "quick demo slicing cucumber directly into container"
+        ]
+      }
+    },
+    "usage": {
+      "input_tokens": 430,
+      "output_tokens": 180,
+      "total_tokens": 610
+    }
+  },
+  "case-kitchen-gadget:alibaba/qwen3.8-max:1": {
+    "latency_ms": 5800,
+    "structured_response": {
+      "draft": {
+        "call_to_action": "Get 50 percent off with free shipping today.",
+        "estimated_duration": 16,
+        "on_screen_text": [
+          "The ultimate kitchen time-saver"
+        ],
+        "spoken_beats": [
+          {
+            "seconds": 3,
+            "section": "hook",
+            "text": "This viral gadget completely changed how I cook dinner every night."
+          },
+          {
+            "seconds": 10,
+            "section": "body",
+            "text": "It dices, juliennes, and grates with interchangeable razor-sharp inserts, cutting meal prep time in half while keeping your fingers completely safe from sharp kitchen knives."
+          },
+          {
+            "seconds": 3,
+            "section": "cta",
+            "text": "Get 50 percent off with free shipping today."
+          }
+        ],
+        "visual_beats": [
+          "side by side comparison of manual cutting vs gadget"
+        ]
+      }
+    },
+    "usage": {
+      "input_tokens": 435,
+      "output_tokens": 185,
+      "total_tokens": 620
+    }
+  },
+  "case-kitchen-gadget:deepseek/deepseek-v4-pro:0": {
+    "latency_ms": 22200,
+    "structured_response": {
+      "draft": {
+        "call_to_action": "Tap the shop button to upgrade your kitchen.",
+        "estimated_duration": 16,
+        "on_screen_text": [
+          "No more tears when cutting onions"
+        ],
+        "spoken_beats": [
+          {
+            "seconds": 3,
+            "section": "hook",
+            "text": "Never cry cutting an onion again thanks to this genius kitchen tool."
+          },
+          {
+            "seconds": 10,
+            "section": "body",
+            "text": "One quick press delivers perfect cubes instantly, locking in odors and catching everything neatly inside the built-in measuring bowl for effortless cleanup in your dishwasher."
+          },
+          {
+            "seconds": 3,
+            "section": "cta",
+            "text": "Tap the shop button to upgrade your kitchen."
+          }
+        ],
+        "visual_beats": [
+          "one press chopping onion without mess"
+        ]
+      }
+    },
+    "usage": {
+      "input_tokens": 445,
+      "output_tokens": 190,
+      "total_tokens": 635
+    }
+  },
+  "case-kitchen-gadget:deepseek/deepseek-v4-pro:1": {
+    "latency_ms": 22500,
+    "structured_response": {
+      "draft": {
+        "call_to_action": "Shop now before the launch discount ends.",
+        "estimated_duration": 16,
+        "on_screen_text": [
+          "Compact 8-in-1 food chopper"
+        ],
+        "spoken_beats": [
+          {
+            "seconds": 3,
+            "section": "hook",
+            "text": "If your kitchen counters are cluttered with bulky appliances, check this out."
+          },
+          {
+            "seconds": 10,
+            "section": "body",
+            "text": "This eight-in-one compact vegetable chopper replaces multiple heavy graters, collapses for easy storage, and lets you cook fresh gourmet meals in a fraction of the time."
+          },
+          {
+            "seconds": 3,
+            "section": "cta",
+            "text": "Shop now before the launch discount ends."
+          }
+        ],
+        "visual_beats": [
+          "compact storage demonstration in small drawer"
+        ]
+      }
+    },
+    "usage": {
+      "input_tokens": 440,
+      "output_tokens": 190,
+      "total_tokens": 630
+    }
+  },
+  "case-kitchen-gadget:google/gemini-3.7-flash:0": {
+    "latency_ms": 6900,
+    "structured_response": {
+      "draft": {
+        "call_to_action": "Grab your kitchen chopper with special discount now.",
+        "estimated_duration": 16,
+        "on_screen_text": [
+          "Fast healthy meals every day"
+        ],
+        "spoken_beats": [
+          {
+            "seconds": 3,
+            "section": "hook",
+            "text": "How I make healthy fresh dinners after work without getting exhausted."
+          },
+          {
+            "seconds": 10,
+            "section": "body",
+            "text": "This heavy-duty chopper preps fresh stir-fry and salad ingredients in under three minutes, giving you restaurant-quality precision cuts without tedious prep work every night."
+          },
+          {
+            "seconds": 3,
+            "section": "cta",
+            "text": "Grab your kitchen chopper with special discount now."
+          }
+        ],
+        "visual_beats": [
+          "colorful bowl of freshly chopped vegetables"
+        ]
+      }
+    },
+    "usage": {
+      "input_tokens": 420,
+      "output_tokens": 180,
+      "total_tokens": 600
+    }
+  },
+  "case-kitchen-gadget:google/gemini-3.7-flash:1": {
+    "latency_ms": 6800,
+    "structured_response": {
+      "draft": {
+        "call_to_action": "Order online today and get free delivery.",
+        "estimated_duration": 16,
+        "on_screen_text": [
+          "Dishwasher safe and BPA free"
+        ],
+        "spoken_beats": [
+          {
+            "seconds": 3,
+            "section": "hook",
+            "text": "Here is the kitchen secret every busy parent needs to know."
+          },
+          {
+            "seconds": 10,
+            "section": "body",
+            "text": "Made with food-grade BPA-free materials, this slicer speeds up family meal prep safely and rinses clean under running water in seconds so you can relax after dinner."
+          },
+          {
+            "seconds": 3,
+            "section": "cta",
+            "text": "Order online today and get free delivery."
+          }
+        ],
+        "visual_beats": [
+          "quick rinse under faucet showing easy cleanup"
+        ]
+      }
+    },
+    "usage": {
+      "input_tokens": 425,
+      "output_tokens": 180,
+      "total_tokens": 605
+    }
+  },
+  "case-skincare:alibaba/qwen3.8-max:0": {
+    "latency_ms": 5700,
+    "structured_response": {
+      "draft": {
+        "call_to_action": "Tap to claim your introductory bottle with free shipping.",
+        "estimated_duration": 16,
+        "on_screen_text": [
+          "20% Pure Vitamin C Serum"
+        ],
+        "spoken_beats": [
+          {
+            "seconds": 3,
+            "section": "hook",
+            "text": "Your vitamin C serum might be oxidized before you even open it."
+          },
+          {
+            "seconds": 10,
+            "section": "body",
+            "text": "Our twenty percent pure vitamin C formula uses an airtight airless dispenser to guarantee maximum potency, fading stubborn dark spots and revealing glowing skin in four weeks."
+          },
+          {
+            "seconds": 3,
+            "section": "cta",
+            "text": "Tap to claim your introductory bottle with free shipping."
+          }
+        ],
+        "visual_beats": [
+          "texture drop on back of hand showing clear golden serum"
+        ]
+      }
+    },
+    "usage": {
+      "input_tokens": 435,
+      "output_tokens": 185,
+      "total_tokens": 620
+    }
+  },
+  "case-skincare:alibaba/qwen3.8-max:1": {
+    "latency_ms": 5800,
+    "structured_response": {
+      "draft": {
+        "call_to_action": "Try it risk-free today with our money-back guarantee.",
+        "estimated_duration": 16,
+        "on_screen_text": [
+          "Radiant skin in 4 weeks"
+        ],
+        "spoken_beats": [
+          {
+            "seconds": 3,
+            "section": "hook",
+            "text": "If your skincare routine is not giving you that glass skin glow, listen up."
+          },
+          {
+            "seconds": 10,
+            "section": "body",
+            "text": "This dermatologically tested, vegan formula absorbs instantly without sticky residue, delivering potent antioxidants deep into your skin to even texture and boost natural collagen."
+          },
+          {
+            "seconds": 3,
+            "section": "cta",
+            "text": "Try it risk-free today with our money-back guarantee."
+          }
+        ],
+        "visual_beats": [
+          "creator applying serum to cheek with glowing finish"
+        ]
+      }
+    },
+    "usage": {
+      "input_tokens": 440,
+      "output_tokens": 185,
+      "total_tokens": 625
+    }
+  },
+  "case-skincare:deepseek/deepseek-v4-pro:0": {
+    "latency_ms": 22100,
+    "structured_response": {
+      "draft": {
+        "call_to_action": "Get yours today at the exclusive launch price.",
+        "estimated_duration": 16,
+        "on_screen_text": [
+          "Airless pump locks in active potency"
+        ],
+        "spoken_beats": [
+          {
+            "seconds": 3,
+            "section": "hook",
+            "text": "Most vitamin C serums turn brown and useless within two weeks."
+          },
+          {
+            "seconds": 10,
+            "section": "body",
+            "text": "Our patented light-blocking airless bottle protects the active ingredients from oxygen, ensuring every single drop delivers fresh, clinical-strength brightness for smoother, firmer skin."
+          },
+          {
+            "seconds": 3,
+            "section": "cta",
+            "text": "Get yours today at the exclusive launch price."
+          }
+        ],
+        "visual_beats": [
+          "close-up of pump dispensing perfect single dose"
+        ]
+      }
+    },
+    "usage": {
+      "input_tokens": 450,
+      "output_tokens": 195,
+      "total_tokens": 645
+    }
+  },
+  "case-skincare:deepseek/deepseek-v4-pro:1": {
+    "latency_ms": 22300,
+    "structured_response": {
+      "draft": {
+        "call_to_action": "Tap below to order with special launch discount.",
+        "estimated_duration": 16,
+        "on_screen_text": [
+          "Dermatologist tested and 100% vegan"
+        ],
+        "spoken_beats": [
+          {
+            "seconds": 3,
+            "section": "hook",
+            "text": "Why spend hundreds on luxury treatments when this serum works better?"
+          },
+          {
+            "seconds": 10,
+            "section": "body",
+            "text": "Formulated with stabilized twenty percent vitamin C and hyaluronic acid, it hydrates deeply while reversing sun damage and reducing hyperpigmentation in just four short weeks."
+          },
+          {
+            "seconds": 3,
+            "section": "cta",
+            "text": "Tap below to order with special launch discount."
+          }
+        ],
+        "visual_beats": [
+          "before and after texture macro close-up"
+        ]
+      }
+    },
+    "usage": {
+      "input_tokens": 445,
+      "output_tokens": 190,
+      "total_tokens": 635
+    }
+  },
+  "case-skincare:google/gemini-3.7-flash:0": {
+    "latency_ms": 6900,
+    "structured_response": {
+      "draft": {
+        "call_to_action": "Click to shop now with 100% satisfaction guarantee.",
+        "estimated_duration": 16,
+        "on_screen_text": [
+          "Even skin tone and fade dark spots"
+        ],
+        "spoken_beats": [
+          {
+            "seconds": 3,
+            "section": "hook",
+            "text": "The one step you are missing in your morning skincare routine."
+          },
+          {
+            "seconds": 10,
+            "section": "body",
+            "text": "This dermatologist-approved vitamin C booster shields your complexion from environmental pollution and UV damage while smoothing fine lines for a naturally luminous, youthful finish."
+          },
+          {
+            "seconds": 3,
+            "section": "cta",
+            "text": "Click to shop now with 100% satisfaction guarantee."
+          }
+        ],
+        "visual_beats": [
+          "morning sunlight hitting glowing hydrated skin"
+        ]
+      }
+    },
+    "usage": {
+      "input_tokens": 430,
+      "output_tokens": 185,
+      "total_tokens": 615
+    }
+  },
+  "case-skincare:google/gemini-3.7-flash:1": {
+    "latency_ms": 7000,
+    "structured_response": {
+      "draft": {
+        "call_to_action": "Order now to get free express shipping today.",
+        "estimated_duration": 16,
+        "on_screen_text": [
+          "Gentle for all skin types"
+        ],
+        "spoken_beats": [
+          {
+            "seconds": 3,
+            "section": "hook",
+            "text": "Finally, a powerful vitamin C serum that does not irritate sensitive skin."
+          },
+          {
+            "seconds": 10,
+            "section": "body",
+            "text": "Our clean, fragrance-free formula is gentle enough for daily morning application, brightening uneven patches and restoring healthy bounce with noticeable improvements in thirty days."
+          },
+          {
+            "seconds": 3,
+            "section": "cta",
+            "text": "Order now to get free express shipping today."
+          }
+        ],
+        "visual_beats": [
+          "creator lightly patting serum into clean skin"
+        ]
+      }
+    },
+    "usage": {
+      "input_tokens": 435,
+      "output_tokens": 185,
+      "total_tokens": 620
+    }
+  }
+}

@@ -182,10 +182,15 @@ class Database:
             )
         return tenant
 
-    async def authorize_tenant(self, identity: TenantIdentity) -> TenantContext:
-        """Resolve uma membership existente sem materializar identidade ou acesso."""
+    async def authorize_tenant(
+        self,
+        identity: TenantIdentity,
+        verified_email: str | None = None,
+    ) -> TenantContext:
+        """Resolve uma membership existente ou consome convite pendente por e-mail verificado."""
         tenant = identity.context()
         async with self.connection(tenant) as connection:
+            # 1. Verifica se já existe membership ativa para o usuário
             cursor = await connection.execute(
                 """
                 SELECT membership.role
@@ -206,11 +211,36 @@ class Database:
                     identity.user_subject,
                 ),
             )
-            if await cursor.fetchone() is None:
+            row = await cursor.fetchone()
+            if row is not None:
+                return tenant.with_role(str(row[0]))
+
+            # 2. Sem membership: se não houver e-mail verificado, recusa imediatamente
+            if not verified_email or not str(verified_email).strip():
                 raise TenantAuthorizationError(
                     "membership inexistente para usuário e organização informados"
                 )
-        return tenant
+
+            # 3. Tenta consumir convite pendente atomicamente
+            claim_cursor = await connection.execute(
+                """
+                SELECT public.claim_organization_invitation(%s, %s, %s, %s, %s)
+                """,
+                (
+                    tenant.organization_id,
+                    tenant.user_id,
+                    identity.user_subject,
+                    str(verified_email).strip(),
+                    None,
+                ),
+            )
+            claim_row = await claim_cursor.fetchone()
+            if claim_row is None or claim_row[0] is None:
+                raise TenantAuthorizationError(
+                    "membership e convite inexistentes para usuário e organização informados"
+                )
+            role = str(claim_row[0])
+            return tenant.with_role(role)
 
     async def resolve_tenant(self, identity: TenantIdentity) -> TenantContext:
         """Bootstrap local; em Access exige provisionamento administrativo prévio."""

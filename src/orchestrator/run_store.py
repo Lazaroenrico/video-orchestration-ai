@@ -1,23 +1,16 @@
 """Seleção do read model durável de runs sem alterar o modo SQLite local."""
+
 from __future__ import annotations
 
-import os
 from contextlib import asynccontextmanager
 from typing import AsyncIterator, Optional
 
 from orchestrator.db.runs import PostgresRunRepository
+from orchestrator.runtime_mode import open_repository_backend
 
 
 @asynccontextmanager
 async def open_repository() -> AsyncIterator[Optional[PostgresRunRepository]]:
     """Entrega PostgreSQL quando configurado; local continua no checkpointer atual."""
-    if not os.environ.get("DATABASE_URL"):
-        yield None
-        return
-
-    from orchestrator.db import TenantIdentity, get_shared_database
-
-    database = await get_shared_database()
-    tenant = await database.resolve_tenant(TenantIdentity.from_env())
-    yield PostgresRunRepository(database, tenant)
-
+    async with open_repository_backend(lambda: None, PostgresRunRepository) as repository:
+        yield repository

@@ -22,7 +22,8 @@ from orchestrator.db import (
 
 def _database_url(postgresql) -> str:
     info = postgresql.info
-    return f"postgresql://postgres:postgres@{info.host}:{info.port}/{info.dbname}"
+    password = info.password or "postgres"
+    return f"postgresql://{info.user}:{password}@{info.host}:{info.port}/{info.dbname}"
 
 
 def _runtime_database_url(postgresql) -> str:
@@ -37,9 +38,16 @@ def _runtime_database_url(postgresql) -> str:
         $$
         """
     )
+    postgresql.execute("ALTER ROLE tenant_app NOSUPERUSER NOBYPASSRLS")
     postgresql.execute("GRANT USAGE ON SCHEMA public TO tenant_app")
     postgresql.execute(
         "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO tenant_app"
+    )
+    postgresql.execute(
+        "GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO tenant_app"
+    )
+    postgresql.execute(
+        "GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO tenant_app"
     )
     postgresql.commit()
     info = postgresql.info
@@ -51,7 +59,6 @@ def _managed_admin_database_url(postgresql) -> str:
     role_name = "managed_migration_admin"
     role = sql.Identifier(role_name)
     database = sql.Identifier(postgresql.info.dbname)
-    postgresql.execute("DROP ROLE IF EXISTS orchestrator_runtime")
     postgresql.execute(
         sql.SQL(
             "DO $$ BEGIN CREATE ROLE {} LOGIN PASSWORD 'managed_migration_admin'; "
@@ -66,8 +73,18 @@ def _managed_admin_database_url(postgresql) -> str:
         ).format(role)
     )
     postgresql.execute(
-        sql.SQL("ALTER DATABASE {} OWNER TO {}").format(database, role)
+        """
+        DO $$
+        BEGIN
+            IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'orchestrator_runtime') THEN
+                ALTER ROLE orchestrator_runtime NOSUPERUSER NOBYPASSRLS NOREPLICATION;
+                GRANT orchestrator_runtime TO managed_migration_admin WITH ADMIN OPTION;
+            END IF;
+        END
+        $$;
+        """
     )
+    postgresql.execute(sql.SQL("ALTER DATABASE {} OWNER TO {}").format(database, role))
     postgresql.execute(sql.SQL("ALTER SCHEMA public OWNER TO {}").format(role))
     postgresql.commit()
     info = postgresql.info
@@ -397,7 +414,19 @@ def test_cli_provisions_fixed_runtime_role_with_managed_admin(postgresql):
 
 def test_cli_refuses_an_existing_runtime_role_that_can_bypass_rls(postgresql):
     migration_url = _managed_admin_database_url(postgresql)
-    postgresql.execute("CREATE ROLE orchestrator_runtime LOGIN BYPASSRLS")
+    postgresql.execute(
+        """
+        DO $$
+        BEGIN
+            IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'orchestrator_runtime') THEN
+                CREATE ROLE orchestrator_runtime LOGIN BYPASSRLS;
+            ELSE
+                ALTER ROLE orchestrator_runtime LOGIN BYPASSRLS;
+            END IF;
+        END
+        $$;
+        """
+    )
     postgresql.commit()
 
     try:
@@ -416,7 +445,17 @@ def test_cli_refuses_an_existing_runtime_role_that_can_bypass_rls(postgresql):
             "SELECT rolbypassrls FROM pg_roles WHERE rolname = 'orchestrator_runtime'"
         ).fetchone() == (True,)
     finally:
-        postgresql.execute("DROP ROLE IF EXISTS orchestrator_runtime")
+        postgresql.execute(
+            """
+            DO $$
+            BEGIN
+                IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'orchestrator_runtime') THEN
+                    ALTER ROLE orchestrator_runtime NOBYPASSRLS;
+                END IF;
+            END
+            $$;
+            """
+        )
         postgresql.commit()
 
 
@@ -476,7 +515,7 @@ async def test_membership_authorization_never_bootstraps_access_identity(postgre
             user_subject="access|alice",
             role="member",
         )
-        assert await database.authorize_tenant(identity) == identity.context()
+        assert await database.authorize_tenant(identity) == identity.context(role="member")
 
         revoke_membership(
             migration_url,

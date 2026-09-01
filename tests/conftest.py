@@ -1,4 +1,5 @@
 """Fixtures compartilhadas dos testes."""
+
 import os
 
 import pytest
@@ -9,6 +10,18 @@ from orchestrator.adapters.mock import MockAdapter
 # O projeto valida PostgreSQL em uma instância real e externa ao processo de pytest
 # (Docker no desenvolvimento/CI). Isso evita instalar/binários `pg_ctl` no host e faz
 # cada teste receber um database limpo pelo janitor do próprio pytest-postgresql.
+# Respeita PGHOST, PGPORT, PGUSER, PGPASSWORD configurados explicitamente pelo executor.
+_PG_HOST = os.environ.get("PGHOST")
+_PG_PORT = int(os.environ["PGPORT"]) if "PGPORT" in os.environ else None
+_PG_USER = os.environ.get("PGUSER")
+_PG_PASSWORD = os.environ.get("PGPASSWORD")
+
+postgresql_noproc = factories.postgresql_noproc(
+    host=_PG_HOST,
+    port=_PG_PORT,
+    user=_PG_USER,
+    password=_PG_PASSWORD,
+)
 postgresql = factories.postgresql("postgresql_noproc")
 
 # providers.yaml pode ter adapters reais (MVP). Garantir que todos os testes
@@ -36,6 +49,7 @@ def _force_mock_providers(monkeypatch):
     # O ambiente do desenvolvedor pode apontar para PostgreSQL real. Testes continuam
     # JSON/SQLite por default; casos de integração optam explicitamente via monkeypatch.
     for key in (
+        "AI_GATEWAY_LLM_MODEL",
         "DATABASE_URL",
         "ORCH_ORGANIZATION_SLUG",
         "ORCH_ORGANIZATION_NAME",
@@ -43,7 +57,15 @@ def _force_mock_providers(monkeypatch):
     ):
         monkeypatch.delenv(key, raising=False)
     import orchestrator.db.database as db_mod
+
     db_mod._shared_database = None
+    yield
+    # Isolamento do singleton de throttle Replicate: sem este reset, um teste que
+    # aquecer ``get_replicate_throttle()`` congelaria a config lida das envs
+    # ``REPLICATE_*`` para o resto da sessão, ignorando monkeypatch posteriores.
+    from orchestrator.adapters._throttle import reset_replicate_throttle
+
+    reset_replicate_throttle()
 
 
 def pytest_addoption(parser):
@@ -58,6 +80,7 @@ def pytest_addoption(parser):
 @pytest.fixture
 def live(request) -> bool:
     return bool(request.config.getoption("--live"))
+
 
 TIERS = [
     {
@@ -101,4 +124,3 @@ def run_config(adapter, pipeline_cfg):
         "max_concurrency": pipeline_cfg["batch"]["max_concurrency"],
         "recursion_limit": 50,
     }
-

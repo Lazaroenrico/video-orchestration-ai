@@ -1,4 +1,5 @@
 """Video generation tools."""
+
 from __future__ import annotations
 
 import asyncio
@@ -6,6 +7,7 @@ import base64
 import hashlib
 import inspect
 import json
+import logging
 import mimetypes
 import os
 import time
@@ -15,10 +17,15 @@ from typing import Any, Awaitable, Callable, Optional
 import httpx
 from replicate.exceptions import ReplicateError
 
+from orchestrator.common.statuses import (
+    TERMINAL_PREDICTION_STATUSES as _TERMINAL_PREDICTION_STATUSES,
+)
 from orchestrator.graph.state import Artifact
 from orchestrator.replicate_webhook import build_effect_ref
 from orchestrator.tools.base import ToolContext, require_artifact
 from orchestrator.tracing import add_trace_metadata, traced
+
+_log = logging.getLogger(__name__)
 
 # Precedência explícita: a tool não conhece o conteúdo dos guardrails (montados por
 # ``_video_prompt`` nos nodes), então declara que o brief acima manda em vez de tentar
@@ -27,7 +34,6 @@ _REVISION_TEMPLATE = (
     "Revision directive (refine the take within the brief above; "
     "the brief and its constraints above always win):\n{revision}"
 )
-_TERMINAL_PREDICTION_STATUSES = frozenset({"succeeded", "failed", "canceled"})
 _AMBIGUOUS_CREATE_ERRORS = (
     httpx.ReadError,
     httpx.ReadTimeout,
@@ -153,10 +159,26 @@ async def _durable_prediction_lifecycle(
                 else getattr(exc, "status", None)
             )
             error_type = type(exc).__name__
+            detail = getattr(exc, "detail", None)
+            if not detail and isinstance(exc, httpx.HTTPStatusError):
+                try:
+                    body = exc.response.json()
+                    detail = body.get("detail") or body.get("error") or exc.response.text
+                except Exception:
+                    detail = exc.response.text if hasattr(exc.response, "text") else None
+            if not detail:
+                detail = str(exc) if str(exc).strip() else None
+            error_msg = f"{error_type}: {detail}" if detail else error_type
+            _log.warning(
+                "Replicate video prediction creation rejected for effect %s (status=%s): %s",
+                effect_key,
+                status,
+                detail or error_type,
+            )
             if isinstance(status, int) and 400 <= status < 500:
                 await ledger.mark_failed(
                     effect_key,
-                    error=error_type,
+                    error=error_msg,
                     error_type=error_type,
                     release_quota=True,
                 )
@@ -170,7 +192,7 @@ async def _durable_prediction_lifecycle(
             ambiguity_error_type = error_type
             await ledger.mark_uncertain(
                 effect_key,
-                error=error_type,
+                error=error_msg,
                 error_type=error_type,
             )
             reservation = await ledger.wait_for_provider_operation(
@@ -312,9 +334,16 @@ async def _durable_prediction_lifecycle(
         )
 
     if prediction.status != "succeeded":
+        pred_error = getattr(prediction, "error", None) or f"provider_{prediction.status}"
+        _log.warning(
+            "Replicate video prediction %s failed with status %s: %s",
+            prediction_id,
+            prediction.status,
+            pred_error,
+        )
         await ledger.mark_failed(
             effect_key,
-            error=f"provider_{prediction.status}",
+            error=str(pred_error),
             error_type="ReplicatePredictionError",
             release_quota=False,
         )
@@ -389,11 +418,13 @@ def _build_latentsync_artifact(
     )
 
 
-async def _resolve_base_video_url_for_provider(
-    base_artifact: Artifact,
+async def _resolve_uri_for_provider(
+    uri: str | None,
     ctx: ToolContext,
-) -> str:
-    uri = base_artifact.uri if isinstance(base_artifact.uri, str) else ""
+) -> str | None:
+    if not uri or not isinstance(uri, str) or not uri.strip():
+        return None
+    uri = uri.strip()
 
     if ctx.storage_resolver is not None:
         if callable(ctx.storage_resolver):
@@ -420,15 +451,52 @@ async def _resolve_base_video_url_for_provider(
             pointer = object_pointer_from_uri(uri)
             if pointer:
                 _, key = pointer
-                return await ctx.storage_resolver.get_signed_url(key)
+                res = ctx.storage_resolver.get_signed_url(key)
+                if asyncio.iscoroutine(res):
+                    res = await res
+                if res:
+                    return str(res)
 
-    if (
-        ctx.videos_root is not None
-        and uri.startswith("/videos/")
-    ):
-        vpath = Path(ctx.videos_root) / uri[len("/videos/"):]
-        if vpath.is_file():
-            mime = mimetypes.guess_type(vpath.name)[0] or "video/mp4"
+    if ctx.storage is not None:
+        from orchestrator.storage.resolve import object_pointer_from_uri
+
+        pointer = object_pointer_from_uri(uri)
+        if pointer:
+            backend, key = pointer
+            if hasattr(ctx.storage, "get_signed_url_for"):
+                res = ctx.storage.get_signed_url_for(backend, key)
+                if asyncio.iscoroutine(res):
+                    res = await res
+                if res:
+                    return str(res)
+            elif hasattr(ctx.storage, "get_signed_url"):
+                res = ctx.storage.get_signed_url(key)
+                if asyncio.iscoroutine(res):
+                    res = await res
+                if res:
+                    return str(res)
+
+    if uri.startswith("r2://"):
+        from orchestrator.storage.resolve import object_pointer_from_uri
+
+        pointer = object_pointer_from_uri(uri)
+        if pointer and pointer[0] == "r2":
+            try:
+                from orchestrator.storage.r2 import R2MediaStorage
+
+                r2_storage = R2MediaStorage.from_env()
+                return await r2_storage.get_signed_url(pointer[1])
+            except Exception:
+                pass
+
+    if ctx.videos_root is not None:
+        vpath: Path | None = None
+        if uri.startswith("/videos/"):
+            vpath = Path(ctx.videos_root) / uri[len("/videos/") :]
+        elif uri.startswith("/media/"):
+            vpath = Path(ctx.videos_root) / uri[len("/media/") :]
+        if vpath is not None and vpath.is_file():
+            mime = mimetypes.guess_type(vpath.name)[0] or "application/octet-stream"
             payload = base64.b64encode(vpath.read_bytes()).decode("ascii")
             return f"data:{mime};base64,{payload}"
 
@@ -439,6 +507,26 @@ async def _resolve_base_video_url_for_provider(
     ):
         return uri
 
+    return uri
+
+
+async def _resolve_base_video_url_for_provider(
+    base_artifact: Artifact,
+    ctx: ToolContext,
+) -> str:
+    uri = base_artifact.uri if isinstance(base_artifact.uri, str) else ""
+    resolved = await _resolve_uri_for_provider(uri, ctx)
+    if resolved and (
+        resolved != uri
+        or resolved.startswith("data:")
+        or (
+            (resolved.startswith("http://") or resolved.startswith("https://"))
+            and not resolved.startswith("r2://")
+            and not resolved.startswith("s3://")
+        )
+    ):
+        return resolved
+
     source_uri = base_artifact.meta.get("source_uri") if base_artifact.meta else None
     if isinstance(source_uri, str) and (
         source_uri.startswith("http://")
@@ -447,7 +535,7 @@ async def _resolve_base_video_url_for_provider(
     ):
         return source_uri
 
-    return uri
+    return resolved or uri
 
 
 async def _durable_replicate_clip(
@@ -471,6 +559,7 @@ async def _durable_replicate_clip(
     if ctx.effect_ledger is None:
         raise RuntimeError("durable paid adapters require PostgresEffectLedger")
 
+    resolved_ref_image_uri = await _resolve_uri_for_provider(reference_image_uri, ctx)
     prompt_hash = _sha256(system_prompt)
     reference_hash = _sha256(reference_image_uri)
     base_request = {
@@ -534,7 +623,7 @@ async def _durable_replicate_clip(
             seconds=seconds,
             attempt=attempt,
             system_prompt=system_prompt,
-            reference_image_uri=reference_image_uri,
+            reference_image_uri=resolved_ref_image_uri,
             webhook_url=webhook_url,
         ),
         artifact_fn=lambda pred: ctx.adapter.clip_artifact_from_prediction(
@@ -549,6 +638,7 @@ async def _durable_replicate_clip(
 
     if has_latentsync:
         input_video_uri = await _resolve_base_video_url_for_provider(base_artifact, ctx)
+        resolved_audio_uri = await _resolve_uri_for_provider(audio_uri, ctx)
         ls_model = str(getattr(ctx.adapter, "latentsync_model", "bytedance/latentsync"))
         ls_resolution = str(getattr(ctx.adapter, "latentsync_resolution", "720p"))
         ls_request = {
@@ -590,7 +680,7 @@ async def _durable_replicate_clip(
             request=ls_request,
             submit_fn=lambda webhook_url: ctx.adapter.submit_latentsync_prediction(
                 video_uri=input_video_uri,
-                audio_uri=audio_uri,
+                audio_uri=resolved_audio_uri or audio_uri,
                 resolution=ls_resolution,
                 webhook_url=webhook_url,
             ),
@@ -666,6 +756,8 @@ async def generate_clip_tool(
             stage=stage,
         )
     else:
+        resolved_ref_image_uri = await _resolve_uri_for_provider(reference_image_uri, ctx)
+        resolved_audio_uri = await _resolve_uri_for_provider(audio_uri, ctx)
         gen_fn = ctx.adapter.generate_clip
         call_kwargs: dict[str, Any] = {
             "item_id": item_id,
@@ -673,8 +765,10 @@ async def generate_clip_tool(
             "seconds": seconds,
             "attempt": attempt,
             "system_prompt": prompt,
-            "reference_image_uri": reference_image_uri,
-            "audio_uri": audio_uri,
+            "reference_image_uri": resolved_ref_image_uri
+            if resolved_ref_image_uri is not None
+            else reference_image_uri,
+            "audio_uri": resolved_audio_uri if resolved_audio_uri is not None else audio_uri,
         }
         try:
             sig = inspect.signature(gen_fn)

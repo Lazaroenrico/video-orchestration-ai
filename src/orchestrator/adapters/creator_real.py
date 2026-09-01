@@ -1,22 +1,3 @@
-"""RealCreatorAdapter — compõe OpenAIImage + ElevenLabsVoice, implementa o Protocol
-CreatorPort (src/orchestrator/adapters/base.py).
-
-Fluxo de ``build_creator(index)``:
-1. ``OpenAIImageAdapter.generate_face(index)`` → dict com ``primary`` (URL) e ``angles``
-2. ``ElevenLabsVoiceAdapter.create_voice(index)`` → voice_id
-
-A imagem NÃO é upscalada: a face crua vira ``upscaled_base`` (nome mantido por
-compat). O upscale foi movido para o vídeo final (papel ``upscale`` / ``node_upscale``).
-
-Retorna o mesmo shape que ``MockAdapter.build_creator``::
-
-    {
-        "id": f"creator-{index}",
-        "angles": ["front", "3/4", "profile", "smile", "neutral"],
-        "upscaled_base": "<url da face crua>",
-        "voice_id": "<voice_id>",
-    }
-"""
 from __future__ import annotations
 
 import logging
@@ -63,10 +44,6 @@ class RealCreatorAdapter:
         system_prompt: Optional[str] = None,
         voice_profile: Optional[VoiceProfile] = None,
     ) -> dict[str, Any]:
-        """Constrói o creator reutilizável combinando imagem, upscale e voz.
-
-        Retorna o mesmo shape que ``MockAdapter.build_creator``.
-        """
         # Resolve o perfil de voz ANTES da imagem: o mesmo preset alimenta o prompt
         # de imagem (token de gênero brand-safe) e a criação de voz, garantindo que
         # a voz do creator case com a aparência gerada.
@@ -131,7 +108,7 @@ class RealCreatorAdapter:
         creator: dict[str, Any],
         voice_profile: Optional[VoiceProfile] = None,
     ) -> dict[str, Any]:
-        """Gera uma voz NOVA para o creator, preservando a imagem e o gênero.
+        """Gera uma voz NOVA para o creator, preservando a imagem.
 
         O índice efetivo é ``index + reroll_count``: no pool de vozes do
         ``ReplicateVoiceAdapter`` (seleção por ``index % len(pool)``) isso avança
@@ -206,13 +183,7 @@ def build_real_creator_adapter(pipeline: dict[str, Any]) -> RealCreatorAdapter:
 
 
 def build_real_creator_vercel_adapter(pipeline: dict[str, Any]) -> RealCreatorAdapter:
-    """Fábrica que monta RealCreatorAdapter com GPT Image 2 via Vercel AI Gateway.
 
-    - OpenAI Image: roteado pelo Vercel Gateway (AI_GATEWAY_API_KEY).
-    - ElevenLabs Voice: chamada direta à API ElevenLabs (ELEVENLABS_API_KEY).
-
-    A imagem NÃO é upscalada (upscale movido para o vídeo final).
-    """
     return RealCreatorAdapter(
         image=build_openai_image_vercel_adapter(pipeline),
         voice=build_voice_adapter(pipeline),
@@ -220,15 +191,7 @@ def build_real_creator_vercel_adapter(pipeline: dict[str, Any]) -> RealCreatorAd
 
 
 def build_real_creator_replicate_adapter(pipeline: dict[str, Any]) -> RealCreatorAdapter:
-    """Fábrica que monta RealCreatorAdapter com GPT Image 2 + voz ElevenLabs no Replicate.
 
-    - OpenAI Image: roteado pelo Vercel Gateway (AI_GATEWAY_API_KEY).
-    - Voice: modelo ElevenLabs hospedado no Replicate (REPLICATE_ELEVENLABS_MODEL).
-
-    A imagem NÃO é upscalada (upscale movido para o vídeo final). Usa um
-    ``replicate.Client`` com timeout generoso — o rosto do GPT Image 2 vem como data URI
-    base64 (~2.7MB) e é enviado inline; com cold start, o timeout padrão estoura.
-    """
     rep_client = replicate.Client(
         api_token=os.environ.get("REPLICATE_API_TOKEN"),
         timeout=httpx.Timeout(600.0, connect=15.0),

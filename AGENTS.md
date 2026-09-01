@@ -32,7 +32,12 @@ Perfis atuais:
 ## Layout
 
 ```
-config*/        pipeline.yaml, providers.yaml, agents.yaml, prompts/, judge.yaml
+config-base/    base compartilhada dos perfis: pipeline.yaml, providers.yaml,
+                agents.yaml, judge.yaml e prompts/agents/*.md comuns; o loader
+                (src/orchestrator/config.py) faz deep-merge base + perfil
+config*/        config/, config-mock/, config-staging/: apenas os overrides de
+                cada ambiente sobre config-base/ (mesmos nomes de arquivo);
+                prompts divergentes por design ficam só no perfil (ex.: persona.md)
 src/orchestrator/
   graph/        state.py, routing.py, builder.py, checkpoint.py
   nodes/        base.py, stages.py  (os stages da pipeline como nodes)
@@ -154,6 +159,16 @@ The main agent should retain ownership of architectural decisions.
 
 Do not delegate ambiguous requirements directly to the implementer.
 Resolve ambiguity and define the implementation boundary first.
+
+## Agent skills
+
+### Issue tracker
+
+Tracked on GitHub Issues via the `gh` CLI. See `docs/agents/issue-tracker.md`.
+
+### Domain docs
+
+Single-context layout using `Context.md` and `docs/DECISIONS.md`. See `docs/agents/domain.md`.
 
 <!-- rtk-instructions v2 -->
 # RTK (Rust Token Killer) - Token-Optimized Commands

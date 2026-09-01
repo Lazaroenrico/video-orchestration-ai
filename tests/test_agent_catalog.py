@@ -111,6 +111,7 @@ def test_agent_catalog_serializes_to_stable_mapping(tmp_path):
         ).hexdigest(),
         "schema_version": None,
         "agent_enabled": True,
+        "allowed_models": [],
     }
     assert "system_prompt" not in stage
     assert "system_prompt_path" not in stage
@@ -223,6 +224,10 @@ def test_project_config_dirs_ship_valid_agents_yaml(config_dir):
         assert spec.prompt_version
         assert spec.prompt_hash
         assert spec.schema_version == "creative-v2"
+        if stage == "scripts":
+            assert spec.allowed_models == ("deepseek/deepseek-v4-pro",)
+        else:
+            assert spec.allowed_models == ()
 
 
 def test_runner_config_includes_agent_catalog(pipeline_cfg):
@@ -281,7 +286,11 @@ async def test_web_execute_run_injects_agent_catalog(monkeypatch, tmp_path):
         async def aget_state(self, _config):
             return SimpleNamespace(tasks=[], next=(), values={"results": []})
 
-    monkeypatch.setattr(web_server, "load_pipeline", lambda _path: {})
+    monkeypatch.setattr(
+        web_server,
+        "load_pipeline",
+        lambda _path: {"tiers": [{"name": "ltx"}]},
+    )
     monkeypatch.setattr(web_server, "load_providers", lambda _path: {})
     monkeypatch.setattr(web_server, "load_agent_catalog", lambda _path: catalog)
     monkeypatch.setattr(web_server.RunDependencies, "build", lambda *_a, **_k: FakeDependencies())
@@ -417,3 +426,140 @@ def test_only_bounded_creative_stages_are_allowed_agents():
     assert "concepts" in message
     assert "creator_profiles" in message
     assert "scripts" in message
+
+
+def test_agents_yaml_parses_allowed_models(tmp_path):
+    from orchestrator.config import load_agent_catalog
+
+    (tmp_path / "agents.yaml").write_text(
+        "stages:\n"
+        "  scripts:\n"
+        "    executor: tool\n"
+        "    tools: [write_script]\n"
+        "    allowed_models:\n"
+        "      - deepseek/deepseek-v4-pro\n"
+        "      - google/gemini-3.7-flash\n",
+        encoding="utf-8",
+    )
+
+    catalog = load_agent_catalog(str(tmp_path))
+    spec = catalog.stage("scripts")
+    assert spec.allowed_models == ("deepseek/deepseek-v4-pro", "google/gemini-3.7-flash")
+
+
+def test_agents_yaml_rejects_invalid_allowed_models(tmp_path):
+    from orchestrator.config import load_agent_catalog
+
+    (tmp_path / "agents.yaml").write_text(
+        "stages:\n"
+        "  scripts:\n"
+        "    executor: tool\n"
+        "    tools: [write_script]\n"
+        "    allowed_models: 'not-a-list'\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="allowed_models must be a list"):
+        load_agent_catalog(str(tmp_path))
+
+
+def test_with_stage_model_enforces_fail_closed_when_allowed_models_empty():
+    from orchestrator.agent_catalog import default_agent_catalog, with_stage_model
+
+    base_catalog = default_agent_catalog()
+    assert base_catalog.stage("scripts").target_model is None
+    assert base_catalog.stage("scripts").allowed_models == ()
+
+    # Fail-closed: empty allowed_models rejects any override attempt
+    with pytest.raises(ValueError, match="not allowed for stage 'scripts'"):
+        with_stage_model(base_catalog, "scripts", "custom/model")
+
+    # Passing None or empty string returns catalog unchanged
+    assert with_stage_model(base_catalog, "scripts", None) is base_catalog
+    assert with_stage_model(base_catalog, "scripts", "") is base_catalog
+
+
+def test_with_stage_model_enforces_allowed_models_whitelist(tmp_path):
+    from orchestrator.agent_catalog import with_stage_model
+    from orchestrator.config import load_agent_catalog
+
+    (tmp_path / "agents.yaml").write_text(
+        "stages:\n"
+        "  scripts:\n"
+        "    executor: tool\n"
+        "    tools: [write_script]\n"
+        "    allowed_models:\n"
+        "      - deepseek/deepseek-v4-pro\n",
+        encoding="utf-8",
+    )
+
+    catalog = load_agent_catalog(str(tmp_path))
+
+    # Allowed model succeeds
+    allowed_catalog = with_stage_model(catalog, "scripts", "deepseek/deepseek-v4-pro")
+    assert allowed_catalog.stage("scripts").target_model == "deepseek/deepseek-v4-pro"
+    # Original is unchanged (immutable)
+    assert catalog.stage("scripts").target_model is None
+    # Other stages untouched
+    assert allowed_catalog.stage("concepts").target_model == catalog.stage("concepts").target_model
+
+    # Disallowed model raises ValueError
+    with pytest.raises(ValueError, match="not allowed for stage 'scripts'"):
+        with_stage_model(catalog, "scripts", "openai/gpt-4o")
+
+
+def test_with_stage_model_rejects_unknown_stage():
+    from orchestrator.agent_catalog import default_agent_catalog, with_stage_model
+
+    with pytest.raises(KeyError, match="unknown"):
+        with_stage_model(default_agent_catalog(), "unknown", "some/model")
+
+
+def test_extract_script_model_precedence():
+    from orchestrator.agent_catalog import extract_script_model
+    from orchestrator.creative_contracts import CampaignInput
+
+    assert extract_script_model() is None
+    assert extract_script_model(None, {}) is None
+    assert extract_script_model({"script_model": "model-a"}) == "model-a"
+    assert extract_script_model({"campaign": {"script_model": "model-b"}}) == "model-b"
+    assert extract_script_model(CampaignInput(offer="Serum", audience="Adults", script_model="model-c")) == "model-c"
+    # Top-level takes precedence over nested campaign
+    assert (
+        extract_script_model({"script_model": "model-top", "campaign": {"script_model": "model-nest"}})
+        == "model-top"
+    )
+    # Explicit kwarg takes precedence over sources
+    assert (
+        extract_script_model({"script_model": "source-model"}, script_model="kwarg-model")
+        == "kwarg-model"
+    )
+
+
+def test_apply_script_model_override(tmp_path):
+    from orchestrator.agent_catalog import apply_script_model_override
+    from orchestrator.config import load_agent_catalog
+
+    (tmp_path / "agents.yaml").write_text(
+        "stages:\n"
+        "  scripts:\n"
+        "    executor: tool\n"
+        "    tools: [write_script]\n"
+        "    allowed_models:\n"
+        "      - deepseek/deepseek-v4-pro\n",
+        encoding="utf-8",
+    )
+
+    catalog = load_agent_catalog(str(tmp_path))
+
+    # None source returns unchanged
+    assert apply_script_model_override(catalog) is catalog
+    assert apply_script_model_override(catalog, {"script_model": None}) is catalog
+
+    # Allowed model from payload overrides scripts target_model
+    updated = apply_script_model_override(catalog, {"campaign": {"script_model": "deepseek/deepseek-v4-pro"}})
+    assert updated.stage("scripts").target_model == "deepseek/deepseek-v4-pro"
+
+    # Disallowed model raises ValueError
+    with pytest.raises(ValueError, match="not allowed for stage 'scripts'"):
+        apply_script_model_override(catalog, {"script_model": "unauthorized/model"})

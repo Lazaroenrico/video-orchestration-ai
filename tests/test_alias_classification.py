@@ -159,4 +159,3 @@ def test_language_runtime_providers_classification() -> None:
     # Unknown
     with pytest.raises(KeyError):
         LanguageRuntime.from_provider("unknown_provider", {})
-

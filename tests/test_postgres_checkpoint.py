@@ -1,10 +1,14 @@
 """Integração real do checkpointer PostgreSQL (ADR-D36, Fase 2)."""
+
 from __future__ import annotations
 
 from orchestrator import runner
 from orchestrator.db import Database, TenantIdentity, upgrade_database
 from orchestrator.graph.builder import build_graph
-from orchestrator.graph.checkpoint import open_checkpointer
+from orchestrator.graph.checkpoint import (
+    open_checkpointer,
+    setup_postgres_checkpointer,
+)
 
 _PROVIDERS = {"adapters": {"video": "mock"}}
 
@@ -28,8 +32,7 @@ def _runtime_url(postgresql) -> str:
     )
     postgresql.execute("GRANT USAGE, CREATE ON SCHEMA public TO checkpoint_app")
     postgresql.execute(
-        "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public "
-        "TO checkpoint_app"
+        "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO checkpoint_app"
     )
     postgresql.commit()
     info = postgresql.info
@@ -43,6 +46,7 @@ async def test_postgres_checkpoint_survives_restart_without_local_file(
     run_config,
 ):
     upgrade_database(_admin_url(postgresql))
+    setup_postgres_checkpointer(_admin_url(postgresql))
     monkeypatch.setenv("DATABASE_URL", _runtime_url(postgresql))
     monkeypatch.setenv("ORCH_ORGANIZATION_SLUG", "acme")
     monkeypatch.setenv("ORCH_ORGANIZATION_NAME", "Acme")
@@ -84,6 +88,7 @@ async def test_postgres_checkpoint_isolated_by_organization(
     run_config,
 ):
     upgrade_database(_admin_url(postgresql))
+    setup_postgres_checkpointer(_admin_url(postgresql))
     monkeypatch.setenv("DATABASE_URL", _runtime_url(postgresql))
     monkeypatch.setenv("ORCH_ORGANIZATION_SLUG", "acme")
     monkeypatch.setenv("ORCH_ORGANIZATION_NAME", "Acme")
@@ -119,6 +124,7 @@ async def test_postgres_checkpoint_rls_blocks_cross_organization_sql(
     run_config,
 ):
     upgrade_database(_admin_url(postgresql))
+    setup_postgres_checkpointer(_admin_url(postgresql))
     runtime_url = _runtime_url(postgresql)
     monkeypatch.setenv("DATABASE_URL", runtime_url)
     monkeypatch.setenv("ORCH_ORGANIZATION_SLUG", "acme")
@@ -154,6 +160,7 @@ async def test_runner_run_status_and_resume_use_postgres_without_sqlite(
     pipeline_cfg,
 ):
     upgrade_database(_admin_url(postgresql))
+    setup_postgres_checkpointer(_admin_url(postgresql))
     monkeypatch.setenv("DATABASE_URL", _runtime_url(postgresql))
     monkeypatch.setenv("ORCH_ORGANIZATION_SLUG", "acme")
     monkeypatch.setenv("ORCH_ORGANIZATION_NAME", "Acme")
@@ -197,6 +204,7 @@ async def test_postgres_checkpoint_public_lifecycle_keeps_external_run_id(
     run_config,
 ):
     upgrade_database(_admin_url(postgresql))
+    setup_postgres_checkpointer(_admin_url(postgresql))
     monkeypatch.setenv("DATABASE_URL", _runtime_url(postgresql))
     monkeypatch.setenv("ORCH_ORGANIZATION_SLUG", "acme")
     monkeypatch.setenv("ORCH_ORGANIZATION_NAME", "Acme")

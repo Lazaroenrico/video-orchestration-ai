@@ -17,6 +17,7 @@ rate limit da conta. Com crédito >US$5 na conta, zere via env::
 Determinismo (CLAUDE.md): ``clock`` e ``sleep`` são injetáveis; os testes usam clock
 fake e nunca dormem de verdade.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -85,9 +86,7 @@ def _env_number(name: str, default: float, cast: Callable[[str], Any]) -> Any:
     try:
         return cast(raw)
     except (TypeError, ValueError):
-        _log.warning(
-            "%s=%r inválido; usando default %s", name, raw, default
-        )
+        _log.warning("%s=%r inválido; usando default %s", name, raw, default)
         return default
 
 
@@ -100,3 +99,13 @@ def get_replicate_throttle() -> AsyncThrottle:
             concurrency=_env_number("REPLICATE_MAX_CONCURRENCY", 1, int),
         )
     return _GLOBAL
+
+
+def reset_replicate_throttle() -> None:
+    """Descarta o singleton cacheado; a próxima leitura relê as env ``REPLICATE_*``.
+
+    Exclusivo para isolamento de testes: mudanças de ambiente via ``monkeypatch``
+    só surtem efeito depois do reset (a config é lida uma única vez por processo).
+    """
+    global _GLOBAL
+    _GLOBAL = None

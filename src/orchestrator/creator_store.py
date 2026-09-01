@@ -29,10 +29,10 @@ Formato no disco (escrita determinística)::
 Com ``DATABASE_URL``, ``open_repository`` seleciona PostgreSQL tenant-scoped. Sem ela,
 o arquivo JSON permanece como fallback determinístico para mock/offline.
 """
+
 from __future__ import annotations
 
 import json
-import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, AsyncIterator, Optional, Protocol
@@ -197,13 +197,15 @@ class JsonCreatorRepository:
 @asynccontextmanager
 async def open_repository(path: str | Path) -> AsyncIterator[CreatorRepository]:
     """Seleciona PostgreSQL por ``DATABASE_URL``; sem ela, mantém JSON local."""
-    if not os.environ.get("DATABASE_URL"):
-        yield JsonCreatorRepository(path)
-        return
+    from orchestrator.runtime_mode import open_repository_backend
 
-    from orchestrator.db import PostgresCreatorRepository, TenantIdentity, get_shared_database
+    def postgres_repository(database, tenant):
+        from orchestrator.db import PostgresCreatorRepository
 
-    database = await get_shared_database()
-    tenant = await database.resolve_tenant(TenantIdentity.from_env())
-    yield PostgresCreatorRepository(database, tenant)
+        return PostgresCreatorRepository(database, tenant)
 
+    async with open_repository_backend(
+        lambda: JsonCreatorRepository(path),
+        postgres_repository,
+    ) as repository:
+        yield repository

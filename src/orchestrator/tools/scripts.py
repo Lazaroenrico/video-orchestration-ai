@@ -8,6 +8,7 @@ from orchestrator.creative_contracts import (
     ScriptSubmission,
     SpokenBeat,
     materialize_script,
+    validate_script_submission,
 )
 from orchestrator.tools.base import ToolContext, require_non_empty_string
 from orchestrator.tracing import add_trace_metadata, traced
@@ -64,26 +65,12 @@ async def write_script_tool(
         submission = ScriptSubmission.model_validate(draft)
         script = ""
 
-    spoken_seconds = sum(beat.seconds for beat in submission.spoken_beats)
-    if (
-        target_duration_seconds is not None
-        and max(spoken_seconds, submission.estimated_duration)
-        > target_duration_seconds
-    ):
-        raise ValueError(
-            f"narration exceeds {target_duration_seconds} seconds"
-        )
-    spoken_words = sum(
-        len(beat.text.split()) for beat in submission.spoken_beats
+    validate_script_submission(
+        submission,
+        target_duration_seconds=target_duration_seconds,
+        min_spoken_words=min_spoken_words,
+        max_spoken_words=max_spoken_words,
     )
-    if min_spoken_words is not None and spoken_words < min_spoken_words:
-        raise ValueError(
-            f"narration requires at least {min_spoken_words} spoken words (got {spoken_words})"
-        )
-    if max_spoken_words is not None and spoken_words > max_spoken_words:
-        raise ValueError(
-            f"narration exceeds {max_spoken_words} spoken words (got {spoken_words})"
-        )
 
     concept_id = str(concept.get("id") or "")
     if not concept_id:

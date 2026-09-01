@@ -45,6 +45,8 @@ class User(Base):
 
     id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True)
     subject: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    email: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    display_name: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.current_timestamp()
     )
@@ -67,6 +69,29 @@ class OrganizationMember(Base):
         PG_UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE")
     )
     role: Mapped[str] = mapped_column(Text, nullable=False, server_default="owner")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.current_timestamp()
+    )
+
+
+class OrganizationInvitation(Base):
+    __tablename__ = "organization_invitations"
+    __table_args__ = (
+        PrimaryKeyConstraint("organization_id", "normalized_email", name="pk_organization_invitations"),
+        CheckConstraint(
+            "role IN ('owner', 'admin', 'member', 'viewer')",
+            name="ck_organization_invitations_role",
+        ),
+    )
+
+    organization_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False
+    )
+    normalized_email: Mapped[str] = mapped_column(Text, nullable=False)
+    role: Mapped[str] = mapped_column(Text, nullable=False, server_default="member")
+    invited_by_user_id: Mapped[Optional[UUID]] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.current_timestamp()
     )

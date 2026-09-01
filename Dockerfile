@@ -42,7 +42,9 @@ RUN uv export --frozen --extra web --no-dev --output-file /tmp/requirements.txt 
     && uv pip install --system --no-cache --no-deps -e ".[web]" \
     && rm /tmp/requirements.txt
 
-# Código de app: configs, scripts e a SPA já buildada.
+# Código de app: configs, scripts e a SPA já buildada. config-base/ é a base
+# compartilhada dos perfis (deep-merge no loader) e precisa ir na imagem.
+COPY config-base/ ./config-base/
 COPY config/ ./config/
 COPY config-mock/ ./config-mock/
 COPY config-staging/ ./config-staging/

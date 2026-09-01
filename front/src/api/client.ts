@@ -13,6 +13,12 @@ import type {
   RunsIndex,
   StartRunBody,
   StartRunV2Body,
+  UserSession,
+  MemberRecord,
+  GrantMemberBody,
+  UpdateMemberRoleBody,
+  Invitation,
+  CreateInvitationBody,
 } from "./contracts";
 import { apiUrl } from "./urls";
 
@@ -118,6 +124,35 @@ export const api = {
     }),
   deletePrompt: (id: string) =>
     req<{ ok: boolean }>(`/api/prompts/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    }),
+  getMe: () => req<UserSession>("/api/v2/me"),
+  getMembers: () => req<{ members: MemberRecord[] }>("/api/v2/members"),
+  grantMember: (body: GrantMemberBody) =>
+    req<{ ok: boolean; member: MemberRecord }>("/api/v2/members", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  updateMemberRole: (subject: string, body: UpdateMemberRoleBody) =>
+    req<{ ok: boolean; member: MemberRecord }>(
+      `/api/v2/members/${encodeURIComponent(subject)}`,
+      {
+        method: "PATCH",
+        body: JSON.stringify(body),
+      }
+    ),
+  revokeMember: (subject: string) =>
+    req<{ ok: boolean }>(`/api/v2/members/${encodeURIComponent(subject)}`, {
+      method: "DELETE",
+    }),
+  getInvitations: () => req<{ invitations: Invitation[] }>("/api/v2/invitations"),
+  createInvitation: (body: CreateInvitationBody) =>
+    req<{ ok: boolean; invitation: Invitation }>("/api/v2/invitations", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  cancelInvitation: (email: string) =>
+    req<{ ok: boolean }>(`/api/v2/invitations/${encodeURIComponent(email)}`, {
       method: "DELETE",
     }),
 };

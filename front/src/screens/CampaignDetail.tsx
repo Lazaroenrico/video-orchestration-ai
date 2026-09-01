@@ -12,6 +12,7 @@ import {
   useApproveMutation,
   useRerollVoiceMutation,
   useReviewRunV2Mutation,
+  useSessionQuery,
 } from "../api/queries";
 import { HttpError } from "../api/client";
 import { mediaUrl } from "../api/urls";
@@ -100,6 +101,8 @@ export function CreativeReviewPanel({
   gate: GateRef | null;
 }) {
   const review = useReviewRunV2Mutation();
+  const session = useSessionQuery();
+  const canReview = session.data ? session.data.permissions.includes("runs:review") : false;
   const [concepts, setConcepts] = useState(initialConcepts);
   const [creators, setCreators] = useState(initialCreators);
   const [staleVoiceBriefs, setStaleVoiceBriefs] = useState<Set<string>>(
@@ -112,6 +115,17 @@ export function CreativeReviewPanel({
     "idle" | "submitting" | "accepted" | "refreshing"
   >("idle");
   const [activeAction, setActiveAction] = useState<string | null>(null);
+
+  if (!canReview) {
+    return (
+      <Card className="mb-gutter border-surface-border">
+        <SectionTitle title="Revisão do Plano Criativo" />
+        <p className="mt-2 font-body-md text-body-md text-on-surface-variant">
+          A revisão e aprovação de planos criativos é restrita a membros com permissão de edição.
+        </p>
+      </Card>
+    );
+  }
 
   function editConcept(index: number, key: string, value: string) {
     setConcepts((current) =>
@@ -453,6 +467,10 @@ function ApprovalPanel({
   const [actionError, setActionError] = useState<string | null>(null);
   const approveCreators = useApproveMutation();
   const rerollVoice = useRerollVoiceMutation();
+  const session = useSessionQuery();
+  const canReview = session.data ? session.data.permissions.includes("runs:review") : false;
+
+  if (!canReview) return null;
 
   const toggle = (id: string) =>
     setSelected((s) => {

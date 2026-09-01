@@ -107,6 +107,49 @@ async def test_generate_concepts_tool_delegates_and_validates_output():
     ]
 
 
+async def test_generate_concepts_bias_does_not_infer_performance_evidence_without_snapshot():
+    from orchestrator.tools.base import tool_context_from_config
+    from orchestrator.tools.concepts import generate_concepts_tool
+
+    adapter = _SpyAdapter([{"hook": "h", "hook_style": "problem"}])
+    ctx = tool_context_from_config(_config(adapter))
+
+    result = await generate_concepts_tool(
+        ctx,
+        offer="serum",
+        n=1,
+        seed="run-tools",
+        bias=["problem"],
+        campaign={"offer": "serum", "audience": "adults", "batch_size": 1},
+    )
+
+    assert result[0]["evidence_basis"] == "cold_test"
+
+
+async def test_generate_concepts_bias_does_not_infer_performance_evidence_with_snapshot():
+    from orchestrator.tools.base import tool_context_from_config
+    from orchestrator.tools.concepts import generate_concepts_tool
+
+    adapter = _SpyAdapter([{"hook": "h", "hook_style": "problem"}])
+    ctx = tool_context_from_config(_config(adapter))
+
+    result = await generate_concepts_tool(
+        ctx,
+        offer="serum",
+        n=1,
+        seed="run-tools",
+        bias=["problem"],
+        campaign={
+            "offer": "serum",
+            "audience": "adults",
+            "batch_size": 1,
+            "performance": {"metrics": []},
+        },
+    )
+
+    assert result[0]["evidence_basis"] == "cold_test"
+
+
 async def test_write_script_tool_delegates_and_requires_non_empty_script():
     from orchestrator.tools.base import tool_context_from_config
     from orchestrator.tools.scripts import write_script_tool

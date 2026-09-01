@@ -12,21 +12,19 @@ Concorrência: usamos ``sqlite3`` síncrono sob um lock, com fachada async — o
 padrão (e pelo mesmo motivo) de ``graph/checkpoint.py``, onde ``aiosqlite.connect``
 trava neste ambiente. As operações são pequenas o bastante para não bloquear o loop.
 """
+
 from __future__ import annotations
 
-import hashlib
 import json
-import os
 import sqlite3
 import threading
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, AsyncIterator, Optional, Protocol
+from typing import Any, AsyncIterator, Callable, Optional, Protocol
 
-from orchestrator.storage.base import StoredObject
-from orchestrator.storage.retention import RETENTION_KEEP, expires_at_for
+from orchestrator.storage.records import ArtifactRecord
+from orchestrator.storage.retention import expires_at_for
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS artifacts (
@@ -51,70 +49,21 @@ CREATE INDEX IF NOT EXISTS idx_artifacts_expires ON artifacts(expires_at);
 """
 
 _COLUMNS = (
-    "id", "run_id", "item_id", "creator_id", "kind", "storage_backend", "storage_key",
-    "content_type", "size_bytes", "sha256", "source_uri", "retention_class",
-    "expires_at", "meta_json",
+    "id",
+    "run_id",
+    "item_id",
+    "creator_id",
+    "kind",
+    "storage_backend",
+    "storage_key",
+    "content_type",
+    "size_bytes",
+    "sha256",
+    "source_uri",
+    "retention_class",
+    "expires_at",
+    "meta_json",
 )
-
-
-@dataclass(frozen=True)
-class ArtifactRecord:
-    """Uma linha canônica de artifact. Espelha as colunas mínimas da ADR-D30."""
-
-    run_id: str
-    kind: str
-    storage_backend: str
-    storage_key: str
-    item_id: Optional[str] = None
-    creator_id: Optional[str] = None
-    content_type: Optional[str] = None
-    size_bytes: Optional[int] = None
-    sha256: Optional[str] = None
-    source_uri: Optional[str] = None
-    retention_class: str = RETENTION_KEEP
-    expires_at: Optional[str] = None
-    meta: dict[str, Any] = field(default_factory=dict)
-
-    @property
-    def id(self) -> str:
-        """Id determinístico derivado do ponteiro canônico.
-
-        Determinismo (CLAUDE.md): nada de ``uuid4``. Como ``storage_key`` já é único por
-        run/item/kind, derivar o id dele torna ``record`` idempotente de graça — um
-        retry que re-persiste os mesmos bytes atualiza a linha em vez de duplicá-la.
-        """
-        return hashlib.sha256(f"{self.run_id}:{self.storage_key}".encode()).hexdigest()[:32]
-
-    @classmethod
-    def from_stored(
-        cls,
-        stored: StoredObject,
-        *,
-        run_id: str,
-        kind: str,
-        item_id: Optional[str] = None,
-        creator_id: Optional[str] = None,
-        source_uri: Optional[str] = None,
-        retention_class: str = RETENTION_KEEP,
-        expires_at: Optional[str] = None,
-        meta: Optional[dict[str, Any]] = None,
-    ) -> "ArtifactRecord":
-        """Ponte com a Fase 1: o ``StoredObject`` já traz backend/key/hash/tamanho."""
-        return cls(
-            run_id=run_id,
-            kind=kind,
-            storage_backend=stored.backend,
-            storage_key=stored.key,
-            item_id=item_id,
-            creator_id=creator_id,
-            content_type=stored.content_type,
-            size_bytes=stored.size_bytes,
-            sha256=stored.sha256,
-            source_uri=source_uri,
-            retention_class=retention_class,
-            expires_at=expires_at,
-            meta=meta or {},
-        )
 
 
 def _to_record(row: sqlite3.Row) -> ArtifactRecord:
@@ -211,14 +160,16 @@ class ArtifactDB:
     async def by_key(self, storage_key: str) -> Optional[ArtifactRecord]:
         with self._lock, self._connect() as conn:
             row = conn.execute(
-                "SELECT * FROM artifacts WHERE storage_key = ?", (storage_key,),
+                "SELECT * FROM artifacts WHERE storage_key = ?",
+                (storage_key,),
             ).fetchone()
         return _to_record(row) if row else None
 
     async def by_run(self, run_id: str) -> list[ArtifactRecord]:
         with self._lock, self._connect() as conn:
             rows = conn.execute(
-                "SELECT * FROM artifacts WHERE run_id = ? ORDER BY storage_key", (run_id,),
+                "SELECT * FROM artifacts WHERE run_id = ? ORDER BY storage_key",
+                (run_id,),
             ).fetchall()
         return [_to_record(row) for row in rows]
 
@@ -254,17 +205,32 @@ class ArtifactDB:
 @asynccontextmanager
 async def open_artifact_repository(
     path: str | Path,
+    *,
+    postgres_factory: Optional[Callable[[Any, Any], ArtifactRepository]] = None,
 ) -> AsyncIterator[ArtifactRepository]:
-    """Seleciona PostgreSQL por ``DATABASE_URL``; sem ela, mantém SQLite local."""
-    if not os.environ.get("DATABASE_URL"):
+    """Seleciona PostgreSQL por ``DATABASE_URL``; sem ela, mantém SQLite local.
+
+    ``postgres_factory`` é a costura de inversão: a composition root (ex.: a API ou
+    o runner) pode injetar a construção do repositório PostgreSQL sem que este
+    módulo conheça ``orchestrator.db``. Quando omitida, mantém o fallback histórico
+    de import tardio para não quebrar chamadores existentes.
+    """
+    from orchestrator.runtime_mode import open_repository_backend
+
+    def local_repository() -> ArtifactDB:
         repository = ArtifactDB(path)
         repository.setup()
+        return repository
+
+    if postgres_factory is None:
+
+        def postgres_repository(database, tenant):
+            from orchestrator.db import PostgresArtifactRepository
+
+            return PostgresArtifactRepository(database, tenant)
+
+    else:
+        postgres_repository = postgres_factory
+
+    async with open_repository_backend(local_repository, postgres_repository) as repository:
         yield repository
-        return
-
-    from orchestrator.db import PostgresArtifactRepository, TenantIdentity, get_shared_database
-
-    database = await get_shared_database()
-    tenant = await database.resolve_tenant(TenantIdentity.from_env())
-    yield PostgresArtifactRepository(database, tenant)
-

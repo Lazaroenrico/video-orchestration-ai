@@ -1,4 +1,5 @@
 """ReplicateVideoAdapter via SDK oficial, sem rede."""
+
 from __future__ import annotations
 
 from types import SimpleNamespace
@@ -7,6 +8,7 @@ from typing import Any
 import httpx
 import pytest
 
+from orchestrator.adapters.mock import MockAdapter
 from orchestrator.adapters.replicate_video import ReplicateVideoAdapter
 from orchestrator.graph.state import Artifact, Item
 
@@ -22,6 +24,12 @@ TIERS = [
 ]
 
 
+def _mock_clip_generator(tiers, **kwargs):
+    # Mesma fiação da composition root (registry._mock_clip_generator): o
+    # adapter pago não constrói o mock sozinho — o fallback é injetado aqui.
+    return MockAdapter(tiers=tiers, **kwargs).generate_clip
+
+
 def _make_adapter(output: Any = "https://cdn.replicate.com/clip.mp4", **kwargs: Any):
     calls: list[dict[str, Any]] = []
 
@@ -29,7 +37,12 @@ def _make_adapter(output: Any = "https://cdn.replicate.com/clip.mp4", **kwargs: 
         calls.append({"ref": ref, "input": input})
         return output
 
-    adapter = ReplicateVideoAdapter(tiers=TIERS, runner=fake_runner, **kwargs)
+    tiers = kwargs.pop("tiers", TIERS)
+    if kwargs.get("allow_mock_fallback", True) and "mock_clip_generator" not in kwargs:
+        kwargs["mock_clip_generator"] = _mock_clip_generator(
+            tiers, latentsync=kwargs.get("latentsync")
+        )
+    adapter = ReplicateVideoAdapter(tiers=tiers, runner=fake_runner, **kwargs)
     return adapter, calls
 
 
@@ -308,7 +321,9 @@ async def test_prediction_get_retries_read_timeout_and_server_error():
         if calls == 1:
             raise httpx.ReadTimeout("poll response timed out")
         if calls == 2:
-            request = httpx.Request("GET", f"https://api.replicate.com/v1/predictions/{prediction_id}")
+            request = httpx.Request(
+                "GET", f"https://api.replicate.com/v1/predictions/{prediction_id}"
+            )
             response = httpx.Response(503, request=request)
             raise httpx.HTTPStatusError("unavailable", request=request, response=response)
         return SimpleNamespace(
@@ -425,3 +440,109 @@ async def test_generate_clip_fallback_dict_first_value_string():
     artifact = await adapter.generate_clip("item-abc", "ltx", 8, 1)
 
     assert artifact.uri == "https://cdn.replicate.com/fallbackstr.mp4"
+
+
+async def test_submit_latentsync_prediction_with_version_string():
+    created: list[dict[str, Any]] = []
+
+    async def async_create(*, version=None, input=None, **params):
+        created.append({"version": version, "input": input, "params": params})
+        return SimpleNamespace(id="pred-ls-ver", status="starting", output=None, error=None)
+
+    predictions = SimpleNamespace(async_create=async_create)
+    adapter = ReplicateVideoAdapter(
+        tiers=TIERS,
+        prediction_client=SimpleNamespace(predictions=predictions),
+        latentsync={"model": "bytedance/latentsync:ver_abc123", "resolution": "720p"},
+    )
+
+    pred = await adapter.submit_latentsync_prediction(
+        video_uri="https://cdn.replicate.com/video.mp4",
+        audio_uri="https://cdn.r2.com/audio.wav",
+        resolution="720p",
+    )
+
+    assert pred.id == "pred-ls-ver"
+    assert len(created) == 1
+    assert created[0]["version"] == "ver_abc123"
+    assert created[0]["input"] == {
+        "video": "https://cdn.replicate.com/video.mp4",
+        "audio": "https://cdn.r2.com/audio.wav",
+    }
+    assert "resolution" not in created[0]["input"]
+
+
+async def test_submit_latentsync_prediction_default_bytedance_latentsync_uses_pinned_hash():
+    created: list[dict[str, Any]] = []
+
+    async def predictions_async_create(*, version=None, input=None, **params):
+        created.append({"version": version, "input": input, "params": params})
+        return SimpleNamespace(id="pred-ls-pinned", status="starting", output=None, error=None)
+
+    client = SimpleNamespace(
+        predictions=SimpleNamespace(async_create=predictions_async_create),
+    )
+
+    adapter = ReplicateVideoAdapter(
+        tiers=TIERS,
+        prediction_client=client,
+        latentsync={"model": "bytedance/latentsync"},
+    )
+
+    pred = await adapter.submit_latentsync_prediction(
+        video_uri="https://cdn.replicate.com/video.mp4",
+        audio_uri="https://cdn.r2.com/audio.wav",
+    )
+
+    assert pred.id == "pred-ls-pinned"
+    assert len(created) == 1
+    assert (
+        created[0]["version"] == "637ce1919f807ca20da3a448ddc2743535d2853649574cd52a933120e9b9e293"
+    )
+    assert created[0]["input"] == {
+        "video": "https://cdn.replicate.com/video.mp4",
+        "audio": "https://cdn.r2.com/audio.wav",
+    }
+
+
+async def test_submit_latentsync_prediction_resolves_and_caches_unknown_model_version():
+    created: list[dict[str, Any]] = []
+    get_calls: list[str] = []
+
+    async def models_async_get(model_name):
+        get_calls.append(model_name)
+        assert model_name == "custom/latentsync"
+        return SimpleNamespace(latest_version=SimpleNamespace(id="latest_ver_999"))
+
+    async def predictions_async_create(*, version=None, input=None, **params):
+        created.append({"version": version, "input": input, "params": params})
+        return SimpleNamespace(id="pred-ls-dynamic", status="starting", output=None, error=None)
+
+    client = SimpleNamespace(
+        models=SimpleNamespace(
+            async_get=models_async_get,
+        ),
+        predictions=SimpleNamespace(async_create=predictions_async_create),
+    )
+
+    adapter = ReplicateVideoAdapter(
+        tiers=TIERS,
+        prediction_client=client,
+        latentsync={"model": "custom/latentsync"},
+    )
+
+    pred1 = await adapter.submit_latentsync_prediction(
+        video_uri="https://cdn.replicate.com/video1.mp4",
+        audio_uri="https://cdn.r2.com/audio1.wav",
+    )
+    pred2 = await adapter.submit_latentsync_prediction(
+        video_uri="https://cdn.replicate.com/video2.mp4",
+        audio_uri="https://cdn.r2.com/audio2.wav",
+    )
+
+    assert pred1.id == "pred-ls-dynamic"
+    assert pred2.id == "pred-ls-dynamic"
+    assert len(get_calls) == 1  # Resolved once and cached
+    assert len(created) == 2
+    assert created[0]["version"] == "latest_ver_999"
+    assert created[1]["version"] == "latest_ver_999"

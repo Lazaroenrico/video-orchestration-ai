@@ -9,7 +9,7 @@ import { RunSelect } from "../components/RunSelect";
 import { EmptyState, ErrorState, Loading } from "../components/States";
 import { useRunSelection } from "../api/useRunSelection";
 import { useRunStream } from "../api/useRunStream";
-import { useSubmitConceptsMutation } from "../api/queries";
+import { useSessionQuery, useSubmitConceptsMutation } from "../api/queries";
 import type { EditableConcept, Item } from "../types";
 
 function conceptField(it: Item, key: string): string | null {
@@ -28,18 +28,16 @@ interface ConceptDraft {
 }
 
 function editableText(value: unknown): string {
-  if (typeof value === "string") return value;
-  if (value == null) return "";
-  return JSON.stringify(value);
+  return typeof value === "string" ? value : value != null ? String(value) : "";
 }
 
 function draftTitle(draft: ConceptDraft): string {
-  const c = draft.concept;
-  for (const key of ["hook", "title", "angle", "id"]) {
-    const value = c[key];
-    if (typeof value === "string" && value.trim()) return value;
-  }
-  return "Untitled concept";
+  return (
+    editableText(draft.concept.hook) ||
+    editableText(draft.concept.angle) ||
+    editableText(draft.concept.title) ||
+    String(draft.concept.id)
+  );
 }
 
 export function Concepts() {
@@ -48,6 +46,8 @@ export function Concepts() {
   const { runs, active, selected, setSelected, loading, error } =
     useRunSelection(preferredRunId);
   const run = useRunStream(selected);
+  const session = useSessionQuery();
+  const canReview = session.data ? session.data.permissions.includes("runs:review") : false;
   const items = Object.values(run.items).filter((i) => i.concept || i.script);
   const [pick, setPick] = useState<string | null>(null);
   const [drafts, setDrafts] = useState<ConceptDraft[]>([]);
@@ -234,9 +234,11 @@ export function Concepts() {
                     <p className="font-body-md text-body-md text-on-surface-variant">
                       {drafts.filter((draft) => draft.included).length} of {drafts.length} concepts selected
                     </p>
-                    <Button icon="check" loading={submitConcepts.isPending} onClick={submitDrafts}>
-                      {submitConcepts.isPending ? "Saving" : "Save & Continue"}
-                    </Button>
+                    {canReview && (
+                      <Button icon="check" loading={submitConcepts.isPending} onClick={submitDrafts}>
+                        {submitConcepts.isPending ? "Saving" : "Save & Continue"}
+                      </Button>
+                    )}
                   </div>
                 </Card>
               ) : (

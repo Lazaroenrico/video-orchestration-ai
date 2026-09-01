@@ -1,6 +1,6 @@
 # ADR-D49: Caracterização de paridade do SDK ElevenLabs e decisão arquitetural
 
-Data: `2026-08-17`  
+Data: `2026-08-17`
 Status: aceito (HITL)
 
 ## Contexto

@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 
 import pytest
 
 from orchestrator import stream_bus
 from orchestrator.adapters.mock import MockAdapter
 from orchestrator.graph.state import Artifact, QCResult
+from orchestrator.graph.topology import topology_for_tiers
 from orchestrator.nodes.stages import node_roster
 from orchestrator.web import server as web_server
 
@@ -114,6 +116,25 @@ def test_qc_node_end_emits_item_update_with_qc_result() -> None:
         "reasons": ["lip_sync"],
     }
     assert update["item"]["attempts"] == 1
+
+
+def test_custom_tier_emits_item_update_from_runtime_topology() -> None:
+    snapshots: dict[str, dict] = {}
+    update = web_server._build_item_update(
+        "run-1",
+        "pruna",
+        {
+            "input": {"id": "item-1"},
+            "output": {"clips": [Artifact(kind="clip", uri="mock://clip/item-1/pruna")]},
+        },
+        snapshots,
+        topology=topology_for_tiers(["pruna"]),
+    )
+
+    assert update is not None
+    assert update["node"] == "pruna"
+    assert update["label"] == "Talking-Head (pruna)"
+    assert update["item"]["artifacts"][0]["uri"] == "mock://clip/item-1/pruna"
 
 
 def test_process_item_final_snapshot_keeps_artifacts_and_status() -> None:
@@ -474,6 +495,61 @@ def test_run_request_defaults_to_creator_approval() -> None:
 
 def test_run_request_defaults_to_concept_edit() -> None:
     assert web_server.RunRequest().edit_concepts is True
+
+
+@pytest.mark.asyncio
+async def test_dashboard_custom_tier_uses_runtime_topology(tmp_path, monkeypatch) -> None:
+    from orchestrator.config import load_pipeline
+
+    run_id = "web-custom-tier"
+    pipeline = copy.deepcopy(load_pipeline("config-mock"))
+    pipeline["tiers"] = [
+        {
+            "name": "pruna",
+            "model": "pruna-test",
+            "cost_per_second": 0.01,
+            "max_concurrency": 1,
+        }
+    ]
+    monkeypatch.setattr(web_server, "load_pipeline", lambda _config_dir: pipeline)
+    monkeypatch.setenv("ORCH_MEDIA", str(tmp_path / "media"))
+    monkeypatch.setenv("ORCH_CREATORS", str(tmp_path / "creators.json"))
+    web_server._runs[run_id] = {"queues": [], "buffer": [], "done": False}
+
+    try:
+        await web_server._execute_run(
+            run_id=run_id,
+            offer="serum X",
+            batch=1,
+            platform="tiktok",
+            config_dir="config-mock",
+            db_path=str(tmp_path / "runs.sqlite"),
+            approve_creators=False,
+            edit_concepts=False,
+        )
+    finally:
+        state = web_server._runs.pop(run_id, {})
+
+    events = state.get("buffer", [])
+    assert not [event for event in events if event.get("type") == "error"]
+    assert any(
+        event.get("type") == "node_start"
+        and event.get("node") == "pruna"
+        and event.get("label") == "Talking-Head (pruna)"
+        for event in events
+    )
+    assert any(
+        event.get("type") == "progress_event"
+        and event.get("node") == "pruna"
+        and event.get("stage_id") == "talking_head"
+        for event in events
+    )
+    assert any(
+        event.get("type") == "item_update"
+        and event.get("node") == "pruna"
+        and event.get("label") == "Talking-Head (pruna)"
+        for event in events
+    )
 
 
 @pytest.mark.asyncio

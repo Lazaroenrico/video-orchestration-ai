@@ -953,4 +953,21 @@ REST/SSE e adapters de mídia permanecem preservados. Detalhes e matriz completa
   issues #10, #14, #15 e a execução da remoção em fatias na issue #16. Rollback é garantido pela
   rastreabilidade de commits e histórico Git canônico.
 
+### D51 — Contratos de prompt e fronteira trusted/untrusted dos agents
 
+D51 complementa D46: o runtime separa a mensagem server-owned
+`SERVER_EXECUTION_CONSTRAINTS` da mensagem `UNTRUSTED_STAGE_DATA`, usando apenas uma
+allowlist por stage para contagens, limites e IDs conhecidos. Os outputs continuam
+`creative-v2` com dois creators canônicos e hook inicial obrigatório apenas no caminho
+agentic; performance exige snapshot. Os prompts v3 dos três perfis são byte a byte
+equivalentes e não instruem chamadas de domínio nem retry. Detalhes:
+[`ADR-D51`](ADR-D47-langchain-agent-prompt-contracts.md).
+
+### D52 — Fundações e fronteiras da refatoração estrutural
+
+Configuração base + overlays, topologia runtime derivada dos tiers, seleção
+central do modo de execução, split do servidor em composition root, registro
+neutro de artifacts, bootstrap explícito do checkpointer e primitivas comuns
+passam a ter uma única fronteira canônica. As projeções de progresso/SSE devem
+usar a mesma topologia do grafo construído, inclusive para tiers customizados.
+Detalhes e consequências: [`ADR-D52`](ADR-D52-refactor-foundations.md).

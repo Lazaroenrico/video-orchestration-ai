@@ -1,4 +1,5 @@
 """Ledger tenant-scoped para quotas e efeitos externos idempotentes."""
+
 from __future__ import annotations
 
 import asyncio
@@ -10,6 +11,9 @@ from sqlalchemy import select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 
+from orchestrator.common.statuses import (
+    TERMINAL_PREDICTION_STATUSES as _PROVIDER_TERMINAL_STATUSES,
+)
 from orchestrator.db.database import Database
 from orchestrator.db.models import EffectLedger as EffectLedgerModel
 from orchestrator.db.models import ProviderQuota
@@ -72,7 +76,6 @@ _EFFECT_COLUMNS = (
 )
 
 _PROVIDER_STATUS_ORDER = {"starting": 0, "processing": 1}
-_PROVIDER_TERMINAL_STATUSES = frozenset({"succeeded", "failed", "canceled"})
 
 
 def _merge_provider_status(current: str | None, incoming: str) -> str:
@@ -87,9 +90,7 @@ def _merge_provider_status(current: str | None, incoming: str) -> str:
     if incoming in _PROVIDER_TERMINAL_STATUSES:
         return incoming
     return (
-        incoming
-        if _PROVIDER_STATUS_ORDER[incoming] >= _PROVIDER_STATUS_ORDER[current]
-        else current
+        incoming if _PROVIDER_STATUS_ORDER[incoming] >= _PROVIDER_STATUS_ORDER[current] else current
     )
 
 
@@ -161,20 +162,15 @@ class PostgresEffectLedger:
             )
             .with_for_update()
         )
-        stmt_existing = (
-            select(*_EFFECT_COLUMNS)
-            .where(
-                EffectLedgerModel.organization_id == self._tenant.organization_id,
-                EffectLedgerModel.effect_key == effect_key,
-            )
+        stmt_existing = select(*_EFFECT_COLUMNS).where(
+            EffectLedgerModel.organization_id == self._tenant.organization_id,
+            EffectLedgerModel.effect_key == effect_key,
         )
         async with self._database.connection(self._tenant) as connection:
             quota_cursor = await self._database.execute(connection, stmt_quota)
             quota = await quota_cursor.fetchone()
             if quota is None:
-                raise QuotaExceededError(
-                    f"quota não configurada para provider {provider!r}"
-                )
+                raise QuotaExceededError(f"quota não configurada para provider {provider!r}")
 
             existing_cursor = await self._database.execute(connection, stmt_existing)
             existing_row = await existing_cursor.fetchone()
@@ -188,32 +184,24 @@ class PostgresEffectLedger:
                     existing.request,
                 )
                 if actual != expected:
-                    raise ValueError(
-                        f"effect_key {effect_key!r} reutilizada com payload diferente"
-                    )
+                    raise ValueError(f"effect_key {effect_key!r} reutilizada com payload diferente")
                 if existing.status == "uncertain":
-                    raise UncertainEffectError(
-                        f"efeito incerto {effect_key!r} exige reconciliação"
-                    )
+                    raise UncertainEffectError(f"efeito incerto {effect_key!r} exige reconciliação")
                 return existing
 
             limit_units, used_units = quota
             if used_units + units > limit_units:
                 raise QuotaExceededError(
-                    f"quota de {provider!r} excedida: "
-                    f"{used_units + units}/{limit_units}"
+                    f"quota de {provider!r} excedida: {used_units + units}/{limit_units}"
                 )
-            stmt_insert_effect = (
-                pg_insert(EffectLedgerModel)
-                .values(
-                    organization_id=self._tenant.organization_id,
-                    effect_key=effect_key,
-                    run_id=run_id,
-                    provider=provider,
-                    units=units,
-                    status="reserved",
-                    request=request,
-                )
+            stmt_insert_effect = pg_insert(EffectLedgerModel).values(
+                organization_id=self._tenant.organization_id,
+                effect_key=effect_key,
+                run_id=run_id,
+                provider=provider,
+                units=units,
+                status="reserved",
+                request=request,
             )
             stmt_update_quota = (
                 update(ProviderQuota)
@@ -303,8 +291,7 @@ class PostgresEffectLedger:
                     and current.provider_operation_id != operation_id
                 ):
                     raise ValueError(
-                        f"efeito {effect_key!r} já vinculado a "
-                        f"{current.provider_operation_id!r}"
+                        f"efeito {effect_key!r} já vinculado a {current.provider_operation_id!r}"
                     )
                 duplicate = await self._database.execute(
                     connection,
@@ -330,9 +317,7 @@ class PostgresEffectLedger:
                     .values(
                         provider_operation_id=operation_id,
                         provider_status=merged,
-                        status=(
-                            "reserved" if current.status == "uncertain" else current.status
-                        ),
+                        status=("reserved" if current.status == "uncertain" else current.status),
                     )
                     .returning(*_EFFECT_COLUMNS),
                 )
@@ -419,12 +404,9 @@ class PostgresEffectLedger:
             )
             .returning(*_EFFECT_COLUMNS)
         )
-        stmt_existing = (
-            select(*_EFFECT_COLUMNS)
-            .where(
-                EffectLedgerModel.organization_id == self._tenant.organization_id,
-                EffectLedgerModel.effect_key == effect_key,
-            )
+        stmt_existing = select(*_EFFECT_COLUMNS).where(
+            EffectLedgerModel.organization_id == self._tenant.organization_id,
+            EffectLedgerModel.effect_key == effect_key,
         )
         async with self._database.connection(self._tenant) as connection:
             cursor = await self._database.execute(connection, stmt_update)
@@ -436,8 +418,7 @@ class PostgresEffectLedger:
                     raise ValueError(f"efeito {effect_key!r} inexistente")
                 if row[4] != "succeeded":
                     raise UncertainEffectError(
-                        f"efeito {effect_key!r} não pode ser concluído "
-                        f"a partir de {row[4]!r}"
+                        f"efeito {effect_key!r} não pode ser concluído a partir de {row[4]!r}"
                     )
         return _reservation(row, created=False)
 
@@ -477,13 +458,10 @@ class PostgresEffectLedger:
                         connection,
                         update(ProviderQuota)
                         .where(
-                            ProviderQuota.organization_id
-                            == self._tenant.organization_id,
+                            ProviderQuota.organization_id == self._tenant.organization_id,
                             ProviderQuota.provider == row[2],
                         )
-                        .values(
-                            used_units=ProviderQuota.used_units - int(row[3])
-                        ),
+                        .values(used_units=ProviderQuota.used_units - int(row[3])),
                     )
             else:
                 existing_cursor = await self._database.execute(
@@ -530,12 +508,9 @@ class PostgresEffectLedger:
         return _reservation(row, created=False)
 
     async def quota_usage(self, provider: str) -> tuple[int, int]:
-        stmt = (
-            select(ProviderQuota.used_units, ProviderQuota.limit_units)
-            .where(
-                ProviderQuota.organization_id == self._tenant.organization_id,
-                ProviderQuota.provider == provider,
-            )
+        stmt = select(ProviderQuota.used_units, ProviderQuota.limit_units).where(
+            ProviderQuota.organization_id == self._tenant.organization_id,
+            ProviderQuota.provider == provider,
         )
         async with self._database.connection(self._tenant) as connection:
             cursor = await self._database.execute(connection, stmt)

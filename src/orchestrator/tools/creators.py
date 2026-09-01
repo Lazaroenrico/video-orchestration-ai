@@ -1,4 +1,5 @@
 """Creator-building tools."""
+
 from __future__ import annotations
 
 import hashlib
@@ -7,11 +8,12 @@ from typing import Any, Optional
 
 from orchestrator import media_store
 from orchestrator.adapters.base import VoiceProfile
-from orchestrator.adapters.elevenlabs_voice_design import (
-    DEFAULT_PREVIEW_TEXT,
-    voice_description_hash,
-)
+from orchestrator.common.gender import GenderPreset, gender_by_parity, infer_gender
 from orchestrator.config import default_media_path
+
+# Constantes do provider de voice design chegam pela indireção do registry
+# (composition root) — tools não importa adapters concretos.
+from orchestrator.registry import DEFAULT_PREVIEW_TEXT, voice_description_hash
 from orchestrator.storage.base import is_downloadable
 from orchestrator.tools.base import (
     ToolContext,
@@ -48,9 +50,7 @@ async def build_creator_tool(
     )
 
     effective_media_root = (
-        media_root
-        if (media_root is not None or storage is not None)
-        else default_media_path()
+        media_root if (media_root is not None or storage is not None) else default_media_path()
     )
     creator_id = f"creator-{index}"
 
@@ -90,9 +90,7 @@ async def build_creator_tool(
         return await _build()
 
     gender_token = (
-        voice_profile.preset.encode("utf-8")
-        if voice_profile and voice_profile.preset
-        else b""
+        voice_profile.preset.encode("utf-8") if voice_profile and voice_profile.preset else b""
     )
     prompt_bytes = (system_prompt or "").encode("utf-8")
     prompt_hash = hashlib.sha256(prompt_bytes + gender_token).hexdigest()[:16]
@@ -147,15 +145,16 @@ async def derive_creator_voice_spec_tool(
     from orchestrator.creative_contracts import CreatorVoiceSpec
 
     voice_prof = profile.get("voice_profile") or {}
-    preset = voice_prof.get("preset") if isinstance(voice_prof, dict) else getattr(voice_prof, "preset", None)
+    preset = (
+        voice_prof.get("preset")
+        if isinstance(voice_prof, dict)
+        else getattr(voice_prof, "preset", None)
+    )
 
     voice_brief = (profile.get("voice_brief") or "").casefold()
     perf_style = (profile.get("performance_style") or "").casefold()
     archetype = (profile.get("archetype") or "").casefold()
     vis_brief = (profile.get("visual_brief") or visual_brief or "").casefold()
-
-    _FEMALE_TOKENS = ("female", "woman", "mulher", "feminina", "feminino", "girl", "moça", "garota", "ela", "her", "women")
-    _MALE_TOKENS = ("male", "man", "homem", "masculino", "boy", "rapaz", "moço", "garoto", "ele", "his", "men")
 
     all_text = " ".join([voice_brief, perf_style, archetype, vis_brief])
 
@@ -163,15 +162,14 @@ async def derive_creator_voice_spec_tool(
         vocal_pres = "feminine"
     elif preset == "male":
         vocal_pres = "masculine"
-    elif any(token in all_text for token in _FEMALE_TOKENS):
-        vocal_pres = "feminine"
-    elif any(token in all_text for token in _MALE_TOKENS):
-        vocal_pres = "masculine"
     else:
-        creator_id = str(profile.get("id") or "")
-        match = re.search(r"(\d+)$", creator_id)
-        idx = int(match.group(1)) if match else 0
-        vocal_pres = "feminine" if idx % 2 == 0 else "masculine"
+        inferred: GenderPreset = infer_gender(all_text)
+        if inferred == "neutral":
+            creator_id = str(profile.get("id") or "")
+            match = re.search(r"(\d+)$", creator_id)
+            idx = int(match.group(1)) if match else 0
+            inferred = gender_by_parity(idx)
+        vocal_pres = {"female": "feminine", "male": "masculine"}[inferred]
 
     if "young" in voice_brief or "jovem" in voice_brief:
         vocal_age = "young_adult"
@@ -246,10 +244,7 @@ async def design_creator_voice_tool(
     sample = (preview_text or DEFAULT_PREVIEW_TEXT).strip()
     return await execute_paid_effect(
         ctx,
-        effect_key=(
-            f"voice-design:{ctx.run_id}:{creator_id}:"
-            f"{description_hash}:{reroll_count}"
-        ),
+        effect_key=(f"voice-design:{ctx.run_id}:{creator_id}:{description_hash}:{reroll_count}"),
         provider="elevenlabs_voice_design_chars",
         units=len(sample),
         request={
@@ -284,6 +279,7 @@ async def finalize_creator_voice_tool(
         stage="finalize_voices",
         run_id=ctx.run_id,
     )
+
     async def finalize() -> dict[str, Any]:
         finalized = await ctx.adapter.finalize_voice(
             candidate_id,
@@ -307,9 +303,7 @@ async def finalize_creator_voice_tool(
             organization_id=organization_id,
         )
         return require_dict(
-            reconciled.model_dump()
-            if hasattr(reconciled, "model_dump")
-            else reconciled,
+            reconciled.model_dump() if hasattr(reconciled, "model_dump") else reconciled,
             tool_name="finalize_creator_voice_tool",
         )
 

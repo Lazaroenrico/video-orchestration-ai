@@ -7,9 +7,9 @@ registra explicitamente os tipos pydantic do estado (``Item``/``Artifact``/
 ``QCResult``) — sem isso, versões futuras do LangGraph bloqueiam a desserialização
 desses tipos do checkpoint.
 """
+
 from __future__ import annotations
 
-import os
 import sqlite3
 import threading
 from collections.abc import Mapping, Sequence
@@ -31,6 +31,7 @@ from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from langgraph.checkpoint.sqlite import SqliteSaver
 
+from orchestrator import runtime_mode
 from orchestrator.db.tenancy import TenantIdentity
 
 _ALLOWED_TYPES = [
@@ -78,9 +79,7 @@ class AsyncSqliteCompatSaver(SqliteSaver):
         before: dict[str, Any] | None = None,
         limit: int | None = None,
     ) -> AsyncIterator[Any]:
-        rows = self._locked_collect(
-            self.list, config, filter=filter, before=before, limit=limit
-        )
+        rows = self._locked_collect(self.list, config, filter=filter, before=before, limit=limit)
         for row in rows:
             yield row
 
@@ -130,9 +129,7 @@ class TenantScopedPostgresSaver(BaseCheckpointSaver):
     def _external_config(self, config: RunnableConfig) -> RunnableConfig:
         configurable = dict(config.get("configurable") or {})
         thread_id = str(configurable["thread_id"])
-        assert thread_id.startswith(self._prefix), (
-            "checkpoint fora do escopo da organização atual"
-        )
+        assert thread_id.startswith(self._prefix), "checkpoint fora do escopo da organização atual"
         configurable["thread_id"] = thread_id.removeprefix(self._prefix)
         return {**config, "configurable": configurable}
 
@@ -279,9 +276,9 @@ async def open_tenant_postgres_checkpointer(
 ) -> AsyncIterator[TenantScopedPostgresSaver]:
     """Abre o saver PostgreSQL já limitado a uma organização conhecida."""
     async with AsyncPostgresSaver.from_conn_string(
-            database_url.replace("postgresql+psycopg://", "postgresql://", 1),
-            serde=_serde(),
-        ) as saver:
+        database_url.replace("postgresql+psycopg://", "postgresql://", 1),
+        serde=_serde(),
+    ) as saver:
         await _set_checkpoint_tenant(saver, organization_id)
         yield TenantScopedPostgresSaver(saver, organization_id)
 
@@ -303,7 +300,7 @@ async def open_sqlite_checkpointer(db_path: str | Path) -> AsyncIterator[AsyncSq
 @asynccontextmanager
 async def open_checkpointer(db_path: str | Path) -> AsyncIterator[Any]:
     """Seleciona PostgreSQL quando configurado; mantém SQLite no modo local."""
-    database_url = os.environ.get("DATABASE_URL")
+    database_url = runtime_mode.database_url()
     if database_url:
         tenant = TenantIdentity.from_env().context()
         async with open_tenant_postgres_checkpointer(

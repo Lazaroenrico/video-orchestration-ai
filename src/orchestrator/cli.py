@@ -3,6 +3,7 @@
 Campanhas são iniciadas e retomadas pela API V2; a CLI mantém somente comandos
 operacionais e o consumidor durável ``runner --once``.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -28,12 +29,13 @@ from orchestrator.db import (
     TenantIdentity,
     create_organization,
     grant_membership,
+    owner_bootstrap,
     provision_runtime_role,
     revoke_membership,
     upgrade_database,
 )
 from orchestrator.db.artifacts import PostgresArtifactRepository
-from orchestrator.graph.checkpoint import open_checkpointer
+from orchestrator.graph.checkpoint import open_checkpointer, setup_postgres_checkpointer
 from orchestrator.legacy_import import apply_legacy, scan_legacy
 from orchestrator.logging_config import configure_logging
 from orchestrator.operations import PostgresOperations
@@ -233,9 +235,7 @@ def membership_grant(
         )
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
-    click.echo(
-        f"membership {role!r} concedida a {user_subject!r} em {organization_slug!r}"
-    )
+    click.echo(f"membership {role!r} concedida a {user_subject!r} em {organization_slug!r}")
 
 
 @db_commands.command(name="membership-revoke")
@@ -259,9 +259,36 @@ def membership_revoke(
         user_subject=user_subject,
     )
     suffix = "" if removed else " (já ausente)"
-    click.echo(
-        f"membership de {user_subject!r} em {organization_slug!r} revogada{suffix}"
-    )
+    click.echo(f"membership de {user_subject!r} em {organization_slug!r} revogada{suffix}")
+
+
+@db_commands.command(name="owner-bootstrap")
+@click.option(
+    "--migration-database-url",
+    envvar="MIGRATION_DATABASE_URL",
+    required=True,
+    help="Conexão direta e privilegiada.",
+)
+@click.option("--slug", "--organization-slug", "slug", required=True, help="Slug da organização.")
+@click.option("--name", "--organization-name", "name", required=True, help="Nome da organização.")
+@click.option("--email", "--owner-email", "email", required=True, help="E-mail do primeiro owner.")
+def db_owner_bootstrap(
+    migration_database_url: str,
+    slug: str,
+    name: str,
+    email: str,
+) -> None:
+    """Inicializa ou valida a organização criando o convite do primeiro owner de modo idempotente."""
+    try:
+        result = owner_bootstrap(
+            migration_database_url,
+            organization_slug=slug,
+            organization_name=name,
+            owner_email=email,
+        )
+    except (ValueError, RuntimeError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps(result, sort_keys=True))
 
 
 @cli.command(name="import-legacy")
@@ -366,8 +393,14 @@ async def _seed_default_dev_quotas() -> None:
 
 
 @cli.command()
-@click.option("--db", default=None, help="Checkpointer sqlite (default: .orchestrator/runs.sqlite).")
-@click.option("--artifacts-db", default=None, help="ArtifactDB sqlite (default: .orchestrator/artifacts.sqlite).")
+@click.option(
+    "--db", default=None, help="Checkpointer sqlite (default: .orchestrator/runs.sqlite)."
+)
+@click.option(
+    "--artifacts-db",
+    default=None,
+    help="ArtifactDB sqlite (default: .orchestrator/artifacts.sqlite).",
+)
 @click.option(
     "--migration-database-url",
     envvar="MIGRATION_DATABASE_URL",
@@ -390,15 +423,13 @@ def migrate(db, artifacts_db, migration_database_url, legacy_database_url):
     database_url = legacy_database_url or migration_database_url
     if database_url is None and os.environ.get("ORCH_ENV", "local") == "local":
         database_url = os.environ.get("DATABASE_URL")
-    if (
-        database_url is None
-        and os.environ.get("ORCH_ENV", "local") in {"staging", "production"}
-    ):
-        raise click.ClickException(
-            "MIGRATION_DATABASE_URL é obrigatória em staging/production"
-        )
+    if database_url is None and os.environ.get("ORCH_ENV", "local") in {"staging", "production"}:
+        raise click.ClickException("MIGRATION_DATABASE_URL é obrigatória em staging/production")
     if database_url:
         upgrade_database(database_url)
+        # O checkpointer é infraestrutura do grafo: a CLI (composition root) sobe as
+        # tabelas dele explicitamente; migrações SQL não conhecem o grafo.
+        setup_postgres_checkpointer(database_url)
         if os.environ.get("ORCH_ENV", "local") == "local":
             try:
                 asyncio.run(_seed_default_dev_quotas())
@@ -426,9 +457,7 @@ def _run_uvicorn(host, port, reload, *, application: str = "orchestrator.web.ser
     try:
         import uvicorn
     except ImportError:  # pragma: no cover - uvicorn faz parte das deps [web] instaladas
-        raise click.ClickException(
-            "uvicorn não instalado. Execute: uv pip install -e '.[web]'"
-        )
+        raise click.ClickException("uvicorn não instalado. Execute: uv pip install -e '.[web]'")
     load_dotenv(".env", override=False)
     configure_logging()
     click.echo(f"Dashboard disponível em: http://localhost:{port}/")

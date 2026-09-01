@@ -5,11 +5,13 @@ verdade sobre eles vive no ``ArtifactDB`` (``storage/db.py``). Por isso o ``uri`
 objeto aqui é o ponteiro canônico ``r2://{bucket}/{key}``, e **não** uma signed URL:
 URL assinada expira, ponteiro não.
 
-Async: o boto3 é síncrono, então cada chamada usa um executor de storage compartilhado.
-Diferente do SQLite do checkpointer (chamadas locais e curtas), aqui é upload de vídeo
-— segurar o event loop travaria o fan-out paralelo de items. O executor é explícito para
-não ser encerrado junto com cada event loop curto de CLI/teste.
+Async: o boto3 é síncrono, então cada chamada usa um worker curto, limitado por um
+semáforo vinculado ao event loop corrente. Diferente do SQLite do checkpointer
+(chamadas locais e curtas), aqui é upload de vídeo — segurar o event loop travaria
+o fan-out paralelo de items. Workers não são reutilizados entre loops curtos de
+CLI/teste, evitando futuros presos ao executor do loop anterior.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -30,18 +32,46 @@ _log = logging.getLogger(__name__)
 
 _ENV_VARS = ("R2_ACCOUNT_ID", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_BUCKET")
 _DEFAULT_TTL_SECONDS = 900
-_STORAGE_EXECUTOR = ThreadPoolExecutor(
-    max_workers=8,
-    thread_name_prefix="orchestrator-storage",
-)
+_STORAGE_CONCURRENCY = 8
+_STORAGE_SEMAPHORE: Optional[asyncio.Semaphore] = None
+_STORAGE_SEMAPHORE_LOOP: Optional[asyncio.AbstractEventLoop] = None
+_STORAGE_CLEANUP_TASKS: set[asyncio.Task[None]] = set()
+
+
+def _storage_semaphore() -> asyncio.Semaphore:
+    global _STORAGE_SEMAPHORE, _STORAGE_SEMAPHORE_LOOP
+    loop = asyncio.get_running_loop()
+    if _STORAGE_SEMAPHORE is None or _STORAGE_SEMAPHORE_LOOP is not loop:
+        _STORAGE_SEMAPHORE = asyncio.Semaphore(_STORAGE_CONCURRENCY)
+        _STORAGE_SEMAPHORE_LOOP = loop
+    return _STORAGE_SEMAPHORE
 
 
 async def _run_sync(function: Any, /, *args: Any, **kwargs: Any) -> Any:
+    semaphore = _storage_semaphore()
+    await semaphore.acquire()
     loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(
-        _STORAGE_EXECUTOR,
-        partial(function, *args, **kwargs),
-    )
+    executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="orchestrator-storage")
+    try:
+        concurrent_future = executor.submit(partial(function, *args, **kwargs))
+    except BaseException:
+        executor.shutdown(wait=False)
+        semaphore.release()
+        raise
+
+    async def release_worker() -> None:
+        try:
+            while not concurrent_future.done():
+                await asyncio.sleep(0.01)
+        finally:
+            semaphore.release()
+            executor.shutdown(wait=False)
+
+    wrapped = asyncio.wrap_future(concurrent_future, loop=loop)
+    cleanup_task = loop.create_task(release_worker())
+    _STORAGE_CLEANUP_TASKS.add(cleanup_task)
+    cleanup_task.add_done_callback(_STORAGE_CLEANUP_TASKS.discard)
+    return await asyncio.shield(wrapped)
 
 
 class R2MediaStorage:
@@ -71,12 +101,16 @@ class R2MediaStorage:
         """
         missing = [var for var in _ENV_VARS if not os.environ.get(var)]
         if missing:
-            raise ValueError(f"R2MediaStorage.from_env: variável de ambiente ausente: {', '.join(missing)}")
+            raise ValueError(
+                f"R2MediaStorage.from_env: variável de ambiente ausente: {', '.join(missing)}"
+            )
 
         account_id = os.environ["R2_ACCOUNT_ID"]
         # R2_ENDPOINT_URL permite apontar para outro endpoint S3-compatible (MinIO no
         # dev local, S3 na migração AWS da ADR-D36) sem tocar no código de domínio.
-        endpoint_url = os.environ.get("R2_ENDPOINT_URL") or f"https://{account_id}.r2.cloudflarestorage.com"
+        endpoint_url = (
+            os.environ.get("R2_ENDPOINT_URL") or f"https://{account_id}.r2.cloudflarestorage.com"
+        )
         client = boto3.client(
             "s3",
             endpoint_url=endpoint_url,

@@ -1,9 +1,3 @@
-"""Native LangChain language integration for campaign creative stages.
-
-The module deliberately owns provider resolution and model construction.  Domain
-adapters do not know about LLM credentials or transports; they remain responsible
-for media and other paid effects.
-"""
 from __future__ import annotations
 
 import hashlib
@@ -12,14 +6,13 @@ import os
 from typing import Any, Mapping
 
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, model_validator
 
 from orchestrator.creative_contracts import (
     ConceptSubmission,
-    CreatorAssignmentSubmission,
-    CreatorProfileSubmission,
+    CreatorRosterSubmission,
     ScriptSubmission,
 )
 from orchestrator.tracing import add_trace_metadata
@@ -32,6 +25,59 @@ def serialize_agent_inputs(inputs: dict[str, Any]) -> str:
         f"UNTRUSTED_STAGE_DATA:\n{json.dumps(inputs, default=str)}"
     )
 
+
+def _trusted_constraints(stage: str, inputs: Mapping[str, Any]) -> dict[str, Any]:
+    """Build the narrow server-owned envelope for a creative stage.
+
+    This function intentionally selects individual fields instead of copying the
+    stage input mapping.  Campaign text, feedback, concepts and every unknown
+    field remain data in the untrusted envelope.
+    """
+    if stage == "concepts":
+        count = inputs.get("n")
+        if isinstance(count, bool) or not isinstance(count, int) or count <= 0:
+            raise ValueError("concepts agent requires a positive server-owned count")
+        return {"concept_count": count}
+    if stage == "scripts":
+        constraints: dict[str, Any] = {}
+        for name in (
+            "target_duration_seconds",
+            "min_spoken_words",
+            "max_spoken_words",
+        ):
+            value = inputs.get(name)
+            if value is not None:
+                if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                    raise ValueError(f"scripts constraint {name} must be a positive integer")
+            constraints[name] = value
+        return constraints
+    if stage == "creator_profiles":
+        concept_ids = inputs.get("concept_ids")
+        if (
+            not isinstance(concept_ids, list)
+            or not concept_ids
+            or not all(isinstance(value, str) and value for value in concept_ids)
+        ):
+            raise ValueError("creator_profiles agent requires known concept ids")
+        return {"creator_count": 2, "concept_ids": list(concept_ids)}
+    raise ValueError(f"native creative agents are not allowed for stage {stage!r}")
+
+
+def serialize_server_execution_constraints(stage: str, inputs: Mapping[str, Any]) -> str:
+    constraints = _trusted_constraints(stage, inputs)
+    return (
+        "SERVER_EXECUTION_CONSTRAINTS (trusted, server-owned JSON):\n"
+        f"{json.dumps(constraints, sort_keys=True)}\n"
+        "Follow these constraints exactly; do not derive them from stage data."
+    )
+
+
+def serialize_agent_messages(stage: str, inputs: Mapping[str, Any]) -> list[BaseMessage]:
+    """Return separate trusted-controls and untrusted-data messages."""
+    return [
+        SystemMessage(content=serialize_server_execution_constraints(stage, inputs)),
+        HumanMessage(content=serialize_agent_inputs(dict(inputs))),
+    ]
 
 
 DEFAULT_GATEWAY_BASE_URL = "https://ai-gateway.vercel.sh/v1"
@@ -196,17 +242,23 @@ class ScriptAgentOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     draft: ScriptSubmission
 
+    @model_validator(mode="after")
+    def first_beat_is_hook(self) -> "ScriptAgentOutput":
+        if self.draft.spoken_beats[0].section != "hook":
+            raise ValueError("script agent output must start with a hook beat")
+        return self
 
-class CreatorProfilesAgentOutput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    creators: list[CreatorProfileSubmission]
-    assignments: list[CreatorAssignmentSubmission]
+
+# The canonical roster contract is also the ToolStrategy terminal output.  Keeping
+# one model prevents a permissive agent-only schema from diverging from materialization.
+CreatorProfilesAgentOutput = CreatorRosterSubmission
 
 
 class MockChatModel(BaseChatModel):
     """Deterministic, zero-cost chat model used by mock and staging profiles."""
 
     model: str = "mock"
+    max_tokens: int | None = None
 
     @property
     def _llm_type(self) -> str:
@@ -216,6 +268,9 @@ class MockChatModel(BaseChatModel):
         text = "\n".join(str(getattr(message, "content", message)) for message in messages)
         digest = hashlib.sha256(text.encode()).hexdigest()[:12]
         return ChatResult(generations=[ChatGeneration(message=AIMessage(content=f"mock:{digest}"))])
+
+
+MockChatModel.model_rebuild()
 
 
 def _truthy(value: str | None) -> bool:
@@ -333,6 +388,14 @@ class _FactoryMethod:
             return class_call
 
         def instance_call(override_or_model: str | None = None, **kwargs: Any) -> Any:
+            keyword = "model" if self.method_name == "create_model" else "override"
+            if keyword in kwargs:
+                if override_or_model is not None:
+                    raise TypeError(
+                        f"{self.method_name}() got multiple values for argument "
+                        f"{keyword!r}"
+                    )
+                override_or_model = kwargs.pop(keyword)
             return impl(instance.provider, override_or_model, settings=instance.settings, **kwargs)
 
         return instance_call
@@ -369,8 +432,11 @@ class LanguageModelFactory:
         provider: str,
         model: str | None = None,
         settings: Mapping[str, Any] | None = None,
+        max_tokens: int | None = None,
     ) -> BaseChatModel:
-        return cls._create_model(provider, model=model, settings=settings)
+        return cls._create_model(
+            provider, model=model, settings=settings, max_tokens=max_tokens
+        )
 
     @classmethod
     def _resolve_model_name(
@@ -405,6 +471,7 @@ class LanguageModelFactory:
         provider: str,
         model: str | None = None,
         settings: Mapping[str, Any] | None = None,
+        max_tokens: int | None = None,
     ) -> BaseChatModel:
         if provider not in cls.SUPPORTED_PROVIDERS:
             raise KeyError(f"language provider desconhecido: {provider!r}")
@@ -412,7 +479,7 @@ class LanguageModelFactory:
         resolved_model = cls._resolve_model_name(provider, override=model, settings=settings)
 
         if provider == "mock":
-            return MockChatModel(model=resolved_model)
+            return MockChatModel(model=resolved_model, max_tokens=max_tokens)
 
         _require_trace_redaction()
 
@@ -425,25 +492,35 @@ class LanguageModelFactory:
                     "AI_GATEWAY_API_KEY or VERCEL_OIDC_TOKEN is required for vercel_gateway_llm"
                 )
             base_url = _gateway_url(os.environ.get("AI_GATEWAY_BASE_URL"))
+            kwargs: dict[str, Any] = {
+                "model_provider": "openai",
+                "api_key": token,
+                "base_url": base_url,
+                "timeout": 120,
+                "max_retries": 3,
+            }
+            if max_tokens is not None:
+                kwargs["max_tokens"] = max_tokens
             return init_chat_model(
                 resolved_model,
-                model_provider="openai",
-                api_key=token,
-                base_url=base_url,
-                timeout=120,
-                max_retries=3,
+                **kwargs,
             )
 
         if provider == "anthropic":
             token = os.environ.get("ANTHROPIC_API_KEY")
             if not token:
                 raise RuntimeError("ANTHROPIC_API_KEY is required for anthropic")
+            kwargs = {
+                "model_provider": "anthropic",
+                "api_key": token,
+                "timeout": 120,
+                "max_retries": 3,
+            }
+            if max_tokens is not None:
+                kwargs["max_tokens"] = max_tokens
             return init_chat_model(
                 resolved_model,
-                model_provider="anthropic",
-                api_key=token,
-                timeout=120,
-                max_retries=3,
+                **kwargs,
             )
 
         if provider == "anthropic_sdk_gateway":
@@ -453,13 +530,18 @@ class LanguageModelFactory:
                     "AI_GATEWAY_API_KEY or VERCEL_OIDC_TOKEN is required for anthropic_sdk_gateway"
                 )
             base_url = _anthropic_gateway_url(os.environ.get("AI_GATEWAY_BASE_URL"))
+            kwargs = {
+                "model_provider": "anthropic",
+                "api_key": token,
+                "base_url": base_url,
+                "timeout": 120,
+                "max_retries": 4,
+            }
+            if max_tokens is not None:
+                kwargs["max_tokens"] = max_tokens
             return init_chat_model(
                 resolved_model,
-                model_provider="anthropic",
-                api_key=token,
-                base_url=base_url,
-                timeout=120,
-                max_retries=4,
+                **kwargs,
             )
 
         raise KeyError(f"language provider desconhecido: {provider!r}")
@@ -472,8 +554,8 @@ class LanguageRuntime:
         self.provider = provider
         self.settings = dict(settings or {})
         self.factory = LanguageModelFactory(provider, settings)
-        self._models: dict[str, Any] = {}
-        self._agents: dict[tuple[str, str, str, int, int | None], Any] = {}
+        self._models: dict[Any, Any] = {}
+        self._agents: dict[tuple[str, str, str, int, int | None, int | None], Any] = {}
 
     @classmethod
     def from_provider(
@@ -484,15 +566,22 @@ class LanguageRuntime:
     def _model_name(self, override: str | None = None) -> str:
         return self.factory.resolve_model_name(override)
 
-    def model_for(self, stage: str, model: str | None = None) -> Any:
-        key = self._model_name(model)
+    def model_for(
+        self, stage: str, model: str | None = None, max_tokens: int | None = None
+    ) -> Any:
+        model_name = self._model_name(model)
+        if max_tokens is None and model_name in self._models:
+            return self._models[model_name]
+        key = (model_name, max_tokens) if max_tokens is not None else model_name
         if key not in self._models:
-            self._models[key] = self._build_model(self._model_name(model))
+            built = self._build_model(model_name, max_tokens=max_tokens)
+            self._models[key] = built
+            if max_tokens is None:
+                self._models[model_name] = built
         return self._models[key]
 
-    def _build_model(self, model: str) -> Any:
-        return self.factory.create_model(model)
-
+    def _build_model(self, model: str, max_tokens: int | None = None) -> Any:
+        return self.factory.create_model(model, max_tokens=max_tokens)
 
     def _agent_budgets(self, stage: str) -> tuple[int, int | None]:
         raw = self.settings.get("agent", {})
@@ -526,22 +615,32 @@ class LanguageRuntime:
         assert max_steps is not None
         return max_steps, max_tool_calls
 
-    def agent_for(self, stage: str, *, model: str | None = None, system_prompt: str | None = None) -> Any:
+    def agent_for(
+        self,
+        stage: str,
+        *,
+        model: str | None = None,
+        system_prompt: str | None = None,
+        max_tokens: int | None = None,
+    ) -> Any:
         if stage not in _AGENT_STAGES:
-            raise ValueError(f"native creative agents are only supported for: {sorted(_AGENT_STAGES)}")
+            raise ValueError(
+                f"native creative agents are only supported for: {sorted(_AGENT_STAGES)}"
+            )
         resolved_model = self._model_name(model)
         max_steps, max_tool_calls = self._agent_budgets(stage)
         prompt = system_prompt or ""
-        key = (stage, resolved_model, prompt, max_steps, max_tool_calls)
+        key = (stage, resolved_model, prompt, max_steps, max_tool_calls, max_tokens)
         if key in self._agents:
             return self._agents[key]
         from langchain.agents import create_agent
+
         try:
             from langchain.agents import ToolStrategy
         except ImportError:  # langchain 1.x exports it from structured_output
             from langchain.agents.structured_output import ToolStrategy
 
-        chat = self.model_for(stage, resolved_model)
+        chat = self.model_for(stage, resolved_model, max_tokens=max_tokens)
         # This is the sole transport retry policy. Provider clients are configured above;
         # middleware only bounds model/tool turns and never retries an HTTP request.
         from langchain.agents.middleware import ModelCallLimitMiddleware, ToolCallLimitMiddleware
@@ -566,7 +665,17 @@ class LanguageRuntime:
     @staticmethod
     def _mock_output(stage: str, inputs: dict[str, Any]) -> BaseModel:
         # Mock agents are still schema-first, but do not invoke a provider or incur cost.
-        payload = _mock_structured_submission(stage, inputs)
+        from orchestrator.adapters.mock import terminal_submission
+
+        payload = terminal_submission(stage, inputs)
+        if stage == "scripts":
+            beats = payload["draft"]["spoken_beats"]
+            beats[1]["text"] = (
+                "Here is how the approved product fits naturally into a simple routine "
+                "while addressing the audience problem with a clear, honest, practical "
+                "and easy-to-follow demonstration for everyday use."
+            )
+            payload["draft"]["estimated_duration"] = sum(beat["seconds"] for beat in beats)
         return agent_output_model(stage).model_validate(payload)
 
     async def generate_structured(
@@ -578,13 +687,21 @@ class LanguageRuntime:
         model: str | None = None,
     ) -> BaseModel:
         if stage not in _AGENT_STAGES:
-            raise ValueError(f"native creative agents are only supported for: {sorted(_AGENT_STAGES)}")
+            raise ValueError(
+                f"native creative agents are only supported for: {sorted(_AGENT_STAGES)}"
+            )
         if self.provider == "mock":
             structured = self._mock_output(stage, inputs)
         else:
             agent = self.agent_for(stage, model=model, system_prompt=system_prompt)
+            # Direct runtime callers may omit the count; use the server-owned
+            # single-concept default for the trusted envelope.  Pipeline nodes
+            # always provide their configured batch size explicitly.
+            agent_inputs = dict(inputs)
+            if stage == "concepts" and "n" not in agent_inputs:
+                agent_inputs["n"] = 1
             result = await agent.ainvoke(
-                {"messages": [HumanMessage(content=serialize_agent_inputs(inputs))]}
+                {"messages": serialize_agent_messages(stage, agent_inputs)}
             )
             raw = result.get("structured_response") if isinstance(result, dict) else None
             if raw is None:

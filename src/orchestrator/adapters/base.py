@@ -4,6 +4,7 @@ No v1 só existe o ``MockAdapter``. Adapters reais (Claude, GPT Image 2, Topaz,
 ElevenLabs, Replicate/fal/AtlasCloud) implementam estes mesmos protocolos e são
 plugados via ``registry.py`` — sem mexer no grafo.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -15,12 +16,10 @@ from typing import (
     runtime_checkable,
 )
 
+from orchestrator.common.gender import infer_gender
 from orchestrator.graph.state import Artifact, Item, QCResult
 
 VoicePreset = Literal["male", "female", "neutral"]
-
-_FEMALE_HINTS = ("female", "feminina", "woman", "mulher", "girl")
-_MALE_HINTS = ("male", "masculino", "masculina", "man", "homem", "boy")
 
 
 @dataclass(frozen=True)
@@ -58,13 +57,7 @@ def infer_voice_profile(text: Optional[str]) -> Optional[VoiceProfile]:
     prompt = (text or "").strip()
     if not prompt:
         return None
-    lowered = prompt.casefold()
-    if any(token in lowered for token in _FEMALE_HINTS):
-        preset: VoicePreset = "female"
-    elif any(token in lowered for token in _MALE_HINTS):
-        preset = "male"
-    else:
-        preset = "neutral"
+    preset: VoicePreset = infer_gender(prompt)
     return VoiceProfile(preset=preset, prompt=prompt)
 
 
@@ -175,7 +168,11 @@ class VideoPort(Protocol):
     """Kling / Seedance ou outro modelo configurado para os Steps 4 e 5."""
 
     async def generate_clip(
-        self, item_id: str, tier: str, seconds: int, attempt: int,
+        self,
+        item_id: str,
+        tier: str,
+        seconds: int,
+        attempt: int,
         system_prompt: Optional[str] = None,
         reference_image_uri: Optional[str] = None,
         audio_uri: Optional[str] = None,

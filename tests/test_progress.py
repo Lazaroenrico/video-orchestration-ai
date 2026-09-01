@@ -1,9 +1,53 @@
+from orchestrator.graph.topology import topology_for_tiers
 from orchestrator.progress import (
     LangChainEventProjector,
     ProgressEventTranslator,
     build_activity,
     build_progress,
 )
+
+
+def test_progress_translator_uses_runtime_tier_metadata():
+    translator = ProgressEventTranslator(topology_for_tiers(["pruna"]))
+
+    event = translator.translate(
+        {
+            "event": "on_chain_start",
+            "run_id": "pruna-a",
+            "metadata": {"langgraph_node": "pruna"},
+            "data": {"input": {"id": "clip-a"}},
+        }
+    )
+
+    assert event == {
+        "type": "progress_event",
+        "operation_id": "pruna-a",
+        "stage_id": "talking_head",
+        "stage_label": "Talking-head",
+        "node": "pruna",
+        "status": "started",
+        "item_id": "clip-a",
+        "attempt": 0,
+    }
+
+
+def test_activity_and_progress_use_runtime_tier_metadata():
+    runtime = topology_for_tiers(["pruna"])
+    event = {
+        "type": "progress_event",
+        "event_id": "pruna-end",
+        "stage_id": "talking_head",
+        "stage_label": "Talking-head",
+        "node": "pruna",
+        "status": "completed",
+        "item_id": "clip-a",
+    }
+
+    activity = build_activity([event], topology=runtime)
+    progress = build_progress([event], phase="running", batch_size=1, topology=runtime)
+
+    assert activity[0]["label"] == "Talking-head completed"
+    assert progress["stages"][8]["completed_units"] == 1
 
 
 def test_langchain_projector_deduplicates_lifecycle_and_reads_message_usage():
