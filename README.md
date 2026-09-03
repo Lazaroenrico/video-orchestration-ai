@@ -1,278 +1,462 @@
 # UGC Orchestrator
 
-Motor de orquestração assíncrono para a pipeline de **AI UGC em escala** (500+ vídeos/semana) descrita em [`Context.md`](Context.md). Construído com **TDD estrito** sobre **LangGraph**, **LangChain** e **LangSmith**, o sistema opera de forma determinística e modular, permitindo alternar ou misturar adapters reais e determinísticos (mock) por papel operacional através de perfis de configuração declarativos.
+Motor de orquestração para transformar um briefing de campanha em vídeos de AI UGC
+revisados, validados e montados. O projeto coordena planejamento criativo, aprovação
+humana, geração de mídia, controle de qualidade e montagem final sem expor ao usuário a
+complexidade dos serviços de IA envolvidos.
 
-A API e a interface web V2 expõem a pipeline em **5 Fases Operacionais**:
-1. **Configuração** — Parâmetros da campanha, oferta, plataformas alvo, guidelines de segurança e batch size.
-2. **Plano Criativo** — Geração de conceitos e roteiros via runtime nativo LangChain (`creative-v2`) + geração de personas visuais e Voice Design (com 3 previews de áudio por criador).
-3. **Revisão (Human Gate V2)** — Ponto único de aprovação criativa (`review_creative_plan`) com suporte a edição de conceitos/roteiros, seleção do candidato de voz e reroll com preservação de estado.
-4. **Produção e QC** — Geração de locução (ElevenLabs), produção paralela de vídeo em 2 estágios (LTX-Video 2.3 Fast mudo em 720p + LatentSync para sincronização labial) e loop automatizado de Quality Control (QC).
-5. **Montagem** — Alinhamento temporal, normalização de áudio e muxing/renderização determinística via FFmpeg/ffprobe, finalizando no estado terminal `assembled`.
+Foi desenhado para execução em lotes e para uma operação-alvo de **500+ vídeos por
+semana**, com três prioridades: retomada segura após falhas, controle de custos e troca
+de provedores sem reescrever o fluxo principal.
 
-*(Nota: Distribuição e publicação direta em redes sociais estão fora do escopo do orquestrador; o estado terminal aprovado da pipeline é `assembled`.)*
+> O escopo termina no vídeo montado, no estado `assembled`. Publicação e distribuição
+> em redes sociais não fazem parte deste repositório.
 
----
+## Entenda o projeto em 30 segundos
 
-## Perfis de Configuração (`config*`)
+1. Uma pessoa informa oferta, público, plataforma e tamanho da campanha.
+2. Agentes de linguagem criam conceitos, roteiros e dois perfis de creator.
+3. A pessoa revisa o plano uma única vez, podendo editar, aprovar ou pedir nova geração.
+4. O sistema produz os vídeos em paralelo, aplica sincronização labial e executa QC.
+5. Os itens aprovados são montados com FFmpeg e ficam disponíveis para download.
 
-O orquestrador carrega suas definições a partir de perfis YAML declarativos e desacoplados:
+| Se você é... | Comece por... |
+| --- | --- |
+| Recrutador(a) | [O que este projeto demonstra](#o-que-este-projeto-demonstra) e [decisões e trade-offs](#decisões-e-trade-offs) |
+| Pessoa de produto ou não técnica | [A experiência em cinco fases](#a-experiência-em-cinco-fases) |
+| Pessoa desenvolvedora | [Como o motor funciona](#como-o-motor-funciona) e [como rodar](#como-rodar-o-projeto) |
+| Pessoa operadora | [Cotas e controle de gastos](#cotas-e-controle-de-gastos) e [diagnóstico rápido](#diagnóstico-rápido) |
 
-- **`config-mock/`** — Execução determinística local, sem chamadas externas de rede e com custo zero (ideal para testes rápidos, TDD e CI offline).
-- **`config-staging/`** — Geração mock de mídia/linguagem conectada à infraestrutura real de persistência e filas (PostgreSQL 16 com RLS, S3/R2, Outbox e Worker leases). Padrão para desenvolvimento local durável.
-- **`config/`** — Perfil live de produção com adapters de alta fidelidade:
-  - **LLM / Linguagem**: Vercel AI Gateway / OpenAI / Anthropic via `LanguageModelFactory` (`BaseChatModel`).
-  - **Criadores (Imagem & Voz)**: `OpenAIImageAdapter` (`AsyncOpenAI`) + Voice Design e TTS direto via ElevenLabs REST (`httpx.AsyncClient`).
-  - **Vídeo & Lip-sync**: Replicate (LTX-Video 2.3 Fast + LatentSync) / PrunaAI.
-  - **QC & Assembly**: Validação automatizada de áudio/vídeo e montagem determinística via FFmpeg.
-  *(Em execuções duráveis com adapters pagos, exige `ORCH_ENABLE_PAID_ADAPTERS=true`, quotas configuradas e controle transacional por `PostgresEffectLedger`.)*
+## Snapshots do sistema
 
----
+### Grafo executável no LangGraph Studio
 
-## Arquitetura e Engenharia
+Esta é a topologia realmente carregada pelo perfil `config-mock`. A linha central
+representa a jornada do lote; as setas de retorno representam pedidos de revisão. O node
+`process_item` encapsula o trabalho paralelo de cada vídeo.
 
-![UGC Orchestrator Architecture](docs/assets/architecture.png)
+![Grafo executável do UGC Orchestrator no LangGraph Studio](docs/assets/langgraph-studio.png)
 
-```mermaid
-flowchart TD
-    subgraph TopGraph [Grafo de Topo - LangGraph BatchState]
-        Config[1. Configuração] --> Concepts[Concepts Agent]
-        Concepts --> Scripts[Scripts Agent]
-        Scripts --> CreatorProfiles[Creator Profiles Agent]
-        CreatorProfiles --> Roster[Roster Materialization]
-        Roster --> VoiceCandidates[Voice Candidates: 3 Previews]
-        VoiceCandidates --> HumanGate{3. Human Gate V2: review_creative_plan}
-        HumanGate -->|Aprovado| FinalizeVoices[Finalize Voices: Voz Estável]
-        HumanGate -->|Revisão/Reroll| RerollTarget[Volta ao Stage Solicitado]
-        RerollTarget --> VoiceCandidates
-        FinalizeVoices --> FanOut[Fan-out paralelo via Send]
-    end
+Leitura rápida:
 
-    subgraph ItemGraph [Subgrafo por Item - LangGraph Item State]
-        FanOut --> Voiceover[TTS: ElevenLabs Turbo v2.5]
-        Voiceover --> VideoBase[Vídeo Base: LTX-Video 2.3 Fast 720p]
-        VideoBase --> LatentSync[Lip-sync: LatentSync]
-        LatentSync --> ProductDemo[Product Demo Clip]
-        ProductDemo --> QCGate{QC Gate & Scoring}
-        QCGate -->|Reprovado & Tentativas < Max| VideoBase
-        QCGate -->|Aprovado| Assembly[5. Montagem: FFmpeg H.264/AAC]
-        Assembly --> Upscale[Upscale / Pós-processamento]
-        Upscale --> AssembledState([Estado Terminal: assembled])
-        QCGate -->|Excedeu Limite| DropItem([Item Dropped])
-    end
+- `concepts → scripts → creator_profiles` produz o plano criativo;
+- `review` é o único ponto de decisão humana;
+- `process_item` distribui os vídeos para produção e QC;
+- `feedback` consolida o aprendizado operacional antes de `__end__`.
 
-    subgraph LangChain_Runtime [Runtime de Linguagem - LangChain]
-        LMF[LanguageModelFactory] --> LR[LanguageRuntime]
-        LR -->|generate_structured| PydanticModels[BaseModel Schemas: creative-v2]
-    end
+### Arquitetura
 
-    subgraph Security_Boundary [Fronteira de Segurança - ADR-D51]
-        SEC[SERVER_EXECUTION_CONSTRAINTS]
-        UNTRUST[UNTRUSTED_STAGE_DATA]
-    end
+![Arquitetura do UGC Orchestrator](docs/assets/architecture.png)
 
-    subgraph Paid_Protection [Proteção de Efeitos Pagos - ADR-D44/D45/D48]
-        Ledger[(PostgresEffectLedger)]
-        KillSwitch{ORCH_ENABLE_PAID_ADAPTERS}
-    end
+O **LangGraph** ocupa o centro da solução. PostgreSQL guarda estado, jobs, gates e
+controles financeiros; R2/S3 guarda os arquivos; LangChain executa apenas os agentes
+criativos; e adapters isolam os provedores de imagem, voz e vídeo.
 
-    Concepts --> LR
-    Scripts --> LR
-    CreatorProfiles --> LR
-    LR --> Security_Boundary
-    Security_Boundary --> PydanticModels
-    PydanticModels -->|Server Materialization| StageExecutor[CreativeStageExecutor]
-    VideoBase --> Paid_Protection
-    LatentSync --> Paid_Protection
-    Voiceover --> Paid_Protection
-    VoiceCandidates --> Paid_Protection
+## Decisões e trade-offs
+
+As escolhas abaixo não são “certas para todo sistema”; elas atendem às necessidades
+desta pipeline.
+
+| Decisão | O que ganhamos | O custo da escolha |
+| --- | --- | --- |
+| Um grafo explícito de estados | Execuções observáveis, retomáveis e fáceis de auditar | Mais estrutura do que uma sequência simples de funções |
+| Um único gate humano | Experiência clara e controle de gasto antes da produção | Menos aprovações intermediárias |
+| Produção paralela por item | Um vídeo com falha não precisa parar todo o lote | Exige idempotência e controle de concorrência |
+| Vídeo base e lip-sync em etapas separadas | Podemos preservar o clip base e repetir apenas a sincronização | Mais latência e duas operações de vídeo |
+| PostgreSQL como fonte canônica | Estado durável, multi-tenant e workers recuperáveis | Infraestrutura mais pesada que SQLite |
+| Ledger e cotas antes de chamadas pagas | Evita cobrança duplicada e gastos sem limite | Chamadas live duráveis dependem do banco e de configuração administrativa |
+| Perfis mock, staging e live | Desenvolvimento barato e passagem gradual para produção | É preciso manter os perfis coerentes |
+| Adapters por domínio | Trocar um provedor não altera o grafo | Cada integração precisa cumprir um contrato comum |
+
+## A experiência em cinco fases
+
+| Fase | O que acontece | Resultado visível |
+| --- | --- | --- |
+| **1. Configuração** | A campanha recebe oferta, público, plataforma, segurança e tamanho do lote | Briefing validado |
+| **2. Plano criativo** | Agentes geram conceitos, roteiros, creators e três previews de voz por creator | Plano pronto para avaliação |
+| **3. Revisão** | A pessoa aprova, edita ou solicita reroll | Uma decisão humana versionada |
+| **4. Produção e QC** | Locução, vídeo base, lip-sync e validações rodam por item | Itens aprovados, repetidos ou descartados |
+| **5. Montagem** | FFmpeg alinha, normaliza e combina áudio e vídeo | Artefato final `assembled` |
+
+Os detalhes internos continuam disponíveis para diagnóstico, mas a API/UI V2 apresenta
+somente essas cinco fases. O usuário acompanha a campanha, não cada chamada de provedor.
+
+## O que este projeto demonstra
+
+- **Arquitetura orientada a workflow:** estados, desvios, fan-out, interrupção humana e
+  retomada são modelados no LangGraph.
+- **Integração responsável com IA:** dados do usuário são tratados como não confiáveis,
+  respostas de agentes são validadas por schema e efeitos pagos passam por guardrails.
+- **Engenharia de confiabilidade:** jobs têm lease, chamadas externas são idempotentes,
+  falhas parciais são isoladas e retries preservam a auditoria.
+- **Controle operacional:** custos são reservados antes da chamada, há cotas por
+  organização e o sistema diferencia falha definitiva de resultado incerto.
+- **Multi-tenancy real:** PostgreSQL aplica RLS e a identidade da organização é definida
+  pelo servidor.
+- **Qualidade verificável:** mocks determinísticos, cassettes do LLM Judge, TDD estrito e
+  cobertura mínima configurada em 97%.
+- **Separação de responsabilidades:** linguagem, mídia, avaliação, persistência, filas e
+  interface podem evoluir sem transformar o grafo em um módulo monolítico.
+
+## Como o motor funciona
+
+### Fluxo do lote
+
+```text
+briefing
+  → conceitos
+  → roteiros
+  → perfis de creator
+  → imagens e candidatos de voz
+  → revisão humana
+  → produção paralela
+  → QC e tentativas controladas
+  → montagem
+  → assembled
 ```
 
-### 1. Runtime de Linguagem Nativo LangChain (ADR-D46 & ADR-D51)
-- **`LanguageModelFactory`**: Instanciação centralizada e fail-fast de modelos `BaseChatModel` (`init_chat_model`) para mock, Anthropic, OpenAI e AI Gateways, unificando credenciais, timeouts, retries e observabilidade.
-- **Contrato de Structured Output com Pydantic**: `LanguageRuntime.generate_structured` retorna exclusivamente instâncias tipadas do schema `creative-v2` (`ConceptAgentOutput`, `ScriptAgentOutput`, `CreatorAgentOutput`), desacoplando a geração do modelo da materialização server-side.
-- **Fronteira Trusted / Untrusted**: Separação estrita entre `SERVER_EXECUTION_CONSTRAINTS` (contagens, IDs e regras server-owned) e `UNTRUSTED_STAGE_DATA` (input do usuário). O conteúdo do usuário nunca entra no system prompt, logs, APIs públicas ou traces.
-- **Whitelisting Restrito de Agentes**: Apenas os 3 estágios criativos aceitam `executor: agent` (`concepts`, `scripts`, `creator_profiles`). Mídia, QC, storage e montagem operam como etapas determinísticas (`executor: tool`).
+O grafo de topo trabalha com `BatchState`. Depois da aprovação, `Send` cria um
+subgrafo para cada item. Conditional edges escolhem tiers de vídeo e decidem se o item
+volta ao gerador, segue para montagem ou é descartado após esgotar as tentativas.
 
-### 2. Vídeo em 2 Estágios & Lip-sync LatentSync (ADR-D4, ADR-D45, ADR-D47/D51)
-- **Geração 2-Estágios**: O talking-head é produzido primeiro como vídeo base mudo em 720p via LTX-Video 2.3 Fast (Replicate), imediatamente persistido no storage canônico (R2/S3/local), e em seguida recebe sincronização labial perfeita com a locução via LatentSync.
-- **Resiliência e Idempotência**: Predictions no Replicate possuem tracking durável no ledger de efeitos, cancelamento automático ao expirar timeout e reconciliação idempotente via polling ou webhook HMAC assinado.
-- **Isolamento de Falha Parcial**: Falhas de provedores externos encerram apenas o subgrafo do item afetado (`FailureDetail`), permitindo que os demais itens do lote completem com sucesso.
+Há exatamente um interrupt público: `review_creative_plan`. Em execução durável, ele
+vive em `run_gates` e é resolvido com `gate_id` e `version`, impedindo que uma aba
+antiga aprove uma revisão já substituída.
 
-### 3. Adapters de Domínio e Ledger de Efeitos Pagos (ADR-D44, ADR-D45, ADR-D48)
-- **`CompositeAdapter`**: Isolado exclusivamente para operações de domínio e mídia.
-- **`OpenAIImageAdapter`**: Utiliza o SDK oficial `AsyncOpenAI` com client injetável para testes, suporte a AI Gateway e retries de transporte customizados.
-- **ElevenLabs Voice Design & TTS**: Operações REST otimizadas com `httpx.AsyncClient`, garantindo prevenção rigorosa contra dupla cobrança em erros de transporte.
-- **`PostgresEffectLedger`**: Ledger transacional no PostgreSQL que protege chamadas a provedores pagos com controle de idempotência determinística e limites por quota:
-  - `openai_image_units` — Unidades de geração de imagem.
-  - `elevenlabs_voice_design_chars` — Caracteres consumidos no Voice Design.
-  - `elevenlabs_voice_slots` — Slots de vozes criadas.
-  - `elevenlabs_tts_chars` — Caracteres sintetizados em áudio de locução.
-  - `replicate_video_seconds` — Segundos de vídeo gerados.
-- **Sanitização de Resultados**: O ledger armazena apenas URIs canônicas e metadados leves (nunca payloads base64 volumosos ou URLs efêmeras pré-assinadas).
+### Linguagem e agentes criativos
 
-### 4. Checkpointing, Concorrência e Multi-Tenancy
-- **Checkpointer Assíncrono**: `AsyncPostgresSaver` com **Row Level Security (RLS)** por `organization_id` no PostgreSQL 16 via SQLAlchemy 2.0 Async ORM.
-- **Outbox Pattern & Worker Leases**: Concorrência otimista com `FOR UPDATE SKIP LOCKED` e renovação periódica de leases a cada 30 segundos.
-- **Runtime Contract Canônico**: Persistência de fingerprint determinístico dos runs para validar compatibilidade do runtime antes de chamadas pagas.
-- **Forks Limpos em Retry**: O retry de uma campanha com falha cria um novo `run_id` (`web-...`), preservando o histórico completo para auditoria.
+Somente `concepts`, `scripts` e `creator_profiles` podem operar como agentes. Eles
+usam LangChain, `create_agent`, `ToolStrategy` e saída estruturada Pydantic no schema
+`creative-v2`.
 
-### 5. Módulo de Avaliação Determinístico (ADR-D47)
-- Localizado em `src/orchestrator/evaluation/` (`GatewayJudge`, `Cassette`, evaluators), o LLM-as-judge opera offline via cassettes pré-gravados em `tests/cassettes/`, com revalidação opt-in contra gateways reais via flag `--live`. Totalmente desacoplado do runtime de produção.
+Contagens, IDs, modelos permitidos, budgets e regras de segurança pertencem ao servidor.
+O briefing é serializado como `UNTRUSTED_STAGE_DATA`; ele não é concatenado ao system
+prompt. API, SSE, logs e traces podem mostrar versão e hash do prompt, nunca seu corpo.
+
+### Produção de mídia
+
+No perfil live:
+
+1. a imagem do creator é gerada por GPT Image via Vercel AI Gateway;
+2. o ElevenLabs Voice Design cria candidatos de voz;
+3. após a revisão, o candidato escolhido vira uma voz estável;
+4. ElevenLabs produz a locução do roteiro;
+5. Replicate produz o vídeo base e executa o LatentSync;
+6. o QC valida os artefatos e controla novas tentativas;
+7. FFmpeg/ffprobe monta o resultado em H.264/AAC.
+
+`CompositeAdapter` cuida somente dos domínios de mídia
+(`creator`, `video`, `qc`, `assembly` e `upscale`). O runtime de linguagem e o
+LLM Judge ficam separados para evitar acoplamento entre geração criativa e avaliação.
+
+### Estado, filas e arquivos
+
+| Responsabilidade | Implementação |
+| --- | --- |
+| Orquestração | LangGraph `StateGraph` assíncrono |
+| Checkpoint local | SQLite com `AsyncSqliteCompatSaver` |
+| Checkpoint durável | PostgreSQL com `AsyncPostgresSaver` |
+| Runs, jobs, gates, eventos e cotas | PostgreSQL 16 com RLS |
+| Arquivos de imagem, áudio e vídeo | Disco local, Cloudflare R2 ou S3 |
+| Wake-up de workers | PostgreSQL, Cloudflare Queue ou SQS |
+| API e eventos | FastAPI + REST + SSE |
+| Dashboard | React 19 + TypeScript + Vite + Tailwind CSS |
+| Observabilidade | Logs estruturados e tracing opcional no LangSmith |
+
+Cloudflare Queue e SQS servem apenas como wake-up. O job canônico permanece no
+PostgreSQL, portanto perder uma mensagem não significa perder a campanha.
+
+### Falhas, retry e idempotência
+
+- Cada efeito pago recebe uma chave determinística.
+- Repetir a mesma chave e o mesmo payload reaproveita o resultado conhecido.
+- Timeout depois do envio vira efeito `uncertain`, que exige reconciliação em vez de
+  uma segunda cobrança cega.
+- Falha definitiva não faturada libera a reserva de cota uma única vez.
+- Uma falha de vídeo afeta somente aquele item; os demais podem concluir.
+- O retry manual de uma campanha falhada sempre cria outro `run_id`. O run antigo
+  continua em `error` como histórico.
+
+### Perfis de configuração
+
+Os arquivos em `config-base/` definem a base comum. Cada perfil contém somente seus
+overrides.
+
+| Perfil | Geração | Infraestrutura | Custo externo | Uso recomendado |
+| --- | --- | --- | --- | --- |
+| `config-mock/` | Toda mock e determinística | SQLite/disco ou stack local | Zero | Desenvolvimento, CI e demonstração |
+| `config-staging/` | Toda mock | PostgreSQL, R2/fila e runner reais | Zero em geração | Validar operação durável |
+| `config/` | Adapters reais | Infraestrutura durável | Sim | Canário e produção controlada |
+
+Em execução durável, selecionar `config/` não basta para gastar: os adapters pagos
+também exigem credenciais, `ORCH_ENABLE_PAID_ADAPTERS=true`, ledger e cotas válidas.
+
+### Dashboard
+
+A SPA permite criar campanhas, acompanhar a timeline por SSE, revisar conceitos e
+roteiros, escolher vozes, inspecionar creators, acompanhar jobs, revisar vídeos/QC e
+consultar integrações. O calendário representa planejamento; ele não publica conteúdo.
+
+### Estrutura do repositório
+
+```text
+config-base/              configuração compartilhada
+config*/                  overrides mock, staging e live
+src/orchestrator/
+  graph/                  estado, routing, builder e checkpointer
+  nodes/                  fases e subgrafos da pipeline
+  adapters/               integrações mock e reais
+  evaluation/             LLM Judge e cassettes
+  db/                     PostgreSQL, RLS, jobs, gates e Alembic
+  storage/                disco local, R2, S3 e dual-write
+  web/                    FastAPI, endpoints V2 e SSE
+  tools/                  efeitos tipados chamados pelos nodes
+front/                    dashboard React/Vite
+infra/                    Cloudflare, Neon e AWS com OpenTofu
+deploy/                   assets de Worker e containers
+tests/                    testes e cassettes
+docs/                     decisões, progresso e runbooks
+```
+
+## Limites atuais
+
+- Distribuição e postagem não fazem parte do motor.
+- O perfil mock prova comportamento e integração, não qualidade visual dos provedores.
+- Qualidade, latência e disponibilidade do perfil live também dependem dos serviços
+  externos.
+- O servidor in-memory do LangGraph Studio é destinado a desenvolvimento, não produção.
+- Um item que excede as tentativas de QC é descartado de forma explícita; não é
+  apresentado como vídeo aprovado.
 
 ---
 
-## Setup e Instalação
+## Como rodar o projeto
 
 ### Pré-requisitos
-- Python 3.12+
-- `uv` (gerenciador de pacotes e ambientes virtuais Python)
-- Node.js 20+ LTS e `npm` (para o dashboard web em `front/`)
-- FFmpeg & ffprobe instalados no sistema
-- Docker & Docker Compose (para ambiente local com PostgreSQL 16)
 
-### Instalação Rápida
+- Docker com Docker Compose V2;
+- Python 3.12 recomendado, embora o pacote declare compatibilidade a partir do 3.11;
+- `uv`;
+- Node.js 20+ e npm;
+- FFmpeg e ffprobe para montagem real.
+
+### Instalação local
 
 ```bash
-# 1. Clone o repositório e configure o ambiente sincronizado com o lockfile
 uv venv --python 3.12
 uv sync --frozen --all-extras
 
-# 2. Instale dependências e compile o frontend SPA
-cd front && npm install && npm run build && cd ..
+cd front
+npm ci
+cd ..
+
+cp .env.example .env
 ```
 
----
+Nunca faça commit do arquivo `.env`.
 
-## Desenvolvimento Local com `./scripts/dev-local`
+### Opção A — demonstração completa, sem chaves e sem custo
 
-O utilitário `./scripts/dev-local` gerencia a stack completa em containers (PostgreSQL 16 com RLS, migrações Alembic, API FastAPI com Runner embutido e dev server Vite com hot-reload):
+Este é o melhor primeiro contato com o projeto:
 
 ```bash
-# 1. Configure as variáveis de ambiente
-cp .env.example .env
-
-# 2. Suba a infraestrutura de desenvolvimento local
+ORCH_DEV_CONFIG_DIR=config-mock \
+ORCH_DEV_STORAGE_BACKEND=local \
 ./scripts/dev-local up
 ```
 
-Endpoints disponíveis:
-- **Dashboard Web**: `http://localhost:5173`
-- **API FastAPI / Healthcheck**: `http://localhost:8000/readyz`
-- **PostgreSQL Local**: `127.0.0.1:55432`
+Depois do boot:
 
-### Gestão de Quotas Locais (Perfil Live)
-Para testar chamadas reais no perfil `config/`:
+- Dashboard: http://localhost:5173
+- API/healthcheck: http://localhost:8005/readyz
+- PostgreSQL: `127.0.0.1:55432`
+
+Crie uma campanha pelo dashboard, aguarde **Revisão**, aprove o plano e acompanhe os
+itens até **Montagem**. Todos os resultados são determinísticos e nenhuma API paga é
+chamada.
+
+### Opção B — infraestrutura durável com geração mock
+
 ```bash
-# Configurar quotas de voz (ElevenLabs)
-./scripts/dev-local quotas \
-  --design-chars 500 \
-  --voice-slots 2 \
-  --tts-chars 1000
-
-# Configurar quota de vídeo (Replicate)
-./scripts/dev-local video-quota --seconds 120
-
-# Configurar quota de imagens (OpenAI)
-./scripts/dev-local image-quota --units 10
+# Usa PostgreSQL real e storage local:
+ORCH_DEV_CONFIG_DIR=config-staging \
+ORCH_DEV_STORAGE_BACKEND=local \
+./scripts/dev-local up
 ```
 
-Para encerrar e gerenciar o ambiente:
+Para validar R2, preencha `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`,
+`R2_SECRET_ACCESS_KEY` e `R2_BUCKET` no `.env`, remova o override de storage e rode:
+
 ```bash
-# Pausar containers
+ORCH_DEV_CONFIG_DIR=config-staging ./scripts/dev-local up
+```
+
+Esse modo testa jobs, gates, eventos, checkpoints e retomada no PostgreSQL sem consumir
+créditos de geração.
+
+### Opção C — perfil live
+
+Preencha no `.env`, no mínimo:
+
+- `AI_GATEWAY_API_KEY`;
+- `REPLICATE_API_TOKEN`;
+- `ELEVENLABS_API_KEY`;
+- as quatro credenciais de R2.
+
+Em seguida:
+
+```bash
+./scripts/dev-local up
+```
+
+Comece com uma campanha de batch 1. O perfil live faz chamadas cobradas; confirme
+créditos e limites nos provedores antes de habilitá-lo.
+
+### API e frontend sem Docker
+
+Para uma execução leve com SQLite e arquivos locais:
+
+```bash
+# Terminal 1
+ORCH_CONFIG_DIR=config-mock uv run orchestrator api --port 8000 --reload
+
+# Terminal 2
+cd front
+npm run dev
+```
+
+Nesse modo, o frontend fica em http://localhost:5173 e usa a API em
+http://127.0.0.1:8000.
+
+## Cotas e controle de gastos
+
+As cotas deste projeto são **guardrails internos gravados no PostgreSQL e separados por
+organização**. Elas não representam saldo, assinatura ou rate limit da ElevenLabs,
+Replicate, OpenAI ou Vercel. Uma chamada precisa passar pelas duas camadas: limite local
+e disponibilidade no provedor.
+
+### O que cada cota mede
+
+| Bucket | Unidade reservada |
+| --- | --- |
+| `openai_image_units` | Uma unidade por geração de imagem |
+| `elevenlabs_voice_design_chars` | Caracteres do texto usado no preview de Voice Design |
+| `elevenlabs_voice_slots` | Um slot por voz candidata finalizada |
+| `elevenlabs_tts_chars` | Caracteres do roteiro enviados ao TTS |
+| `replicate_video_seconds` | Segundos solicitados nas operações de vídeo e lip-sync |
+
+O consumo é acumulado no ledger. Antes de chamar o provedor, o sistema testa:
+
+```text
+consumo atual + nova reserva <= limite configurado
+```
+
+Por isso:
+
+- `quota de 'elevenlabs_voice_design_chars' excedida: 524/500` significa que o
+  consumo acumulado mais o novo preview chegaria a 524 caracteres, mas o limite local é
+  500;
+- `quota de 'elevenlabs_voice_slots' excedida: 3/2` significa que a próxima
+  finalização exigiria o terceiro slot, mas o limite local é 2.
+
+Esses erros acontecem **antes da nova chamada paga**. Para resolvê-los, aumente o limite
+de forma consciente, reduza batch/rerolls ou reutilize creators já aprovados.
+
+### Valores iniciais do ambiente de desenvolvimento
+
+Na primeira migração local, buckets ainda inexistentes recebem:
+
+| Bucket | Limite inicial |
+| --- | ---: |
+| `openai_image_units` | 50 |
+| `elevenlabs_voice_design_chars` | 100.000 |
+| `elevenlabs_voice_slots` | 50 |
+| `elevenlabs_tts_chars` | 200.000 |
+| `replicate_video_seconds` | 300 |
+
+Valores já configurados não são sobrescritos automaticamente.
+
+### Configurar cotas no Docker
+
+Com a API live já rodando, abra outro terminal:
+
+```bash
+./scripts/dev-local quotas \
+  --design-chars 100000 \
+  --voice-slots 50 \
+  --tts-chars 200000
+
+./scripts/dev-local image-quota --units 50
+./scripts/dev-local video-quota --seconds 300
+```
+
+Os comandos atualizam o teto, mas **não zeram o consumo existente**. O sistema também
+recusa reduzir uma cota para menos do que já foi consumido. Isso preserva a auditoria e
+evita transformar uma alteração administrativa em apagamento contábil.
+
+Planeje o limite considerando quantidade de creators, rerolls, caracteres dos roteiros,
+duração dos clips e possíveis tentativas de QC. Para canários, prefira batch 1 e aumentos
+graduais.
+
+## Testes e qualidade
+
+```bash
+# Suíte completa; o proxy revela a saída que o hook do rtk pode colapsar
+rtk proxy python -m pytest
+
+# Judge offline por cassette
+rtk proxy python -m pytest tests/test_judge_eval.py
+
+# Judge real, opt-in
+rtk proxy python -m pytest tests/test_judge_eval.py --live
+
+# Lint
+uv run ruff check src tests
+
+# Frontend
+cd front
+npm run typecheck
+npm run build
+```
+
+Testes PostgreSQL exigem um servidor disponível em `127.0.0.1:5432`. Falha por
+ausência dessa infraestrutura não autoriza relaxar asserções.
+
+## Encerrar ou limpar o ambiente
+
+```bash
+# Encerra os containers e preserva os volumes
 ./scripts/dev-local down
 
-# Resetar completamente banco e volumes locais
+# Remove containers e volumes locais; exige confirmação explícita
 ./scripts/dev-local reset --yes
 ```
 
----
+`reset --yes` remove o banco e os volumes Docker locais. Ele não apaga o bucket R2.
 
-## Dashboard Web ("Kinetic Command")
+## Diagnóstico rápido
 
-Interface SPA moderna desenvolvida em **React 19 + TypeScript + Vite + Tailwind CSS** localizada em `front/`, conectada à API REST e stream SSE em tempo real via **TanStack Query**.
+| Sintoma | Causa provável | Ação |
+| --- | --- | --- |
+| `permission denied ... /var/run/docker.sock` | A sessão atual ainda não recebeu o grupo `docker` | Encerre/login novamente ou use `newgrp docker`; confirme com `docker ps` sem `sudo` |
+| API Docker não responde em `:8000` | A porta interna 8000 é publicada como 8005 | Use http://localhost:8005/readyz |
+| Erro `N/M` de quota | A nova reserva ultrapassa o teto local | Consulte o bucket, ajuste a cota ou reduza a campanha |
+| `latentsync_audio_missing` | O lip-sync não recebeu um artefato de áudio utilizável | Verifique a locução/URI canônica e os logs do item; o clip base permanece disponível |
+| Run falhou e precisa de retry | Runs falhos são históricos imutáveis | Use o retry da UI, que cria outro `run_id` |
 
-Compreende 12 visões operacionais:
-1. **Dashboard**: Visão executiva com métricas consolidadas, throughput e campanhas ativas.
-2. **Campaigns**: Lista e monitoramento de todas as execuções e status da pipeline.
-3. **Campaign Detail**: Painel detalhado do run, timeline em tempo real, visualização do **Human Gate V2** (com 3 previews de áudio por criador, seleção e reroll) e retry manual seguro.
-4. **Create Wizard**: Wizard guiado para parametrização de novas campanhas.
-5. **Concepts**: Galeria de conceitos criativos gerados e ângulos de marketing.
-6. **Scripts**: Roteiros completos gerados e associados a cada conceito.
-7. **Creators Library**: Catálogo de personas visuais e perfis de voz gerados.
-8. **Job Queue**: Monitoramento de jobs duráveis, leases e status do worker runner.
-9. **Video Review & QC**: Central de inspeção de vídeos gerados, clips intermediários e relatórios de conformidade de QC.
-10. **Publishing Calendar**: Calendário de agendamento e previsão de entregas.
-11. **Analytics**: Desempenho criativo e telemetria de custos por etapa.
-12. **Integrations & Settings**: Status de conexões com provedores, quotas e configurações gerais.
-
-Comandos úteis do frontend:
-```bash
-cd front
-npm run typecheck    # Checagem estática de tipos TypeScript
-npm run build        # Build de produção para front/dist/
-npm run dev          # Dev server Vite com proxy para a API (:8000)
-```
-
----
-
-## CLI Operacional (`orchestrator`)
-
-O executável `orchestrator` fornece comandos operacionais e administrativos:
+## CLI operacional
 
 ```bash
-# Inicia a API REST/SSE V2
-orchestrator api --port 8000
-
-# Consome exatamente um job durável da fila PostgreSQL (--once é obrigatório)
 orchestrator runner --once
-
-# Serviços de container / OCI
-orchestrator runner-service
-orchestrator sqs-runner
-
-# Banco de dados e migrações
 orchestrator migrate
-orchestrator import-legacy --apply
-orchestrator db org-create --slug acme --name "Acme Corp"
-orchestrator db membership-grant --organization-slug acme --user-subject "user@acme.com" --role admin
-orchestrator db set-provider-quota --provider replicate_video_seconds --limit-units 300
-orchestrator db set-voice-quota --bucket elevenlabs_voice_design_chars --limit-units 100000
-
-# Operações, diagnóstico e armazenamento
 orchestrator ops inspect-run <run_id>
-orchestrator ops maintain --purge-expired
+orchestrator ops maintain
 orchestrator storage migrate-run <run_id>
 ```
 
----
+## Documentação de referência
 
-## Testes e Qualidade (TDD Estrito)
-
-O projeto segue TDD estrito com a regra inegociável de **nunca afrouxar asserções ou mascarar falhas**:
-
-```bash
-# Executar a suíte de testes unitários e de integração
-uv run pytest --no-cov
-
-# Executar testes específicos de runtime, executor e tracing
-uv run pytest --no-cov tests/test_stage_executor.py tests/test_language_runtime.py tests/test_tracing_coverage.py
-
-# Executar avaliação do LLM Judge (offline via cassettes)
-uv run pytest --no-cov tests/test_judge_eval.py
-
-# Reavaliar e regravar cassettes contra o gateway real (opt-in)
-uv run pytest --no-cov tests/test_judge_eval.py --live
-
-# Verificação estática e linting
-uv run ruff check src tests
-```
-
----
-
-## Documentação de Referência
-
-- [`AGENTS.md`](AGENTS.md) — Regras de desenvolvimento, convenções de código e diretrizes do agente.
-- [`Context.md`](Context.md) — Visão de negócio e requisitos da pipeline de AI UGC.
-- [`docs/DECISIONS.md`](docs/DECISIONS.md) — Registro de Decisões Arquiteturais (ADRs D1 a D51).
-- [`docs/PROGRESS.md`](docs/PROGRESS.md) — Painel de entregas recentes e índice de mudanças.
-- [`docs/DEMO.md`](docs/DEMO.md) — Roteiro de demonstração ponta a ponta e saídas esperadas.
+- [Context.md](Context.md) — problema de negócio e requisitos;
+- [decisões arquiteturais](docs/DECISIONS.md) — ADRs e justificativas;
+- [progresso](docs/PROGRESS.md) — estado atual e entregas recentes;
+- [AGENTS.md](AGENTS.md) — convenções de engenharia e contribuição.

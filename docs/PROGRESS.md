@@ -25,6 +25,8 @@ novas entregas usam uma página própria em `docs/progress/changes/`.
 
 ## Últimas 10 entregas
 
+- [README orientado a públicos técnicos e não técnicos](progress/changes/2026-09-03-readme-multi-audience-guide.md) — visão por público, snapshots e trade-offs no início, com execução, cotas e diagnóstico reunidos no guia operacional final.
+- [Captura do grafo no LangGraph Studio](progress/changes/2026-09-03-langgraph-studio-graph-screenshot.md) — README agora mostra a topologia executável completa, com gate de revisão, loops e fan-out para o subgrafo por item.
 - [Recuperação automática da API após falhas transitórias do Docker DNS](progress/changes/2026-08-31-compose-api-dns-resilience.md) — serviço `api` usa `restart: unless-stopped`, publica `8005:8000` e possui contrato automatizado da configuração efetiva do Compose.
 - [MVP de Login via Cloudflare Access com Convites por E-mail e Claim Atômico](progress/changes/2026-08-31-cloudflare-access-login-mvp.md) — tabela de convites, RLS restrito a owner/admin, claim atômico via SECURITY DEFINER com validação de contexto, owner-bootstrap idempotente, rotas /api/v2/invitations, SessionBoundary e exclusão de chaves sensíveis da persistência frontend.
 - [Separação de papéis PostgreSQL e bootstrap no Docker Compose](progress/changes/2026-08-29-postgres-role-separation.md) — migrador `orchestrator` com `BYPASSRLS`, runtime `orchestrator_runtime` com `NOBYPASSRLS`, serviço one-shot `db-roles` no Compose, preflight check na migração 0012 e isolamento de tenant 100% verificado.
@@ -33,8 +35,6 @@ novas entregas usam uma página própria em `docs/progress/changes/`.
 - [Injeção de repositório de artifacts e paridade no benchmark](progress/changes/2026-08-28-artifact-repository-and-benchmark-replay-fixes.md) — `run_pipeline` mantém repositório aberto e injeta no grafo sem criar SQLite indevido; live e replay no benchmark preservam drafts inválidos e `structural_reason` idênticos.
 - [Seleção de modelo por campanha para roteiros (DeepSeek)](progress/changes/2026-08-26-per-campaign-script-model-selection.md) — suporte a `script_model` por campanha com validação server-side contra `allowed_models` no `agents.yaml` e whitelist do DeepSeek V4.
 - [Benchmark isolado de modelos para scripts](progress/changes/2026-08-26-script-model-benchmark.md) — harness opt-in (`--live`) que compara deepseek/gemini/qwen com judge fixo claude-opus-5 via cassette, com custo estimado e razão score/custo.
-- [Correções pós-revisão da refatoração estrutural](progress/changes/2026-08-25-refactor-review-fixes.md) — topologia runtime cobre tiers customizados de ponta a ponta, contratos de dict/gênero foram corrigidos e o storage R2 ficou seguro entre loops e cancelamentos.
-- [Divisão do web/server.py em módulos](progress/changes/2026-08-25-server-split.md) — server.py de 2.253 para 625 linhas: events, run_executor, RunRegistry injetável e rotas por domínio, com gate dual-mode e payloads preservados.
 
 ## Índice do histórico
 
